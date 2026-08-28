@@ -1,0 +1,15 @@
+# Local operator state — never belongs in the repository
+.heinzel/
+*.local
+etc/*.conf
+!etc/*.conf.in
+!etc/heinzel.conf.example
+
+# Generated from templates at install time
+etc/*.plist
+etc/pf-travel.conf
+etc/sudoers-diag
+etc/sudoers-ticket
+
+# macOS
+.DS_Store

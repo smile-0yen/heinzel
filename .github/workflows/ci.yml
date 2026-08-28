@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  shell:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: bash version (must be the stock 3.2)
+        run: /bin/bash --version | head -1
+
+      - name: syntax check under bash 3.2
+        run: |
+          found=0
+          while IFS= read -r f; do
+            found=1
+            /bin/bash -n "$f" || exit 1
+          done < <(find bin lib tests -type f 2>/dev/null)
+          if [ "$found" -eq 0 ]; then
+            echo "no shell sources yet (design phase) — skipping"
+          fi
+
+      - name: shellcheck
+        run: |
+          if find bin lib tests -type f 2>/dev/null | grep -q .; then
+            brew install shellcheck
+            shellcheck --shell=bash --severity=warning $(find bin lib tests -type f)
+          else
+            echo "no shell sources yet (design phase) — skipping"
+          fi
+
+      - name: tests
+        run: |
+          if [ -x tests/test.sh ]; then
+            tests/test.sh
+          else
+            echo "no tests yet (design phase) — skipping"
+          fi
