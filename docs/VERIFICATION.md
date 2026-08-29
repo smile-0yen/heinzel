@@ -119,8 +119,10 @@ Reversible with `hzl uninstall`.
 
 ## Phase 3 — the first real engine call
 
-**This is the largest untested area.** Every run so far has been a dry run; no
-API call has ever been made by this code.
+First passed on 2026-08-30, after two rounds of fixes that only a real run
+could have surfaced (`docs/DESIGN.md` §4.5 and §4.6). Run it again on your own
+backlog: the value is in the checking, not in the record of it having once
+worked.
 
 Seed the scratch backlog with something small and objectively verifiable:
 

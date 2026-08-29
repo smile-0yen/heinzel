@@ -822,6 +822,11 @@ cmd_doctor() {
     printf "       'hzl on' refuses to start without it, because launchd runs with cwd=/\n"
   else
     doc_ok "working directory ${w}"
+    case ${b} in
+      "${w}"/*) ;;
+      *) doc_bad "the backlog is outside the working directory, so the agent cannot update it"
+         printf '       backlog %s\n       workdir %s\n' "${b}" "${w}" ;;
+    esac
     if [ -r "${b}" ]; then
       doc_ok "${b}: $(backlog_count "${b}" " ") todo, $(backlog_count "${b}" "~") in progress, $(backlog_count "${b}" x) done, $(backlog_count "${b}" "!") blocked"
     else
@@ -907,10 +912,13 @@ generate_settings() {
   # __HOME__ as well as the rest: the credential denials are written out in
   # full rather than with a tilde, so they do not depend on permission rules
   # performing tilde expansion - a behaviour this project has not verified.
-  sed -e "s|__WORKDIR__|${workdir}|g" \
-      -e "s|__HEINZEL_HOME__|${HEINZEL_HOME}|g" \
-      -e "s|__HEINZEL_ROOT__|${HEINZEL_ROOT}|g" \
-      -e "s|__HOME__|${HOME}|g" \
+  # An absolute path in a Read/Edit rule needs two leading slashes: one slash
+  # anchors at the settings file's own location, which silently matches
+  # nothing. The paths are anchored here so the template cannot get it wrong.
+  sed -e "s|__WORKDIR_ABS__|//${workdir#/}|g" \
+      -e "s|__HEINZEL_HOME_ABS__|//${HEINZEL_HOME#/}|g" \
+      -e "s|__HEINZEL_ROOT_ABS__|//${HEINZEL_ROOT#/}|g" \
+      -e "s|__WORKDIR__|${workdir}|g" \
       "${HEINZEL_ROOT}/etc/heinzel-settings.json.in" >"${out}" || return 1
   jq -e . "${out}" >/dev/null 2>&1 || {
     err "generated ${out} is not valid JSON"

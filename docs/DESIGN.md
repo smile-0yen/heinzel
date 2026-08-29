@@ -272,6 +272,37 @@ write tools and run under codex's `read-only` sandbox: **take the capability
 away at the kernel, not at the classifier.** It simply had not been applied to
 the executor.
 
+### 4.6 Two ways a permission rule is accepted and then ignored
+
+Fixing §4.5 produced a second failure, and the two share a shape worth naming:
+**a permission rule can be syntactically valid, load without complaint, and
+never be consulted.** There is no error, and the only symptom is behaviour that
+does not match the file. Both of these were live in this repository:
+
+- **A path rule must name `Read` or `Edit`.** A path written for `Write`,
+  `NotebookEdit` or `Glob` is accepted and never checked. Every `Write(...)`
+  rule here — the working-directory allow and four denials — was inert. `Edit`
+  covers every built-in tool that changes a file, `Write` included.
+- **An absolute path needs two leading slashes.** One slash anchors at the
+  settings file's own location, so `/Users/you/work/**` is a *relative* pattern
+  matching nothing. `//Users/you/work/**` is the absolute form.
+
+The first real run failed on the combination: the working-directory allow rule
+was doubly inert, `dontAsk` correctly denied everything unmatched, and the
+agent could not create a file in the directory it was supposed to be working
+in. It reported that honestly and blocked the task, which is the behaviour the
+prompt asks for and the only reason this was easy to diagnose.
+
+The credential denials survived only because they were written twice, once as
+`~/.ssh/**` and once as an unanchored absolute path. The `~/` twin was doing
+all the work. That redundancy was added as belt and braces against an
+*unverified* assumption; it turned out to be load-bearing against a *wrong*
+one.
+
+The generator now anchors the paths itself rather than trusting the template,
+and the template carries all three rules in a comment at the top. Nothing here
+is checkable by reading: it took `hzl run-now` against a real backlog.
+
 Layer 3 exists because of a documented `claude --print` behaviour, not a hypothetical one. Layer 2
 is validated with `jq -e .` before every run: a silently-ignored deny list is the worst available
 failure, so an invalid settings file aborts the run (principle 6).

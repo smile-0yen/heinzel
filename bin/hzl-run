@@ -422,7 +422,7 @@ fi
   fi
 } >>"${NOTES}"
 
-jq -n \
+jq -n -c \
   --arg run_id "${RUN_ID}" --arg trigger "${TRIGGER}" \
   --arg started_at "$(iso_at "${STARTED}")" --argjson started_at_epoch "${STARTED}" \
   --arg ended_at "$(iso_at "${ENDED}")" --argjson duration_sec "$((ENDED - STARTED))" \
