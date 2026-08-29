@@ -408,6 +408,17 @@ Carried from macmode, measured on this OS version:
 - `socketfilterfw --setblockall` is accepted and ignored. Block-all is done with a pf anchor that
   preserves Apple's own anchors, and the result is read back with `pfctl -s info`.
 - `sysadminctl -screenLock` returns 0 on failure and needs the user's password on stdin.
+- On the target machine a *delayed* screen lock is refused outright:
+  `-screenLock 300` fails with `MKBDeviceSetGracePeriod error -14` while
+  `immediate` is accepted. That looks like a policy on the machine rather than
+  a bad argument, so Heinzel reports it, names the configuration key that stops
+  it retrying, and does not treat it as its own failure.
+- **`pfctl` cannot be read at all without root.** This one was worse than a
+  quirk: the read-back in the firewall setter used the unprivileged reader, so
+  it could only ever answer `unknown`, and the transition reported success
+  without having verified anything. A verification step that cannot fail is not
+  a verification step. It now reads back through `sudo -n`, and an unreadable
+  result is a reported failure rather than a shrug.
 
 Both setters are therefore wrapped in the same shape: **set, read back, compare, report the
 mismatch.** Never trust the exit code. This is the mechanical form principle 6 takes here, and it

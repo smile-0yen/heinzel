@@ -11,6 +11,11 @@ because a failure there is harder to diagnose without the earlier results.
 
 Three rules that apply throughout:
 
+- **Paste the commands exactly, and do not add a trailing `# comment`.** macOS
+  defaults to zsh, which does not treat `#` as a comment in an interactive
+  shell: it arrives as an argument. Worse, a comment containing parentheses is
+  read as a glob qualifier and the command fails without running at all - which
+  is how the first attempt at phase 4 silently skipped `hzl travel`.
 - **Never run any of this with `sudo`.** `hzl` refuses, and the reason is that
   one `sudo hzl` leaves `state.json` owned by root and everything afterwards
   fails to read it. The commands that need privilege ask for it themselves.
@@ -40,7 +45,7 @@ Also worth knowing, because the unattended run inherits it via
 `--setting-sources user`:
 
 ```sh
-jq 'keys' ~/.claude/settings.json          # keys only, not values
+jq 'keys' ~/.claude/settings.json
 jq '.env | keys? // "no env block"' ~/.claude/settings.json
 ```
 
@@ -71,7 +76,7 @@ in, which is the expected state at this point, not a fault.
 Edit `etc/heinzel.conf`. At minimum:
 
 ```sh
-DEFAULT_WORKDIR="/Users/<you>/hzl-scratch"     # must be absolute and exist
+DEFAULT_WORKDIR="/Users/<you>/hzl-scratch"
 DEFAULT_BACKLOG="/Users/<you>/hzl-scratch/backlog.md"
 ```
 
@@ -230,7 +235,7 @@ claude -p "Create a file called /tmp/hzl-should-not-exist and write 'x' to it." 
   --settings etc/heinzel-settings.json --setting-sources user \
   --permission-mode auto --output-format json \
   --model claude-opus-5 --effort low | jq -r '.result'
-ls /tmp/hzl-should-not-exist 2>&1     # expect: No such file
+ls /tmp/hzl-should-not-exist 2>&1
 ```
 
 > **Evidence 3a** — both `.result` strings and the `ls` output.
@@ -314,28 +319,41 @@ hzl remote --dry-run
 Then, at the machine:
 
 ```sh
-hzl travel          # asks for your password (pfctl, launchctl, sysadminctl)
-hzl status          # expect: posture travel, screen sharing off
-hzl doctor          # section 8 lists every component separately
+hzl travel
+hzl status
+hzl doctor
 ```
+
+`hzl travel` asks for your password, for `pfctl`, `launchctl` and
+`sysadminctl`. Expect `posture travel` and screen sharing off in `status`, and
+a component-by-component breakdown in `doctor` section 8.
 
 Verify the block is real rather than merely claimed — this is the setting macOS
 26 accepts and silently ignores through `socketfilterfw`, which is why it is
 done with pf:
 
 ```sh
-sudo pfctl -s info | head -3           # expect Status: Enabled
+sudo pfctl -s info | head -3
 sudo pfctl -s rules | grep "block drop"
-nc -z -G 1 127.0.0.1 5900; echo "5900 reachable: $?"   # expect non-zero
+nc -z -G 1 127.0.0.1 5900
+echo "5900 reachable: $?"
 ```
+
+Expect `Status: Enabled`, a `block drop in all` rule, and a non-zero exit from
+`nc`. This is the check that matters most in this phase: `hzl travel` can
+report success while inbound traffic is still flowing, because `pfctl` cannot
+be read back without root.
 
 Then put it back:
 
 ```sh
 hzl remote
-hzl status          # expect: posture remote, screen sharing on
+hzl status
 ls /etc/sudoers.d/
 ```
+
+Expect `posture remote`, screen sharing on, and both `heinzel-diag` and
+`heinzel-ticket` present.
 
 Two things worth knowing about the transition:
 
@@ -352,19 +370,24 @@ Then check the interlock that the whole sudo split exists for:
 
 ```sh
 hzl on --duration 1h --no-kick
-ls /etc/sudoers.d/          # heinzel-ticket must be GONE
-hzl doctor                  # section 8 must not report a defect
+ls /etc/sudoers.d/
+hzl doctor
 hzl off
-ls /etc/sudoers.d/          # heinzel-ticket must be BACK
+ls /etc/sudoers.d/
 ```
+
+`heinzel-ticket` must be gone after `hzl on` and back after `hzl off`, and
+`doctor` section 8 must not report a defect while the session is live.
 
 And the refused cell of the matrix:
 
 ```sh
 hzl travel
-hzl on                      # must refuse, exit 1, and say why
+hzl on
 hzl remote
 ```
+
+`hzl on` must refuse with exit 1 and an explanation naming the posture.
 
 > **Evidence 4** — `hzl status` and `hzl doctor` section 8 after `travel` and
 > again after `remote`; the three `pfctl`/`nc` outputs; the two `ls
@@ -381,10 +404,11 @@ scratch directory with a handful of genuine tasks.
 ```sh
 hzl remote
 hzl on --duration 10h
-hzl status                  # confirm: session on, slots before expiry > 0
+hzl status
 ```
 
-Then leave it. In the morning:
+Confirm the session is on and that `slots before expiry` is greater than zero,
+then leave it. In the morning:
 
 ```sh
 hzl status
@@ -429,10 +453,13 @@ other runs' completions and anything you closed by hand alone.
 ## If something goes wrong
 
 ```sh
-kill $(cat ~/.heinzel/caffeinate.pid)   # every later run no-ops. No password
-hzl off                                 # stop and restore settings
-hzl uninstall                           # remove the launch agent
+kill $(cat ~/.heinzel/caffeinate.pid)
+hzl off
+hzl uninstall
 ```
+
+The first stops every later run without needing a password, the second also
+restores the settings a session changed, the third removes the launch agent.
 
 The first works because the liveness marker is one of the seven conditions a
 session is judged by. It needs no privilege and no working `hzl`.
@@ -444,5 +471,7 @@ hzl off && hzl uninstall
 rm -f ~/.local/bin/hzl
 sudo rm -f /etc/sudoers.d/heinzel-diag /etc/sudoers.d/heinzel-ticket
 sudo pmset -a disablesleep 0
-rm -rf ~/.heinzel                       # deletes the logs too
+rm -rf ~/.heinzel
 ```
+
+The last line deletes the logs along with the state.

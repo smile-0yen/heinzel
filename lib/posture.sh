@@ -94,7 +94,10 @@ posture_sudoers() {
   if [ -f "${SUDOERS_DIAG}" ]; then printf remote; else printf travel; fi
 }
 
-# Root-only. Everyone else gets `unknown`, and says so rather than guessing.
+# Reading pf needs root (measured: `pfctl -s info` is denied to the user), so
+# the unprivileged answer is `unknown` and says so rather than guessing. The
+# unattended runner only ever gets this form, which is why the packet filter is
+# not one of the components that decide posture.
 posture_firewall() {
   case "$(pfctl -s info 2>/dev/null | awk '/^Status:/{print $2; exit}')" in
     Enabled)
@@ -143,6 +146,22 @@ posture_now() {
 
 POSTURE_DRY_RUN=0
 POSTURE_FAILED=0
+
+# The privileged read, used only from a transition that is already escalating.
+# -n so it never turns a verification step into a second password prompt.
+posture_firewall_priv() {
+  case "$(sudo -n pfctl -s info 2>/dev/null | awk '/^Status:/{print $2; exit}')" in
+    Enabled)
+      if sudo -n pfctl -s rules 2>/dev/null | grep -q '^block drop in all'; then
+        printf travel
+      else
+        printf remote
+      fi
+      ;;
+    Disabled) printf remote ;;
+    *) printf unknown ;;
+  esac
+}
 
 # Echo the command in dry-run mode, run it otherwise.
 prun() {
@@ -210,10 +229,17 @@ posture_set_firewall() {
   fi
 
   [ "${POSTURE_DRY_RUN}" = 1 ] && return 0
-  got=$(posture_firewall)
+  # Read it back through sudo. We have just used sudo in this same function, so
+  # the ticket is warm and -n will not prompt again. Without this the check was
+  # unreachable: the unprivileged read always says `unknown`, so a transition
+  # that silently failed to block anything still reported success.
+  got=$(posture_firewall_priv)
   case ${want}:${got} in
     block:travel|normal:remote) return 0 ;;
-    *:unknown) warn "  could not read pf state back (needs root)"; return 0 ;;
+    *:unknown)
+      posture_step_failed "could not read the packet filter back, so '${want}' is UNVERIFIED"
+      printf '    check by hand: sudo pfctl -s info\n'
+      ;;
     *) posture_step_failed "inbound blocking did not become '${want}' (reads as ${got})" ;;
   esac
 }
@@ -244,7 +270,15 @@ posture_set_screenlock() {
   got=$(screenlock_now)
   if [ "${got}" != "${want}" ]; then
     posture_step_failed "screen lock is ${got}, not ${want}"
-    say "    set it by hand: System Settings > Lock Screen > Require password"
+    # Measured on macOS 26.6: a non-zero grace period is refused with
+    # MKBDeviceSetGracePeriod error -14 while `immediate` is accepted, which
+    # looks like a policy on the machine rather than a bad argument.
+    if [ "${want}" != immediate ] && [ "${got}" = immediate ]; then
+      say "    this machine refuses a delayed screen lock; that is its policy, not a fault here."
+      say "    set HEINZEL_REMOTE_SCREENLOCK=\"immediate\" in etc/heinzel.conf to stop retrying it."
+    else
+      say "    set it by hand: System Settings > Lock Screen > Require password"
+    fi
   fi
 }
 

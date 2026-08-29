@@ -512,6 +512,8 @@ Honest as of 2026-08-29.
 |---|---|
 | **Confinement to the working directory** | Verified 2026-08-30 against the generated permission file: a denied credential path is refused, and a write to `/tmp` is refused through both the Write tool and a shell redirect. The first attempt at this **failed** and the design was changed as a result (DESIGN §4.5) |
 | **A complete unattended task, end to end** | Verified 2026-08-30, run `20260830-001340`: the agent took the task from the backlog, created and verified the file, marked the line `[x]` with `run:<id>`, and the runner counted one completion from the ledger and wrote the handover. 14s, $0.35 |
+| **The sudo ticket interlock** | Verified 2026-08-30 on the real machine: `heinzel-ticket` present under `remote`, removed by `hzl on`, restored by `hzl off`, and `doctor` section 8 reported no defect while the session was live |
+| **`travel` / `remote` transitions** | Verified: screen sharing closes and reopens, posture reports `travel` and `remote`, and `mixed` was correctly reported for a half-configured machine before the first transition |
 | **The timeout path** | Verified 2026-08-30 with a stand-in engine that claims a task then hangs: killed at 61s, `result: "timeout"`, `exit_code: 124`, the task rolled back from `[~]` to `[ ]`, no orphaned process. A *real* engine killed mid-call is still not reproduced |
 | **Capability inside the boundary under `dontAsk`** | Verified: commands never explicitly allowed (`python3`, a `tee` pipeline) still run and write inside the working directory, because a sandboxed command needs no prompt |
 | `hzl_timeout` contract | 124, 137, pass-through, 125 all correct; no orphaned grandchildren after switching to process-group signalling |
@@ -527,7 +529,8 @@ Honest as of 2026-08-29.
 | Item | Status |
 |---|---|
 | `hzl on` / `off` end to end | Not run: it installs a LaunchAgent and starts `caffeinate` |
-| `hzl travel` / `remote` applying | Not run: it would drop the operator's own remote access mid-session |
+| That `travel` actually blocks inbound traffic | **Not verified.** The transition applied and wrote a validated pf ruleset, but the read-back was broken (it used the unprivileged reader, which can only answer `unknown`), so a silent failure to block would have looked like success. Fixed; needs re-running |
+| That `hzl on` refuses under `travel` | **Not verified.** The command never ran: a trailing shell comment containing parentheses was parsed by zsh as a glob qualifier and the line failed before executing |
 | The review pipeline against a live reviewer | Only the no-change and failure paths are exercised |
 | An overnight run under launchd | Not yet |
 | HALT in the field | The auth-failure patterns are desk-checked only; a real credential expiry has not been reproduced |
