@@ -227,6 +227,8 @@ cmd_on() {
   if ! on_ac_power; then
     if [ "${force}" = 1 ]; then
       warn "on battery ($(battery_pct)), continuing because --force was given"
+      warn "note: runs still skip while on battery. --force only allows the"
+      warn "session to start; it does not make runs happen on battery power"
     else
       die "on battery ($(battery_pct)). Plug in, or pass --force"
     fi
