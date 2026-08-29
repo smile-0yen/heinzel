@@ -13,3 +13,4 @@ etc/sudoers-ticket
 
 # macOS
 .DS_Store
+etc/heinzel-settings.json

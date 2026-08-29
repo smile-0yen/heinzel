@@ -1,0 +1,1011 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+#
+# hzl — Heinzel's interactive command line. The only place privilege is used.
+#
+# Two axes, deliberately independent (DESIGN 2):
+#
+#   posture   travel | remote    how exposed the machine is
+#   session   on     | off       whether unattended work is running
+#
+# Everything here assumes a human is present. The unattended lane is bin/hzl-run
+# and it never calls into this file.
+
+set -uo pipefail
+
+# bash 3.2 ends a $( ) substitution at the first `)` of a case pattern, so the
+# patterns below are written in their parenthesised form. Removing those
+# leading parens reintroduces a syntax error only on the stock macOS bash.
+HEINZEL_ROOT=$(
+  src=${BASH_SOURCE[0]}
+  while [ -L "${src}" ]; do
+    dir=$(cd -P "$(dirname "${src}")" && pwd)
+    src=$(readlink "${src}")
+    case ${src} in
+      (/*) ;;
+      (*) src=${dir}/${src} ;;
+    esac
+  done
+  cd -P "$(dirname "${src}")/.." && pwd
+)
+export HEINZEL_ROOT
+
+# shellcheck source=lib/common.sh
+. "${HEINZEL_ROOT}/lib/common.sh"
+# shellcheck source=lib/posture.sh
+. "${HEINZEL_ROOT}/lib/posture.sh"
+
+RUNNER="${HEINZEL_ROOT}/bin/hzl-run"
+PLIST_DIR="${HOME}/Library/LaunchAgents"
+
+# Running any of this under sudo leaves state.json owned by root at 0600, after
+# which every unprivileged run fails to read it. The privileged subcommands
+# escalate internally instead; that is why this check has no exceptions.
+require_not_root() {
+  if [ "$(id -u)" -eq 0 ]; then
+    err "do not run hzl with sudo."
+    err "it escalates by itself where it needs to; running the whole tool as root"
+    err "would leave ${STATE_FILE} owned by root and unreadable afterwards."
+    exit 1
+  fi
+}
+
+plist_path() { printf '%s/%s.plist' "${PLIST_DIR}" "${HEINZEL_LABEL}"; }
+
+# --- status ----------------------------------------------------------------
+
+# Read the last run record. A line torn by a concurrent append must not be
+# handed to --argjson: jq would print its parse error to stdout and still exit
+# 0, so a broken record would look like a successful status.
+last_run_json() {
+  local line
+  [ -r "${RUNS_JSONL}" ] || { printf 'null'; return; }
+  line=$(tail -1 "${RUNS_JSONL}" 2>/dev/null)
+  if [ -n "${line}" ] && printf '%s' "${line}" | jq -e . >/dev/null 2>&1; then
+    printf '%s' "${line}"
+  else
+    printf 'null'
+  fi
+}
+
+budget_line() {
+  local done_n total
+  done_n=$(state_get .tasks_done_total 0)
+  total=$(state_get .max_tasks_total 0)
+  printf '%s/%s tasks this session' "${done_n}" "${total}"
+}
+
+cmd_status() {
+  local json=0 quiet=0 mode rc
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --json) json=1 ;;
+      --quiet) quiet=1 ;;
+      *) die "status: unknown option $1" ;;
+    esac
+    shift
+  done
+
+  hzl_eval_mode
+  mode=${HZ_MODE}
+  if [ "${mode}" = heinzel ]; then rc=10; else rc=0; fi
+
+  if [ "${json}" = 1 ]; then
+    jq -n \
+      --arg mode "${mode}" \
+      --arg reason "${HZ_REASON}" \
+      --arg posture "$(posture_now)" \
+      --arg sleep_disabled "$(sleep_disabled)" \
+      --arg backlog "$(state_get .backlog "")" \
+      --argjson last_run "$(last_run_json)" \
+      --argjson tasks_done "$(state_get .tasks_done_total 0)" \
+      --argjson max_total "$(state_get .max_tasks_total 0)" \
+      --arg expires_at "$(state_get .expires_at "")" \
+      --arg halt "$(state_get .halt_reason "")" \
+      '{mode: $mode, reason: $reason, posture: $posture,
+        sleep_disabled: $sleep_disabled, backlog: $backlog,
+        tasks_done_total: $tasks_done, max_tasks_total: $max_total,
+        expires_at: $expires_at, halt_reason: (if $halt == "" then null else $halt end),
+        last_run: $last_run}'
+    return ${rc}
+  fi
+
+  [ "${quiet}" = 1 ] && return ${rc}
+
+  local backlog todo blocked posture ss
+  backlog=$(state_get .backlog "${DEFAULT_BACKLOG}")
+  posture=$(posture_now)
+
+  printf '\n'
+  if [ "${mode}" = heinzel ]; then
+    field "session" "$(good "on") (expires $(short_at "$(state_get .expires_at_epoch 0)"))"
+    field "budget" "$(budget_line)"
+    field "workdir" "$(state_get .workdir "")"
+  else
+    field "session" "off - ${HZ_REASON}"
+  fi
+
+  case ${posture} in
+    travel) field "posture" "travel (closed up)" ;;
+    remote) field "posture" "remote (open)" ;;
+    mixed)  field "posture" "$(bad "mixed") - run 'hzl doctor' to see which part disagrees" ;;
+    *)      field "posture" "not managed (HEINZEL_POSTURE=0)" ;;
+  esac
+
+  ss=$(posture_vnc_listening)
+  field "screen sharing" "$([ "${ss}" = yes ] && echo "on (5900 listening)" || echo off)"
+  field "sleep suppressed" "$([ "$(sleep_disabled)" = 1 ] && echo "yes (disablesleep=1)" || echo no)"
+  field "power" "$(on_ac_power && echo "AC" || echo "battery $(battery_pct)")"
+
+  if [ -n "${backlog}" ] && [ -r "${backlog}" ]; then
+    field "backlog" "$(backlog_count "${backlog}" " ") todo / $(backlog_count "${backlog}" "!") blocked / $(backlog_count "${backlog}" x) done"
+  else
+    field "backlog" "not readable (${backlog:-unset})"
+  fi
+
+  local halt
+  halt=$(state_get .halt_reason "")
+  if [ -n "${halt}" ] && [ "${halt}" != null ]; then
+    field "halted" "$(bad "${halt}") - clear it with 'hzl resume'"
+  fi
+
+  local lr
+  lr=$(last_run_json)
+  if [ "${lr}" != null ]; then
+    field "last run" "$(printf '%s' "${lr}" | jq -r '"\(.run_id) \(.result) - \(.tasks_done) done, \(.tasks_blocked) blocked"')"
+  fi
+
+  # Drift: expiry stops runs by itself, but restoring pmset needs sudo, so the
+  # setting outlives the session and only a human can put it back.
+  if [ "${mode}" != heinzel ] && [ "$(sleep_disabled)" = 1 ]; then
+    printf '\n'
+    warn "sleep is still suppressed while no session is running - run 'hzl off' to restore it"
+  fi
+  printf '\n'
+  return ${rc}
+}
+
+# --- session: on -----------------------------------------------------------
+
+cmd_on() {
+  require_not_root
+  local duration=${DEFAULT_DURATION} max_tasks=${DEFAULT_MAX_TASKS}
+  local max_total=${DEFAULT_MAX_TASKS_TOTAL} timeout=${DEFAULT_RUN_TIMEOUT}
+  local backlog=${DEFAULT_BACKLOG} workdir=${DEFAULT_WORKDIR}
+  local use_sudo=1 force=0 kick=1 dry=0
+
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --duration) duration=${2:-}; shift ;;
+      --max-tasks) max_tasks=${2:-}; shift ;;
+      --max-total) max_total=${2:-}; shift ;;
+      --timeout) timeout=${2:-}; shift ;;
+      --backlog) backlog=${2:-}; shift ;;
+      --workdir) workdir=${2:-}; shift ;;
+      --no-sudo) use_sudo=0 ;;
+      --force) force=1 ;;
+      --no-kick) kick=0 ;;
+      --dry-run) dry=1 ;;
+      *) die "on: unknown option $1" ;;
+    esac
+    shift
+  done
+
+  # 1. Arguments, fail fast and before anything is changed.
+  local dur_sec
+  dur_sec=$(parse_duration "${duration}") ||
+    die "--duration '${duration}' is not a duration in [60s, 24h]"
+  case ${max_tasks} in ""|*[!0-9]*) die "--max-tasks must be a positive integer" ;; esac
+  case ${max_total} in ""|*[!0-9]*) die "--max-total must be a positive integer" ;; esac
+  case ${timeout} in ""|*[!0-9]*) die "--timeout must be a positive integer" ;; esac
+  [ "${max_tasks}" -ge 1 ] || die "--max-tasks must be >= 1"
+  [ "${max_total}" -ge 1 ] || die "--max-total must be >= 1"
+  [ "${timeout}" -ge 60 ] || die "--timeout must be >= 60"
+
+  [ -n "${workdir}" ] || die "no workdir configured. Set DEFAULT_WORKDIR in etc/heinzel.conf or pass --workdir"
+  [ -n "${backlog}" ] || die "no backlog configured. Set DEFAULT_BACKLOG in etc/heinzel.conf or pass --backlog"
+  workdir=$(abspath "${workdir}")
+  backlog=$(abspath "${backlog}")
+  [ -d "${workdir}" ] || die "workdir does not exist: ${workdir}"
+
+  if [ "${timeout}" -gt 3600 ]; then
+    warn "a run may use up to ${timeout}s, which is longer than the gap between slots;"
+    warn "a run that uses its whole budget will cost the next slot"
+  fi
+
+  # 2. Posture. The refused cell of the matrix, and the one refusal with no
+  # --force: this is about where the machine is, and a flag cannot move it.
+  if [ "$(posture_now)" = travel ]; then
+    err "posture is travel - refusing to start an unattended session."
+    err "the machine is closed up (screen sharing off, inbound blocked), which"
+    err "means it is probably in a bag or on an untrusted network."
+    err "run 'hzl remote' first if it is back on the desk."
+    exit 1
+  fi
+
+  # 3. Power.
+  if ! on_ac_power; then
+    if [ "${force}" = 1 ]; then
+      warn "on battery ($(battery_pct)), continuing because --force was given"
+    else
+      die "on battery ($(battery_pct)). Plug in, or pass --force"
+    fi
+  fi
+
+  # 4. Restarting an existing session resets the budget; say so rather than
+  # letting the counter quietly go back to zero.
+  if [ "$(effective_mode)" = heinzel ]; then
+    warn "a session is already running - reconfiguring it"
+    warn "tasks completed so far ($(state_get .tasks_done_total 0)) will be reset to 0"
+  fi
+
+  local now expires slots
+  now=$(now_epoch)
+  expires=$((now + dur_sec))
+  slots=$(slots_within "${expires}")
+  [ "${slots}" -eq 0 ] &&
+    warn "no scheduled slot falls before this session expires - nothing will run (hours: $(hours_normalised))"
+
+  # 5. Backlog.
+  backlog_ensure "${backlog}" || die "could not create ${backlog}"
+  local todo
+  todo=$(backlog_count "${backlog}" " ")
+  [ "${todo}" -eq 0 ] && warn "the backlog has no todo items - runs will do nothing"
+
+  if [ "${dry}" = 1 ]; then
+    printf '\n'
+    say "would start a session:"
+    field "expires" "$(short_at "${expires}") (${duration})"
+    field "budget" "${max_total} tasks total, ${max_tasks} per run, ${timeout}s wall clock"
+    field "workdir" "${workdir}"
+    field "backlog" "${backlog} (${todo} todo)"
+    field "slots before expiry" "${slots} (hours: $(hours_normalised))"
+    field "would sudo" "$([ "${use_sudo}" = 1 ] && echo "pmset -a disablesleep 1" || echo "no (--no-sudo)")"
+    printf '\n'
+    return 0
+  fi
+
+  # 6. The liveness marker. Started before the privileged step so that a
+  # cancelled password prompt has something to roll back to. No -d: the lid is
+  # expected to be closed, and keeping the display awake would waste power.
+  mkdir -p "${HEINZEL_HOME}" "${LOG_DIR}" || die "could not create ${HEINZEL_HOME}"
+  chmod 700 "${HEINZEL_HOME}"
+  local caff_pid
+  nohup caffeinate -is >/dev/null 2>&1 &
+  caff_pid=$!
+  sleep 1
+  pid_alive "${caff_pid}" || die "caffeinate failed to start"
+  printf '%s' "${caff_pid}" >"${CAFFEINATE_PID_FILE}"
+
+  # 7. The only privileged thing a session does. caffeinate alone cannot keep
+  # the machine awake with the lid closed; disablesleep is what does that, and
+  # it is undocumented, so the value is read back rather than assumed.
+  local prior_disablesleep
+  prior_disablesleep=$(sleep_disabled)
+  if [ "${use_sudo}" = 1 ]; then
+    say "keeping the machine awake with the lid closed needs one privileged step."
+    if ! sudo pmset -a disablesleep 1; then
+      kill "${caff_pid}" 2>/dev/null
+      rm -f "${CAFFEINATE_PID_FILE}"
+      die "authentication cancelled - nothing was changed"
+    fi
+    if [ "$(sleep_disabled)" != 1 ]; then
+      warn "disablesleep did not read back as 1; this macOS build may ignore it."
+      warn "closing the lid may still put the machine to sleep."
+    fi
+  else
+    warn "--no-sudo: sleep is not suppressed. Leave the lid open."
+  fi
+
+  # 8. Close the write-capable sudo window for the duration (DESIGN 4.3).
+  local ticket_suspended=false
+  if [ "${HEINZEL_POSTURE}" = 1 ] && [ -f "${SUDOERS_TICKET}" ]; then
+    if posture_remove_sudoers ticket && posture_purge_tickets; then
+      ticket_suspended=true
+      say "the relaxed sudo ticket window is closed for the duration of this session"
+    fi
+  fi
+
+  # 9. State. Written last, so anything above failing leaves no session behind.
+  local state
+  state=$(jq -n \
+    --arg activated_at "$(iso_at "${now}")" \
+    --argjson activated_at_epoch "${now}" \
+    --arg expires_at "$(iso_at "${expires}")" \
+    --argjson expires_at_epoch "${expires}" \
+    --arg duration "${duration}" \
+    --arg boot_id "$(boot_id_now)" \
+    --arg workdir "${workdir}" \
+    --arg backlog "${backlog}" \
+    --argjson max_tasks_per_run "${max_tasks}" \
+    --argjson max_tasks_total "${max_total}" \
+    --argjson run_timeout_sec "${timeout}" \
+    --arg hours "$(hours_normalised)" \
+    --argjson caffeinate_pid "${caff_pid}" \
+    --arg prior_disablesleep "${prior_disablesleep}" \
+    --argjson sudo_used "$([ "${use_sudo}" = 1 ] && echo true || echo false)" \
+    --argjson ticket_suspended "${ticket_suspended}" \
+    '{mode: "heinzel",
+      activated_at: $activated_at, activated_at_epoch: $activated_at_epoch,
+      expires_at: $expires_at, expires_at_epoch: $expires_at_epoch,
+      duration: $duration, boot_id: $boot_id,
+      workdir: $workdir, backlog: $backlog,
+      max_tasks_per_run: $max_tasks_per_run, max_tasks_total: $max_tasks_total,
+      tasks_done_total: 0, run_timeout_sec: $run_timeout_sec,
+      hours: $hours, caffeinate_pid: $caffeinate_pid,
+      pmset_restore: {disablesleep: $prior_disablesleep},
+      sudo_used: $sudo_used, ticket_suspended: $ticket_suspended,
+      halt_reason: null, consecutive_failures: 0, runs_completed: 0}')
+
+  if ! state_write "${state}"; then
+    kill "${caff_pid}" 2>/dev/null
+    rm -f "${CAFFEINATE_PID_FILE}"
+    [ "${use_sudo}" = 1 ] && sudo pmset -a disablesleep 0
+    die "could not write ${STATE_FILE} - rolled back"
+  fi
+
+  # 10. Schedule.
+  cmd_install --quiet
+  if [ "${kick}" = 1 ]; then
+    launchctl kickstart "gui/$(id -u)/${HEINZEL_LABEL}" >/dev/null 2>&1 ||
+      warn "could not kickstart the agent; it will still fire on schedule"
+  fi
+
+  log_event ok "session on until $(iso_at "${expires}") budget=${max_total} workdir=${workdir}"
+  cmd_status
+}
+
+# --- session: off ----------------------------------------------------------
+
+cmd_off() {
+  require_not_root
+  local unload=0 use_sudo=1
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --unload) unload=1 ;;
+      --no-sudo) use_sudo=0 ;;
+      *) die "off: unknown option $1" ;;
+    esac
+    shift
+  done
+
+  local was_on started done_n runs
+  was_on=$(effective_mode)
+  started=$(state_get .activated_at_epoch 0)
+  done_n=$(state_get .tasks_done_total 0)
+  runs=$(state_get .runs_completed 0)
+
+  # 1. First, so that any run starting from here on no-ops. Everything else is
+  # cleanup and can fail without leaving a session that still fires.
+  if [ -f "${STATE_FILE}" ]; then
+    state_update '.mode = "normal"' || warn "could not update ${STATE_FILE}"
+  fi
+
+  # 2. Stop a run in flight. Its EXIT trap rolls [~] back to [ ].
+  if [ -r "${RUN_PID_FILE}" ]; then
+    local rp i
+    rp=$(cat "${RUN_PID_FILE}" 2>/dev/null)
+    if pid_alive "${rp}"; then
+      say "stopping the run in progress (pid ${rp})"
+      kill -TERM "${rp}" 2>/dev/null
+      i=0
+      while [ ${i} -lt 30 ] && pid_alive "${rp}"; do sleep 1; i=$((i + 1)); done
+      pid_alive "${rp}" && kill -KILL "${rp}" 2>/dev/null
+    fi
+  fi
+
+  # 3. Always restore 0, never the recorded prior value. Honouring the recorded
+  # value compounds one missed `off` into permanent sleep suppression: the
+  # leaked 1 becomes the next session's baseline (DESIGN 4.2).
+  if [ "${use_sudo}" = 1 ] && [ "$(sleep_disabled)" = 1 ]; then
+    sudo pmset -a disablesleep 0 || warn "could not restore disablesleep - it is still 1"
+  fi
+
+  # 4. The liveness marker.
+  if [ -r "${CAFFEINATE_PID_FILE}" ]; then
+    local cp
+    cp=$(cat "${CAFFEINATE_PID_FILE}" 2>/dev/null)
+    pid_alive "${cp}" && kill "${cp}" 2>/dev/null
+    rm -f "${CAFFEINATE_PID_FILE}"
+  fi
+
+  # 5. Reopen the sudo ticket window if this session closed it and the machine
+  # is still on the desk.
+  if [ "$(state_get .ticket_suspended false)" = true ] && [ "${HEINZEL_POSTURE}" = 1 ]; then
+    if [ "$(posture_sudoers)" = remote ]; then
+      posture_install_sudoers ticket && say "the relaxed sudo ticket window is open again"
+    fi
+    state_update '.ticket_suspended = false' >/dev/null 2>&1
+  fi
+
+  [ "${unload}" = 1 ] && cmd_uninstall --quiet
+
+  printf '\n'
+  if [ "${was_on}" = heinzel ] && [ "${started}" -gt 0 ]; then
+    local secs
+    secs=$(( $(now_epoch) - started ))
+    field "session ran for" "$((secs / 3600))h $(((secs % 3600) / 60))m"
+    field "runs completed" "${runs}"
+    field "tasks done" "${done_n}"
+  else
+    say "no session was running; cleaned up anyway."
+  fi
+  local backlog
+  backlog=$(state_get .backlog "${DEFAULT_BACKLOG}")
+  if [ -n "${backlog}" ] && [ -r "${backlog}" ]; then
+    field "blocked, needs you" "$(backlog_count "${backlog}" "!")"
+  fi
+  local notes="${LOG_DIR}/$(date +%Y-%m-%d)/notes.md"
+  [ -r "${notes}" ] && field "handover notes" "${notes}"
+  printf '\n'
+  log_event ok "session off after ${runs} run(s), ${done_n} task(s)"
+}
+
+cmd_resume() {
+  require_not_root
+  [ -f "${STATE_FILE}" ] || die "no state file - there is nothing to resume"
+  local halt
+  halt=$(state_get .halt_reason "")
+  if [ -z "${halt}" ] || [ "${halt}" = null ]; then
+    say "not halted; nothing to do."
+    return 0
+  fi
+  state_update '.halt_reason = null | .consecutive_failures = 0' ||
+    die "could not update ${STATE_FILE}"
+  good "cleared the halt (was: ${halt}). Runs will resume at the next slot."
+}
+
+cmd_set() {
+  require_not_root
+  [ -f "${STATE_FILE}" ] || die "no state file - start a session first"
+  if [ $# -eq 0 ]; then
+    printf '\n'
+    field "max-total" "$(state_get .max_tasks_total 0)"
+    field "max-tasks" "$(state_get .max_tasks_per_run 0)"
+    field "timeout" "$(state_get .run_timeout_sec 0)s"
+    printf '\n'
+    return 0
+  fi
+  local key=$1 val=${2:-}
+  case ${val} in ""|*[!0-9]*) die "set ${key}: needs a positive integer" ;; esac
+  case ${key} in
+    max-total) [ "${val}" -ge 1 ] || die "max-total must be >= 1"
+      state_update ".max_tasks_total = ${val}" ;;
+    max-tasks) [ "${val}" -ge 1 ] || die "max-tasks must be >= 1"
+      state_update ".max_tasks_per_run = ${val}" ;;
+    timeout) [ "${val}" -ge 60 ] || die "timeout must be >= 60"
+      state_update ".run_timeout_sec = ${val}" ;;
+    *) die "set: unknown key '${key}' (max-total, max-tasks, timeout)" ;;
+  esac || die "could not update ${STATE_FILE}"
+  good "${key} = ${val}"
+}
+
+# --- posture ---------------------------------------------------------------
+
+posture_guard() {
+  [ "${HEINZEL_POSTURE}" = 1 ] || {
+    err "posture management is off."
+    err "these commands change screen sharing, the packet filter, wake-on-LAN,"
+    err "the screen lock delay and sudo policy. Review etc/heinzel.conf.example,"
+    err "then set HEINZEL_POSTURE=1 in etc/heinzel.conf to enable them."
+    exit 1
+  }
+}
+
+cmd_travel() {
+  require_not_root
+  posture_guard
+  local dry=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --dry-run) dry=1 ;;
+      *) die "travel: unknown option $1" ;;
+    esac
+    shift
+  done
+  POSTURE_DRY_RUN=${dry}
+
+  # A live session cannot survive travel, and leaving one running would keep
+  # firing runs from a bag. Stop it first, and say so (DESIGN 2.2).
+  if [ "${dry}" = 0 ] && [ "$(effective_mode)" = heinzel ]; then
+    say "a session is running; stopping it before closing the machine up."
+    cmd_off
+  fi
+
+  if posture_apply travel; then
+    good "travel posture applied."
+  else
+    bad "travel posture applied with ${POSTURE_FAILED} problem(s) - see above."
+  fi
+  [ "${dry}" = 0 ] && cmd_status
+  return 0
+}
+
+cmd_remote() {
+  require_not_root
+  posture_guard
+  local dry=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --dry-run) dry=1 ;;
+      *) die "remote: unknown option $1" ;;
+    esac
+    shift
+  done
+  POSTURE_DRY_RUN=${dry}
+
+  # The ticket window stays shut while unattended work is running.
+  local allow_ticket=1
+  [ "$(effective_mode)" = heinzel ] && allow_ticket=0
+
+  if posture_apply remote "${allow_ticket}"; then
+    good "remote posture applied."
+  else
+    bad "remote posture applied with ${POSTURE_FAILED} problem(s) - see above."
+  fi
+  if [ "${dry}" = 0 ]; then
+    cmd_status
+    [ "${allow_ticket}" = 1 ] &&
+      dim "  for sudo that writes, run 'sudo -v' once in a Terminal (${HEINZEL_TICKET_TIMEOUT:-480} min ticket)"
+  fi
+  return 0
+}
+
+# --- the ledger ------------------------------------------------------------
+
+need_backlog() {
+  local b
+  b=$(state_get .backlog "${DEFAULT_BACKLOG}")
+  [ -n "${b}" ] || die "no backlog configured (DEFAULT_BACKLOG in etc/heinzel.conf)"
+  [ -r "${b}" ] || die "backlog not readable: ${b}"
+  printf '%s' "${b}"
+}
+
+cmd_next() {
+  local b row
+  b=$(need_backlog) || exit 1
+  row=$(backlog_next_row "${b}")
+  [ -n "${row}" ] || { say "nothing to do - no todo items."; return 0; }
+  local nid
+  nid=$(printf '%s' "${row}" | cut -f4)
+  # Ids are allocated by the runner, so a task typed by hand has none yet.
+  [ -n "${nid}" ] || nid="(id assigned at the next run)"
+  printf '\n'
+  field "next up" "${nid}"
+  field "priority" "P$(printf '%s' "${row}" | cut -f2)"
+  say ""
+  say "  $(printf '%s' "${row}" | cut -f5)"
+  backlog_notes_for_line "${b}" "$(printf '%s' "${row}" | cut -f1)"
+  printf '\n'
+}
+
+# Blocked tasks are the ones a human has to close. Without an id this lists
+# them; with an id it writes a prompt to paste into an interactive session.
+cmd_take() {
+  local b id=${1:-}
+  b=$(need_backlog) || exit 1
+  if [ -z "${id}" ]; then
+    local n
+    n=$(backlog_count "${b}" "!")
+    if [ "${n}" -eq 0 ]; then
+      say "nothing is blocked."
+      return 0
+    fi
+    printf '\n'
+    say "blocked, waiting for you:"
+    printf '\n'
+    backlog_scan "${b}" | awk -F'\t' '$3 == "!" {printf "  P%-3s %-8s %s\n", $2, $4, $5}'
+    printf '\n'
+    dim "  'hzl take <id>' prints a prompt for an interactive session"
+    printf '\n'
+    return 0
+  fi
+
+  local text marker lineno
+  text=$(backlog_text_of_id "${b}" "${id}")
+  [ -n "${text}" ] || { err "no such id: ${id}"; exit 3; }
+  marker=$(backlog_marker_of_id "${b}" "${id}")
+  lineno=$(backlog_line_of_id "${b}" "${id}")
+
+  printf '\n--- paste this into an interactive session ---\n\n'
+  printf 'Task %s from %s:\n\n' "${id}" "${b}"
+  printf '  %s\n' "${text}"
+  backlog_notes_for_line "${b}" "${lineno}"
+  if [ "${marker}" = "!" ]; then
+    printf '\nThis was blocked by an unattended run, which means it needed a\n'
+    printf 'judgement call, a privilege, or an irreversible action it would not take\n'
+    printf 'on its own. Work out what it needs, then do it with me.\n'
+  fi
+  printf '\nWhen it is finished, close it out with:  hzl done %s "<what changed>"\n' "${id}"
+  printf '\n--- end ---\n\n'
+}
+
+cmd_done() {
+  require_not_root
+  local b id=${1:-} note=${2:-}
+  [ -n "${id}" ] || die "usage: hzl done <id> [note]"
+  b=$(need_backlog) || exit 1
+  backlog_set_state "${b}" "${id}" x "done:$(iso_at) by:human"
+  case $? in
+    0) ;;
+    3) err "no such id: ${id}"; exit 3 ;;
+    *) die "could not update ${b}" ;;
+  esac
+  [ -n "${note}" ] && backlog_add_note "${b}" "${id}" "${note}"
+  good "${id} done."
+}
+
+cmd_block() {
+  require_not_root
+  local b id=${1:-} reason=${2:-}
+  [ -n "${id}" ] || die "usage: hzl block <id> <reason>"
+  [ -n "${reason}" ] || die "a reason is required - it is what tells you what to do later"
+  b=$(need_backlog) || exit 1
+  backlog_set_state "${b}" "${id}" "!" "blocked:$(iso_at) reason:${reason}"
+  case $? in
+    0) ;;
+    3) err "no such id: ${id}"; exit 3 ;;
+    *) die "could not update ${b}" ;;
+  esac
+  good "${id} blocked: ${reason}"
+}
+
+cmd_unblock() {
+  require_not_root
+  local b id=${1:-}
+  [ -n "${id}" ] || die "usage: hzl unblock <id>"
+  b=$(need_backlog) || exit 1
+  backlog_set_state "${b}" "${id}" " " ""
+  case $? in
+    0) ;;
+    3) err "no such id: ${id}"; exit 3 ;;
+    *) die "could not update ${b}" ;;
+  esac
+  good "${id} is back in the queue."
+}
+
+# --- runs ------------------------------------------------------------------
+
+cmd_runnow() {
+  require_not_root
+  [ -x "${RUNNER}" ] || die "runner not found or not executable: ${RUNNER}"
+  "${RUNNER}" --from manual "$@"
+}
+
+cmd_logs() {
+  local follow=0 n=1
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -f) follow=1 ;;
+      -n) n=${2:-1}; shift ;;
+      *) die "logs: unknown option $1" ;;
+    esac
+    shift
+  done
+  # Plain glob, sorted by mtime. Piping through xargs would let it split the
+  # list and destroy the ordering.
+  local latest
+  latest=$(ls -t "${LOG_DIR}"/*/run-*.log 2>/dev/null | head -"${n}")
+  if [ -z "${latest}" ]; then
+    [ -r "${RUNNER_LOG}" ] || die "no logs yet"
+    tail -n 40 "${RUNNER_LOG}"
+    return 0
+  fi
+  if [ "${follow}" = 1 ]; then
+    tail -f "$(printf '%s' "${latest}" | head -1)"
+  else
+    local f
+    printf '%s\n' "${latest}" | while IFS= read -r f; do
+      printf '\n=== %s\n' "${f}"
+      cat "${f}"
+    done
+  fi
+}
+
+# --- doctor ----------------------------------------------------------------
+
+DOC_PROBLEMS=0
+doc_ok()   { printf '  %s %s\n' "$(good ok)" "$*"; }
+doc_warn() { printf '  %s %s\n' "$(printf '%s??%s' "${_C_YELLOW}" "${_C_OFF}")" "$*"; }
+doc_bad()  { printf '  %s %s\n' "$(bad XX)" "$*"; DOC_PROBLEMS=$((DOC_PROBLEMS + 1)); }
+
+cmd_doctor() {
+  printf '\n1. prerequisites\n'
+  local c
+  for c in jq caffeinate pmset launchctl lockf; do
+    if have "${c}"; then doc_ok "${c}"; else doc_bad "${c} is missing"; fi
+  done
+  if have "${HEINZEL_EXECUTOR_ENGINE}"; then
+    doc_ok "${HEINZEL_EXECUTOR_ENGINE} ($(${HEINZEL_EXECUTOR_ENGINE} --version 2>/dev/null | head -1))"
+  else
+    doc_bad "executor engine '${HEINZEL_EXECUTOR_ENGINE}' is not on PATH"
+  fi
+  # Absence is expected on stock macOS and is not a problem: we ship our own.
+  if have timeout || have gtimeout; then
+    doc_ok "coreutils timeout present (unused - hzl carries its own watchdog)"
+  else
+    doc_ok "no coreutils timeout, as expected - using the bundled watchdog"
+  fi
+
+  printf '\n2. configuration\n'
+  if [ -f "${HEINZEL_ROOT}/etc/heinzel.conf" ]; then
+    doc_ok "etc/heinzel.conf"
+  else
+    doc_warn "no etc/heinzel.conf - running on defaults (copy heinzel.conf.example)"
+  fi
+  if hzl_validate_conf >/dev/null 2>&1; then
+    doc_ok "configuration values are valid"
+  else
+    doc_bad "configuration is invalid:"
+    hzl_validate_conf 2>&1 | sed 's/^/       /'
+  fi
+  local settings="${HEINZEL_ROOT}/etc/heinzel-settings.json"
+  if [ -f "${settings}" ]; then
+    if jq -e . "${settings}" >/dev/null 2>&1; then
+      doc_ok "etc/heinzel-settings.json is valid JSON"
+    else
+      # claude --print silently ignores a malformed settings file, which would
+      # drop every deny rule without a word.
+      doc_bad "etc/heinzel-settings.json is NOT valid JSON - runs will abort rather than run unprotected"
+    fi
+  else
+    doc_bad "etc/heinzel-settings.json is missing - the deny list is what confines the agent"
+  fi
+
+  printf '\n3. launch agent\n'
+  local pl
+  pl=$(plist_path)
+  if launchctl print "gui/$(id -u)/${HEINZEL_LABEL}" >/dev/null 2>&1; then
+    doc_ok "${HEINZEL_LABEL} is loaded"
+  else
+    doc_warn "${HEINZEL_LABEL} is not loaded (run 'hzl install')"
+  fi
+  if [ -f "${pl}" ]; then
+    if generate_plist | diff -q - "${pl}" >/dev/null 2>&1; then
+      doc_ok "the installed plist matches the current configuration"
+    else
+      doc_bad "the installed plist has drifted from HEINZEL_HOURS - run 'hzl install'"
+    fi
+  else
+    doc_warn "no plist at ${pl}"
+  fi
+
+  printf '\n4. session state\n'
+  local mode
+  hzl_eval_mode
+  mode=${HZ_MODE}
+  if [ -f "${STATE_FILE}" ]; then
+    if jq -e . "${STATE_FILE}" >/dev/null 2>&1; then
+      doc_ok "state.json is valid"
+    else
+      doc_bad "state.json is corrupt - 'hzl on' will rebuild it"
+    fi
+    local owner
+    owner=$(stat -f '%Su' "${STATE_FILE}" 2>/dev/null)
+    if [ "${owner}" = root ]; then
+      doc_bad "state.json is owned by root - hzl was run under sudo. chown it back to $(id -un)"
+    fi
+  else
+    doc_warn "no state file yet"
+  fi
+  if [ "${mode}" = heinzel ]; then
+    doc_ok "session on, expires $(short_at "$(state_get .expires_at_epoch 0)"), $(budget_line)"
+  else
+    doc_ok "session off (${HZ_REASON})"
+  fi
+  local halt
+  halt=$(state_get .halt_reason "")
+  if [ -n "${halt}" ] && [ "${halt}" != null ]; then
+    doc_bad "halted: ${halt} - fix the cause, then 'hzl resume'"
+  fi
+
+  printf '\n5. power and sleep\n'
+  if on_ac_power; then doc_ok "on AC power"; else doc_warn "on battery ($(battery_pct)) - runs will skip"; fi
+  if [ "${mode}" != heinzel ] && [ "$(sleep_disabled)" = 1 ]; then
+    doc_bad "sleep is suppressed with no session running - run 'hzl off' to restore it"
+  else
+    doc_ok "sleep suppression matches the session state"
+  fi
+
+  printf '\n6. backlog\n'
+  local b
+  b=$(state_get .backlog "${DEFAULT_BACKLOG}")
+  if [ -n "${b}" ] && [ -r "${b}" ]; then
+    doc_ok "${b}: $(backlog_count "${b}" " ") todo, $(backlog_count "${b}" "~") in progress, $(backlog_count "${b}" x) done, $(backlog_count "${b}" "!") blocked"
+  else
+    doc_bad "backlog not readable: ${b:-unset}"
+  fi
+
+  printf '\n7. review pipeline\n'
+  if [ "${HEINZEL_REVIEW}" = 1 ]; then
+    if have "${HEINZEL_REVIEWER_ENGINE}"; then
+      doc_ok "reviewer '${HEINZEL_REVIEWER_ENGINE}' is present"
+    else
+      doc_bad "review is on but '${HEINZEL_REVIEWER_ENGINE}' is not on PATH"
+    fi
+    local schema="${HEINZEL_ROOT}/etc/review-schema.json"
+    if jq -e . "${schema}" >/dev/null 2>&1; then
+      doc_ok "review-schema.json is valid"
+    else
+      doc_bad "review-schema.json is missing or invalid"
+    fi
+  else
+    doc_ok "review is off (HEINZEL_REVIEW=0)"
+  fi
+
+  printf '\n8. posture\n'
+  if [ "${HEINZEL_POSTURE}" = 1 ]; then
+    local p
+    p=$(posture_now)
+    case ${p} in
+      travel|remote) doc_ok "posture is ${p}" ;;
+      *) doc_bad "posture is ${p} - components disagree:" ;;
+    esac
+    printf '       screen sharing %s / wake-on-LAN %s / sudoers %s / firewall %s\n' \
+      "$(posture_screensharing)" "$(posture_wol)" "$(posture_sudoers)" "$(posture_firewall)"
+    printf '       screen lock %s / idle sleep %s\n' "$(screenlock_now)" "$(pmset_ac_value sleep)"
+    # The only way to reach this is a restore path that failed, so it is a
+    # defect rather than a warning (DESIGN 4.3).
+    if [ "${mode}" = heinzel ] && [ -f "${SUDOERS_TICKET}" ]; then
+      doc_bad "the relaxed sudo ticket window is OPEN during a session - it should have been closed"
+    fi
+  else
+    doc_ok "posture management is off"
+  fi
+
+  printf '\n'
+  if [ "${DOC_PROBLEMS}" -eq 0 ]; then
+    good "no problems found."
+  else
+    bad "${DOC_PROBLEMS} problem(s) found."
+  fi
+  printf '\n'
+  [ "${DOC_PROBLEMS}" -eq 0 ]
+}
+
+# --- install ---------------------------------------------------------------
+
+generate_plist() {
+  local cal="" h
+  for h in $(hours_normalised); do
+    cal="${cal}    <dict><key>Hour</key><integer>${h}</integer><key>Minute</key><integer>0</integer></dict>
+"
+  done
+  # Built without a trailing newline of its own: a here-document would leave
+  # $'\n' literal and put a blank line into the plist.
+  cal=${cal%
+}
+  sed -e "s|__LABEL__|${HEINZEL_LABEL}|g" \
+      -e "s|__RUNNER__|${RUNNER}|g" \
+      -e "s|__PATH__|${PATH}|g" \
+      -e "s|__HOME__|${HOME}|g" \
+      -e "s|__LOGDIR__|${LOG_DIR}|g" \
+      "${HEINZEL_ROOT}/etc/agent.plist.in" |
+  awk -v cal="${cal}" '{ if ($0 == "__CALENDAR__") print cal; else print }'
+}
+
+# The deny list has to name the working directory, which is configuration, so
+# the file the runner validates is generated rather than shipped.
+generate_settings() {
+  local workdir=$1 out="${HEINZEL_ROOT}/etc/heinzel-settings.json"
+  sed -e "s|__WORKDIR__|${workdir}|g" \
+      -e "s|__HEINZEL_HOME__|${HEINZEL_HOME}|g" \
+      -e "s|__HEINZEL_ROOT__|${HEINZEL_ROOT}|g" \
+      "${HEINZEL_ROOT}/etc/heinzel-settings.json.in" >"${out}" || return 1
+  jq -e . "${out}" >/dev/null 2>&1 || {
+    err "generated ${out} is not valid JSON"
+    return 1
+  }
+}
+
+cmd_install() {
+  require_not_root
+  local quiet=0
+  [ "${1:-}" = --quiet ] && quiet=1
+  mkdir -p "${PLIST_DIR}" "${LOG_DIR}" || die "could not create ${PLIST_DIR}"
+
+  local wd
+  wd=$(state_get .workdir "${DEFAULT_WORKDIR}")
+  [ -n "${wd}" ] || die "no workdir configured - set DEFAULT_WORKDIR in etc/heinzel.conf"
+  generate_settings "${wd}" || die "could not generate the agent permission file"
+  local pl
+  pl=$(plist_path)
+  generate_plist >"${pl}" || die "could not write ${pl}"
+  launchctl bootout "gui/$(id -u)/${HEINZEL_LABEL}" >/dev/null 2>&1
+  if ! launchctl bootstrap "gui/$(id -u)" "${pl}" 2>/dev/null; then
+    warn "could not bootstrap ${HEINZEL_LABEL}; check ${pl}"
+  fi
+  [ "${quiet}" = 1 ] && return 0
+  good "installed ${HEINZEL_LABEL}"
+  field "schedule" "$(hours_normalised) (hourly, on the hour)"
+  field "plist" "${pl}"
+  field "agent confined to" "${wd}"
+}
+
+cmd_uninstall() {
+  require_not_root
+  local quiet=0
+  [ "${1:-}" = --quiet ] && quiet=1
+  launchctl bootout "gui/$(id -u)/${HEINZEL_LABEL}" >/dev/null 2>&1
+  rm -f "$(plist_path)"
+  [ "${quiet}" = 1 ] && return 0
+  good "removed ${HEINZEL_LABEL}"
+}
+
+# --- dispatch --------------------------------------------------------------
+
+usage() {
+  cat <<USAGE
+hzl ${HEINZEL_VERSION} - unattended backlog work, and a machine that knows
+whether it is at home or on the road.
+
+posture (needs a human at the machine)
+  hzl travel [--dry-run]     close the machine up: screen sharing off, inbound
+                             blocked, wake-on-LAN off, sudo policy reset
+  hzl remote [--dry-run]     open it back up for remote use
+
+session (unattended work)
+  hzl on [options]           start a session. Options:
+                               --duration 10h     TTL, max 24h
+                               --max-total N      tasks for the whole session
+                               --max-tasks N      tasks per run
+                               --timeout N        wall clock per run, seconds
+                               --workdir PATH     --backlog PATH
+                               --force            allow starting on battery
+                               --no-sudo          do not suppress sleep
+                               --no-kick          do not run one immediately
+                               --dry-run          say what would happen
+  hzl off [--unload]         stop it and restore what it changed
+  hzl resume                 clear a halt
+  hzl set [key N]            show or change limits mid-session
+  hzl run-now [--dry-run]    run once now, ignoring the schedule window
+
+backlog
+  hzl next                   what would be picked up next
+  hzl take [id]              list blocked tasks, or print a prompt for one
+  hzl done <id> [note]       close a task out by hand
+  hzl block <id> <reason>    park a task; a reason is required
+  hzl unblock <id>           put it back in the queue
+
+everything else
+  hzl status [--json|--quiet]  what is actually true right now
+  hzl doctor                   check the whole setup
+  hzl logs [-f] [-n N]         recent run logs
+  hzl install / uninstall      the launchd agent
+  hzl version
+
+exit codes: status is 0 when no session is running, 10 when one is, 1 on error.
+USAGE
+}
+
+hzl_load_conf
+if ! hzl_validate_conf; then
+  err "refusing to run with an invalid configuration (etc/heinzel.conf)"
+  exit 1
+fi
+
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+case ${cmd} in
+  status) cmd_status "$@" ;;
+  on) cmd_on "$@" ;;
+  off) cmd_off "$@" ;;
+  resume) cmd_resume "$@" ;;
+  set) cmd_set "$@" ;;
+  travel) cmd_travel "$@" ;;
+  remote) cmd_remote "$@" ;;
+  next) cmd_next "$@" ;;
+  take) cmd_take "$@" ;;
+  done) cmd_done "$@" ;;
+  block) cmd_block "$@" ;;
+  unblock) cmd_unblock "$@" ;;
+  run-now) cmd_runnow "$@" ;;
+  logs) cmd_logs "$@" ;;
+  doctor) cmd_doctor "$@" ;;
+  install) cmd_install "$@" ;;
+  uninstall) cmd_uninstall "$@" ;;
+  version|--version|-v) say "hzl ${HEINZEL_VERSION}" ;;
+  help|--help|-h) usage ;;
+  "") usage; exit 1 ;;
+  *) err "unknown command: ${cmd}"; usage; exit 1 ;;
+esac

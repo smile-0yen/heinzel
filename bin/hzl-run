@@ -1,0 +1,464 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+#
+# hzl-run — the unattended runner. Started by launchd, or by `hzl run-now`.
+#
+# This half of Heinzel never uses privilege and never asks a question. It has
+# no path to sudo at all, and nothing here writes the session's mode: it reads
+# state.json and acts, or does nothing.
+#
+# Eight gates stand between being started and calling an engine, ordered
+# cheapest first. If any of them closes, no API call is made and nothing is
+# billed. The `todo == 0` gate is deliberately last, immediately before the
+# call, so that an empty backlog costs a fraction of a second.
+
+set -uo pipefail
+
+HEINZEL_ROOT=$(
+  src=${BASH_SOURCE[0]}
+  while [ -L "${src}" ]; do
+    dir=$(cd -P "$(dirname "${src}")" && pwd)
+    src=$(readlink "${src}")
+    case ${src} in
+      (/*) ;;
+      (*) src=${dir}/${src} ;;
+    esac
+  done
+  cd -P "$(dirname "${src}")/.." && pwd
+)
+export HEINZEL_ROOT
+
+# launchd hands over a minimal environment. The plist sets these too; both are
+# needed, and neither is redundant.
+export PATH="${PATH}:/usr/local/bin:/opt/homebrew/bin:${HOME}/.local/bin"
+export HOME="${HOME:-$(cd ~ && pwd)}"
+
+# shellcheck source=lib/common.sh
+. "${HEINZEL_ROOT}/lib/common.sh"
+# shellcheck source=lib/posture.sh
+. "${HEINZEL_ROOT}/lib/posture.sh"
+# shellcheck source=lib/watchdog.sh
+. "${HEINZEL_ROOT}/lib/watchdog.sh"
+# shellcheck source=lib/engines.sh
+. "${HEINZEL_ROOT}/lib/engines.sh"
+
+TRIGGER=launchd
+DRY_RUN=0
+while [ $# -gt 0 ]; do
+  case $1 in
+    --from) TRIGGER=${2:-launchd}; shift ;;
+    --dry-run) DRY_RUN=1 ;;
+    *) printf 'hzl-run: unknown option %s\n' "$1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+hzl_load_conf
+hzl_validate_conf || { log_event abort "invalid configuration"; exit 1; }
+
+# --- gate 1: one run at a time --------------------------------------------
+# launchd will not run the same job twice concurrently, but a run that used its
+# whole hour is still going when the next slot arrives, and `hzl run-now` can
+# be typed at any moment.
+if [ -z "${HZL_LOCKED:-}" ]; then
+  mkdir -p "${HEINZEL_HOME}" 2>/dev/null
+  HZL_LOCKED=1 lockf -t 0 -k "${RUN_LOCK}" "$0" --from "${TRIGGER}" \
+    $([ "${DRY_RUN}" = 1 ] && printf -- --dry-run)
+  rc=$?
+  [ ${rc} -eq 75 ] && log_event skip "another run holds the lock"
+  exit ${rc}
+fi
+
+# --- gate 2: is a session actually live? ----------------------------------
+# The common case by far: four of five nightly slots, plus every slot on a day
+# with no session at all. It writes nothing and exits, so that a machine in
+# normal mode is untouched by having Heinzel installed.
+hzl_eval_mode
+if [ "${HZ_MODE}" != heinzel ]; then
+  [ "${HEINZEL_DEBUG:-0}" = 1 ] && log_event skip "not in a session: ${HZ_REASON}"
+  exit 0
+fi
+
+RUN_ID=$(date +%Y%m%d-%H%M%S)
+RUN_DAY=$(date +%Y-%m-%d)
+RUN_DIR="${LOG_DIR}/${RUN_DAY}"
+RUN_LOG="${RUN_DIR}/run-$(date +%H%M%S).log"
+EXEC_DIR="${RUN_DIR}/exec-$(date +%H%M%S)"
+SNAP_DIR="${RUN_DIR}/snapshot-$(date +%H%M%S)"
+NOTES="${RUN_DIR}/notes.md"
+mkdir -p "${RUN_DIR}" || { log_event abort "cannot create ${RUN_DIR}"; exit 1; }
+
+WORKDIR=$(state_get .workdir "")
+BACKLOG=$(state_get .backlog "")
+RUN_TIMEOUT=$(state_get .run_timeout_sec 3600)
+MAX_PER_RUN=$(state_get .max_tasks_per_run 3)
+MAX_TOTAL=$(state_get .max_tasks_total 3)
+DONE_TOTAL=$(state_get .tasks_done_total 0)
+
+# Roll back an in-progress marker left by an interrupted run, and release the
+# lock, whatever happens from here on.
+cleanup() {
+  local rc=$?
+  if [ -n "${BACKLOG}" ] && [ -w "${BACKLOG}" ]; then
+    backlog_reset_inprogress "${BACKLOG}" >/dev/null 2>&1
+  fi
+  if [ -n "${HEINZEL_ENGINE_PID:-}" ] && pid_alive "${HEINZEL_ENGINE_PID}"; then
+    hzl_signal_tree TERM "${HEINZEL_ENGINE_PID}"
+  fi
+  rm -f "${RUN_PID_FILE}"
+  exit ${rc}
+}
+trap cleanup EXIT INT TERM
+printf '%s' "$$" >"${RUN_PID_FILE}"
+
+skip() { log_event skip "$*"; exit 0; }
+abort() { log_event abort "$*"; exit 1; }
+
+# --- gate 3: the schedule window ------------------------------------------
+# launchd replays calendar events it missed while the machine was asleep, all
+# at once on wake. Without this guard a laptop opened at lunchtime would fire
+# every slot it slept through, in the middle of the working day.
+if [ "${TRIGGER}" != manual ] && ! in_window; then
+  skip "outside the run window (hours: $(hours_normalised))"
+fi
+
+# --- gate 4: the session budget -------------------------------------------
+REMAINING=$((MAX_TOTAL - DONE_TOTAL))
+[ "${REMAINING}" -gt 0 ] || skip "session budget spent (${DONE_TOTAL}/${MAX_TOTAL})"
+
+# --- gate 5: power ---------------------------------------------------------
+on_ac_power || skip "on battery ($(battery_pct))"
+
+# --- gate 6: do not start a run that cannot finish ------------------------
+EXPIRES=$(state_get .expires_at_epoch 0)
+LEFT=$((EXPIRES - $(now_epoch)))
+[ "${LEFT}" -ge "${RUN_TIMEOUT}" ] ||
+  skip "too close to the deadline (${LEFT}s left, a run may need ${RUN_TIMEOUT}s)"
+
+# --- gate 7: the things that must be true before an agent starts ----------
+[ -n "${WORKDIR}" ] && [ -d "${WORKDIR}" ] || abort "workdir is missing: ${WORKDIR}"
+[ -n "${BACKLOG}" ] && [ -w "${BACKLOG}" ] || abort "backlog is not writable: ${BACKLOG}"
+engine_available "${HEINZEL_EXECUTOR_ENGINE}" ||
+  abort "executor engine not found: ${HEINZEL_EXECUTOR_ENGINE}"
+
+SETTINGS="${HEINZEL_ROOT}/etc/heinzel-settings.json"
+# claude --print silently ignores a malformed settings file. A run that loses
+# its deny list without saying so is the worst available failure, so a bad file
+# stops the run rather than relaxing it.
+[ -f "${SETTINGS}" ] || abort "missing ${SETTINGS} - refusing to run unconfined"
+jq -e . "${SETTINGS}" >/dev/null 2>&1 ||
+  abort "${SETTINGS} is not valid JSON - refusing to run unconfined"
+
+# --- gate 8: is there anything to do? -------------------------------------
+# Last, and immediately before the only expensive thing in this file.
+backlog_reset_inprogress "${BACKLOG}" >/dev/null
+TODO_BEFORE=$(backlog_count "${BACKLOG}" " ")
+[ "${TODO_BEFORE}" -gt 0 ] || skip "nothing to do (0 todo)"
+
+# --- everything below here costs money ------------------------------------
+
+MAX_TASKS=${MAX_PER_RUN}
+[ "${REMAINING}" -lt "${MAX_TASKS}" ] && MAX_TASKS=${REMAINING}
+
+backlog_assign_ids "${BACKLOG}"
+DONE_BEFORE=$(backlog_count "${BACKLOG}" x)
+
+NEXT_ROW=$(backlog_next_row "${BACKLOG}")
+NEXT_TEXT=$(printf '%s' "${NEXT_ROW}" | cut -f5)
+NEXT_NOTES=$(backlog_notes_for_line "${BACKLOG}" "$(printf '%s' "${NEXT_ROW}" | cut -f1)")
+NEXT_TASK="${NEXT_TEXT}
+${NEXT_NOTES}"
+
+{
+  printf '=== run %s (%s)\n' "${RUN_ID}" "${TRIGGER}"
+  printf 'workdir  %s\n' "${WORKDIR}"
+  printf 'budget   %s task(s) this run, %s/%s this session\n' "${MAX_TASKS}" "${DONE_TOTAL}" "${MAX_TOTAL}"
+  printf 'engine   %s %s effort=%s\n' "${HEINZEL_EXECUTOR_ENGINE}" "${HEINZEL_MODEL}" "${HEINZEL_EFFORT}"
+  printf 'todo     %s\n\n' "${TODO_BEFORE}"
+} >"${RUN_LOG}"
+
+# Replace placeholders literally. sed would treat & and \ in a task description
+# as replacement syntax, which is a silent corruption of the prompt.
+# The value is passed through the environment, not with awk -v: awk rejects a
+# literal newline in a -v assignment, and several of these values are
+# multi-line (a task and its notes, a list of findings). Passing them with -v
+# silently produced an empty prompt.
+render() {
+  local key=$1
+  HZL_RENDER_VAL=$2 awk -v key="${key}" '
+    BEGIN { val = ENVIRON["HZL_RENDER_VAL"] }
+    {
+      while ((i = index($0, key)) > 0)
+        $0 = substr($0, 1, i - 1) val substr($0, i + length(key))
+      print
+    }'
+}
+
+PROMPT_FILE="${EXEC_DIR}/prompt.md"
+mkdir -p "${EXEC_DIR}"
+< "${HEINZEL_ROOT}/prompts/backlog-run.md" \
+  render '{{WORKDIR}}' "${WORKDIR}" |
+  render '{{BACKLOG}}' "${BACKLOG}" |
+  render '{{MAX_TASKS}}' "${MAX_TASKS}" |
+  render '{{TODO_COUNT}}' "${TODO_BEFORE}" |
+  render '{{RUN_ID}}' "${RUN_ID}" |
+  render '{{DEADLINE}}' "$(short_at "${EXPIRES}")" |
+  render '{{RUN_TIMEOUT_MIN}}' "$((RUN_TIMEOUT / 60))" |
+  render '{{NEXT_TASK}}' "${NEXT_TASK}" >"${PROMPT_FILE}"
+
+# An empty prompt would sail past the placeholder check below and be sent as a
+# blank instruction. Check for substance before checking for leftovers.
+[ -s "${PROMPT_FILE}" ] || abort "the rendered prompt is empty"
+
+# A placeholder that survived rendering means the prompt is wrong in a way the
+# model would silently work around.
+if grep -q '{{[A-Z_]*}}' "${PROMPT_FILE}"; then
+  abort "prompt still contains placeholders: $(grep -o '{{[A-Z_]*}}' "${PROMPT_FILE}" | sort -u | tr '\n' ' ')"
+fi
+
+# A shell-only snapshot, so the review stage can diff without an LLM.
+if [ -x "${HEINZEL_ROOT}/bin/hzl-changeset" ] && [ "${HEINZEL_REVIEW}" = 1 ]; then
+  "${HEINZEL_ROOT}/bin/hzl-changeset" snapshot "${WORKDIR}" "${SNAP_DIR}" \
+    >>"${RUN_LOG}" 2>&1 || log_event skip "snapshot failed; review will be skipped"
+fi
+
+STARTED=$(now_epoch)
+[ "${DRY_RUN}" = 1 ] && export HEINZEL_DRY_RUN=1
+
+engine_run "${HEINZEL_EXECUTOR_ENGINE}" executor "${WORKDIR}" \
+  "${PROMPT_FILE}" "${EXEC_DIR}" "${RUN_TIMEOUT}" >>"${RUN_LOG}" 2>&1
+ENGINE_RC=$?
+ENDED=$(now_epoch)
+
+RESULT="${EXEC_DIR}/result.json"
+if [ -r "${RESULT}" ]; then
+  VERDICT=$(jq -r '.verdict' "${RESULT}" 2>/dev/null)
+else
+  VERDICT=error
+fi
+[ -n "${VERDICT}" ] || VERDICT=error
+
+# A timeout leaves a task marked in progress; roll it back so the next run can
+# pick it up rather than stepping over it.
+if [ "${VERDICT}" = timeout ]; then
+  backlog_reset_inprogress "${BACKLOG}" >/dev/null
+fi
+
+# --- review ----------------------------------------------------------------
+# The gate runs before the tally, so work that is rejected is never counted as
+# done. Nothing here may cost a task: a reviewer that is absent, broken or slow
+# leaves the ledger exactly as the executor left it.
+
+REVIEW_VERDICT=disabled
+REVIEW_ACTION="review is off"
+REVIEW_ENGINE=null
+REVIEW_FINDINGS=0
+REVIEW_DURATION=0
+REVIEW_REVERTED=0
+REVIEW_TRUNCATED=false
+REVIEW_FIXED=false
+REVIEW_DIR="${RUN_DIR}/review-$(date +%H%M%S)"
+
+if [ "${HEINZEL_REVIEW}" = 1 ]; then
+  if [ "${VERDICT}" != ok ]; then
+    REVIEW_VERDICT=skipped
+    REVIEW_ACTION="executor ended with '${VERDICT}', nothing to review"
+  else
+    "${HEINZEL_ROOT}/bin/hzl-review" "${WORKDIR}" "${SNAP_DIR}" "${RUN_ID}" \
+      "${REVIEW_DIR}" "$(backlog_ids_done_by_run "${BACKLOG}" "${RUN_ID}" | tr '\n' ' ')" \
+      >>"${RUN_LOG}" 2>&1
+    REVIEW_RC=$?
+    VERDICT_FILE="${REVIEW_DIR}/verdict.json"
+    if [ -r "${VERDICT_FILE}" ]; then
+      REVIEW_VERDICT=$(jq -r '.verdict // "failed"' "${VERDICT_FILE}")
+      REVIEW_ENGINE=$(jq -c '.engine // null' "${VERDICT_FILE}")
+      REVIEW_FINDINGS=$(jq -r '(.findings // []) | length' "${VERDICT_FILE}")
+      REVIEW_DURATION=$(jq -r '.duration_sec // 0' "${VERDICT_FILE}")
+      REVIEW_TRUNCATED=$(jq -r 'if .truncated then "true" else "false" end' "${VERDICT_FILE}")
+      REVIEW_ACTION=$(jq -r '.summary // ""' "${VERDICT_FILE}" | head -1)
+    else
+      REVIEW_VERDICT=failed
+      REVIEW_ACTION="the review produced no verdict"
+    fi
+
+    case ${REVIEW_RC} in
+      0)
+        REVIEW_ACTION="approved: ${REVIEW_ACTION}"
+        ;;
+      10)
+        # note-only by default: record the findings and leave the work alone.
+        case ${HEINZEL_REVIEW_ON_REVISE} in
+          block)
+            while IFS= read -r rid; do
+              [ -z "${rid}" ] && continue
+              backlog_set_state "${BACKLOG}" "${rid}" "!" \
+                "blocked:$(iso_at) reason:review-revise run:${RUN_ID}"
+              REVIEW_REVERTED=$((REVIEW_REVERTED + 1))
+            done < <(backlog_ids_done_by_run "${BACKLOG}" "${RUN_ID}")
+            REVIEW_ACTION="revise, moved ${REVIEW_REVERTED} task(s) back to blocked"
+            ;;
+          fix-once)
+            # Exactly one round trip, never a loop. Re-reviewing against the
+            # same snapshot means the second verdict is about the final state
+            # of the work, not about the repair in isolation.
+            LEFT_NOW=$((EXPIRES - $(now_epoch)))
+            if [ "${LEFT_NOW}" -lt 120 ]; then
+              REVIEW_ACTION="revise, no time left to fix (${REVIEW_FINDINGS} finding(s) recorded)"
+            else
+              FIX_DIR="${RUN_DIR}/fix-$(date +%H%M%S)"
+              mkdir -p "${FIX_DIR}"
+              FINDINGS_TEXT=$(jq -r '.findings[]? | "- \(.severity) \(.file):\(.line) \(.what) - \(.why)"' \
+                "${VERDICT_FILE}" 2>/dev/null)
+              < "${HEINZEL_ROOT}/prompts/review-fix.md" \
+                render '{{WORKDIR}}' "${WORKDIR}" |
+                render '{{RUN_ID}}' "${RUN_ID}" |
+                render '{{RUN_TIMEOUT_MIN}}' "$((LEFT_NOW / 60))" |
+                render '{{FINDINGS}}' "${FINDINGS_TEXT}" >"${FIX_DIR}/prompt.md"
+              engine_run "${HEINZEL_EXECUTOR_ENGINE}" fixer "${WORKDIR}" \
+                "${FIX_DIR}/prompt.md" "${FIX_DIR}" "${LEFT_NOW}" >>"${RUN_LOG}" 2>&1
+              REVIEW_FIXED=true
+              REVIEW_DIR2="${RUN_DIR}/review2-$(date +%H%M%S)"
+              "${HEINZEL_ROOT}/bin/hzl-review" "${WORKDIR}" "${SNAP_DIR}" "${RUN_ID}" \
+                "${REVIEW_DIR2}" "re-review after one fix pass" >>"${RUN_LOG}" 2>&1
+              RC2=$?
+              if [ -r "${REVIEW_DIR2}/verdict.json" ]; then
+                REVIEW_VERDICT=$(jq -r '.verdict // "failed"' "${REVIEW_DIR2}/verdict.json")
+                REVIEW_FINDINGS=$(jq -r '(.findings // []) | length' "${REVIEW_DIR2}/verdict.json")
+              fi
+              if [ "${RC2}" -eq 0 ]; then
+                REVIEW_ACTION="revise, fixed in one pass, then approved"
+              else
+                # Still not right: the work stays done and a follow-up task is
+                # added, because a human is better placed to judge the rest.
+                printf -- '- [ ] follow up on review findings from run %s\n' "${RUN_ID}" \
+                  >>"${BACKLOG}"
+                REVIEW_ACTION="revise, one fix pass did not settle it; added a follow-up task"
+              fi
+            fi
+            ;;
+          *)
+            REVIEW_ACTION="revise (${REVIEW_FINDINGS} finding(s), recorded only): ${REVIEW_ACTION}"
+            ;;
+        esac
+        ;;
+      20)
+        # Revert only what this run closed. The run: field on the completion
+        # line is what makes that possible; without it a reject would roll back
+        # other runs' work and lines a human closed by hand.
+        while IFS= read -r rid; do
+          [ -z "${rid}" ] && continue
+          backlog_set_state "${BACKLOG}" "${rid}" "!" \
+            "blocked:$(iso_at) reason:review-reject run:${RUN_ID}"
+          REVIEW_REVERTED=$((REVIEW_REVERTED + 1))
+        done < <(backlog_ids_done_by_run "${BACKLOG}" "${RUN_ID}")
+        REVIEW_ACTION="rejected, reverted ${REVIEW_REVERTED} task(s): ${REVIEW_ACTION}"
+        ;;
+      *)
+        # Explicitly not a reject. The work stands and the handover says so.
+        REVIEW_ACTION="NOT REVIEWED: ${REVIEW_ACTION}"
+        ;;
+    esac
+  fi
+fi
+
+# Count what actually changed in the ledger rather than what the agent says it
+# did. The two disagree exactly when it matters most. Taken after the gate, so
+# rejected work is not counted as done.
+DONE_AFTER=$(backlog_count "${BACKLOG}" x)
+TASKS_DONE=$((DONE_AFTER - DONE_BEFORE))
+[ "${TASKS_DONE}" -lt 0 ] && TASKS_DONE=0
+TASKS_BLOCKED=$(backlog_count "${BACKLOG}" "!")
+
+case ${VERDICT} in
+  ok)
+    state_update ".consecutive_failures = 0 | .runs_completed = (.runs_completed + 1)"
+    ;;
+  auth)
+    # No point retrying every hour against an expired credential.
+    state_update '.halt_reason = "auth"'
+    log_event HALT "authentication failed - fix it, then run 'hzl resume'"
+    ;;
+  timeout|error)
+    state_update ".consecutive_failures = (.consecutive_failures + 1)"
+    if [ "$(state_get .consecutive_failures 0)" -ge 3 ]; then
+      state_update '.halt_reason = "consecutive-failures"'
+      log_event HALT "three failures in a row - fix the cause, then 'hzl resume'"
+    fi
+    ;;
+esac
+
+# Add to the session total before writing the run record, so the same number is
+# never computed in two places.
+if [ "${TASKS_DONE}" -gt 0 ]; then
+  state_update ".tasks_done_total = (.tasks_done_total + ${TASKS_DONE})"
+fi
+
+# The handover: what a human reads in the morning instead of the logs.
+{
+  printf '\n## run %s (%s)\n\n' "${RUN_ID}" "$(iso_at "${STARTED}")"
+  printf -- '- result: %s in %ss, %s task(s) done, %s blocked\n' \
+    "${VERDICT}" "$((ENDED - STARTED))" "${TASKS_DONE}" "${TASKS_BLOCKED}"
+  if [ -r "${EXEC_DIR}/last.txt" ]; then
+    sed -n '/=== HEINZEL SUMMARY ===/,$p' "${EXEC_DIR}/last.txt" | sed 's/^/  /'
+  fi
+  printf -- '- review: %s - %s\n' "${REVIEW_VERDICT}" "${REVIEW_ACTION}"
+  if [ "${REVIEW_FINDINGS}" -gt 0 ] && [ -r "${REVIEW_DIR}/verdict.json" ]; then
+    jq -r '.findings[]? | "  - \(.severity) \(.file):\(.line) \(.what)"' \
+      "${REVIEW_DIR}/verdict.json" 2>/dev/null
+  fi
+} >>"${NOTES}"
+
+jq -n \
+  --arg run_id "${RUN_ID}" --arg trigger "${TRIGGER}" \
+  --arg started_at "$(iso_at "${STARTED}")" --argjson started_at_epoch "${STARTED}" \
+  --arg ended_at "$(iso_at "${ENDED}")" --argjson duration_sec "$((ENDED - STARTED))" \
+  --arg result "${VERDICT}" --argjson exit_code "${ENGINE_RC}" \
+  --argjson tasks_done "${TASKS_DONE}" --argjson tasks_blocked "${TASKS_BLOCKED}" \
+  --argjson tasks_done_total "$(state_get .tasks_done_total 0)" \
+  --argjson max_tasks_total "${MAX_TOTAL}" \
+  --argjson todo_before "${TODO_BEFORE}" \
+  --argjson todo_after "$(backlog_count "${BACKLOG}" " ")" \
+  --slurpfile engine_result "${RESULT}" \
+  --arg review_verdict "${REVIEW_VERDICT}" \
+  --argjson review_engine "${REVIEW_ENGINE}" \
+  --arg review_action "${REVIEW_ACTION}" \
+  --argjson review_findings "${REVIEW_FINDINGS}" \
+  --argjson review_duration "${REVIEW_DURATION}" \
+  --argjson review_reverted "${REVIEW_REVERTED}" \
+  --argjson review_fixed "${REVIEW_FIXED}" \
+  --argjson review_truncated "${REVIEW_TRUNCATED}" \
+  --arg log "${RUN_LOG}" \
+  '{run_id: $run_id, trigger: $trigger,
+    started_at: $started_at, started_at_epoch: $started_at_epoch,
+    ended_at: $ended_at, duration_sec: $duration_sec,
+    result: $result, exit_code: $exit_code,
+    tasks_done: $tasks_done, tasks_blocked: $tasks_blocked,
+    tasks_done_total: $tasks_done_total, max_tasks_total: $max_tasks_total,
+    todo_before: $todo_before, todo_after: $todo_after,
+    engine: ($engine_result[0].engine // null),
+    model: ($engine_result[0].model // null),
+    effort: ($engine_result[0].effort // null),
+    models_used: ($engine_result[0].models_used // []),
+    session_id: ($engine_result[0].session_id // null),
+    cost_usd: ($engine_result[0].cost_usd // null),
+    turns: ($engine_result[0].turns // 0),
+    tokens_in: ($engine_result[0].tokens_in // 0),
+    tokens_out: ($engine_result[0].tokens_out // 0),
+    review: {verdict: $review_verdict, engine: $review_engine,
+             action: $review_action, findings: $review_findings,
+             duration_sec: $review_duration, reverted: $review_reverted,
+             fixed: $review_fixed, truncated: $review_truncated},
+    log: $log}' >>"${RUNS_JSONL}" 2>/dev/null
+
+log_event ok "${RUN_ID} ${VERDICT} review=${REVIEW_VERDICT} ${TASKS_DONE} done, ${TASKS_BLOCKED} blocked, $((ENDED - STARTED))s, total $(state_get .tasks_done_total 0)/${MAX_TOTAL}"
+
+# Housekeeping. Only date-shaped directories are eligible, so a stray directory
+# in the log tree is never deleted by a wildcard.
+find "${LOG_DIR}" -maxdepth 1 -type d -name '20[0-9][0-9]-[0-1][0-9]-[0-3][0-9]' \
+  -mtime "+${LOG_RETENTION_DAYS}" -exec rm -rf {} + 2>/dev/null
+if [ -f "${RUNS_JSONL}" ]; then
+  tail -2000 "${RUNS_JSONL}" >"${RUNS_JSONL}.tmp" 2>/dev/null &&
+    mv -f "${RUNS_JSONL}.tmp" "${RUNS_JSONL}"
+fi
+
+exit 0

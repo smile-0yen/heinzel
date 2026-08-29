@@ -1,0 +1,64 @@
+# Heinzel configuration. Copy to etc/heinzel.conf and edit.
+#
+# This file is sourced by bash, so it is shell syntax. Every value here is
+# validated at startup: a misspelling stops the tool rather than silently
+# changing what the unattended run does at 03:00.
+
+# --- what to work on -------------------------------------------------------
+# Both must be absolute paths. launchd runs with cwd=/, so a relative path is
+# not a latent bug, it is a certain abort.
+DEFAULT_WORKDIR="${HOME}/work"
+DEFAULT_BACKLOG="${HOME}/work/backlog.md"
+
+# --- when to run -----------------------------------------------------------
+# Hours (0-23) at which launchd wakes the runner. The single source of truth
+# for the schedule: `hzl install` generates the plist from it, and the runner
+# guards on it independently, because launchd replays calendar events it missed
+# while asleep and would otherwise fire them all at once during the day.
+HEINZEL_HOURS="1 2 3 4 5"
+
+# --- budget ----------------------------------------------------------------
+# Three independent ceilings. The effective per-run limit is
+#   min(DEFAULT_MAX_TASKS, DEFAULT_MAX_TASKS_TOTAL - tasks already done)
+DEFAULT_MAX_TASKS_TOTAL=3        # per session (on .. off)
+DEFAULT_MAX_TASKS=3              # per run
+DEFAULT_RUN_TIMEOUT=3600         # wall clock per run, seconds
+DEFAULT_DURATION="10h"           # session TTL; the 24h ceiling is not configurable
+
+# --- engines ---------------------------------------------------------------
+# Model and effort are always passed explicitly. Interactive settings are
+# inherited by the unattended run, so leaving these implicit means someone
+# changing their own editor settings silently changes overnight cost.
+HEINZEL_EXECUTOR_ENGINE="claude"
+HEINZEL_MODEL="claude-opus-5"
+HEINZEL_EFFORT="xhigh"           # low|medium|high|xhigh|max
+
+# --- review (opt-in) -------------------------------------------------------
+# Off by default: it needs a second engine and it costs money. When enabled,
+# the executor's changes are re-read by a different engine in read-only mode.
+# A missing or failing reviewer never drops a task; it is a quality gate, not
+# an availability dependency.
+HEINZEL_REVIEW=0
+HEINZEL_REVIEWER_ENGINE="codex"
+HEINZEL_CODEX_MODEL="gpt-5.6-sol"
+HEINZEL_CODEX_EFFORT="xhigh"
+HEINZEL_REVIEW_ON_REVISE="note-only"   # note-only|fix-once|block
+HEINZEL_REVIEW_TIMEOUT=900
+HEINZEL_REVIEW_MAX_PATCH_BYTES=200000
+HEINZEL_CODEX_IGNORE_USER_CONFIG=0
+
+# --- posture (opt-in) ------------------------------------------------------
+# `hzl travel` and `hzl remote` change screen sharing, the packet filter,
+# wake-on-LAN, the screen lock delay and sudo policy. They refuse to run unless
+# this is 1, because guessing at someone else's firewall is not acceptable.
+HEINZEL_POSTURE=0
+HEINZEL_REMOTE_SCREENLOCK=300          # seconds, or "immediate"
+HEINZEL_TRAVEL_SCREENLOCK="immediate"
+HEINZEL_REMOTE_IDLE_SLEEP=0            # pmset -c sleep, minutes (0 = never)
+HEINZEL_TRAVEL_IDLE_SLEEP=10
+HEINZEL_TICKET_TIMEOUT=480             # sudo ticket lifetime, minutes
+HEINZEL_CLAUDE_SETTINGS="${HOME}/.claude/settings.json"
+
+# --- housekeeping ----------------------------------------------------------
+HEINZEL_LABEL="local.heinzel"          # launchd label
+LOG_RETENTION_DAYS=14

@@ -1,0 +1,201 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+#
+# hzl-review — read the executor's work back with a different engine.
+#
+#   hzl-review <workdir> <snapdir> <run_id> <outdir> [tasks_done_summary]
+#
+# Exit code is the gate, and it is the whole interface:
+#
+#   0   approve     the work stands
+#   10  revise      it stands, but something needs attention
+#   20  reject      revert what this run closed
+#   1   failed      the review itself did not happen
+#
+# `failed` is not `reject`. A reviewer that is missing, unauthenticated or slow
+# must never cost a task: review is a quality gate, not an availability
+# dependency. When it fails, the work stays done and the handover says it was
+# not reviewed.
+
+set -uo pipefail
+
+HEINZEL_ROOT=$(
+  src=${BASH_SOURCE[0]}
+  while [ -L "${src}" ]; do
+    dir=$(cd -P "$(dirname "${src}")" && pwd)
+    src=$(readlink "${src}")
+    case ${src} in
+      (/*) ;;
+      (*) src=${dir}/${src} ;;
+    esac
+  done
+  cd -P "$(dirname "${src}")/.." && pwd
+)
+export HEINZEL_ROOT
+
+# shellcheck source=lib/common.sh
+. "${HEINZEL_ROOT}/lib/common.sh"
+# shellcheck source=lib/watchdog.sh
+. "${HEINZEL_ROOT}/lib/watchdog.sh"
+# shellcheck source=lib/engines.sh
+. "${HEINZEL_ROOT}/lib/engines.sh"
+
+hzl_load_conf
+hzl_validate_conf || exit 1
+
+[ $# -ge 4 ] || {
+  printf 'usage: %s <workdir> <snapdir> <run_id> <outdir> [tasks_done]\n' "${0##*/}" >&2
+  exit 1
+}
+WORKDIR=$1
+SNAPDIR=$2
+RUN_ID=$3
+OUTDIR=$4
+TASKS_DONE=${5:-"(not recorded)"}
+
+mkdir -p "${OUTDIR}" || exit 1
+PATCH="${OUTDIR}/changeset.patch"
+VERDICT_JSON="${OUTDIR}/verdict.json"
+
+write_verdict() {
+  jq -n --arg verdict "$1" --arg summary "$2" \
+     --arg engine "${3:-}" --argjson findings "${4:-[]}" \
+     '{verdict: $verdict, summary: $summary,
+       engine: (if $engine == "" then null else $engine end),
+       findings: $findings}' >"${VERDICT_JSON}"
+}
+
+# --- is there anything to review? ------------------------------------------
+
+if [ ! -d "${SNAPDIR}" ]; then
+  write_verdict skipped "no snapshot was taken, so there is nothing to compare against"
+  exit 1
+fi
+
+"${HEINZEL_ROOT}/bin/hzl-changeset" diff "${WORKDIR}" "${SNAPDIR}" \
+  "${HEINZEL_REVIEW_MAX_PATCH_BYTES}" >"${PATCH}" 2>/dev/null
+
+if [ ! -s "${PATCH}" ] || grep -qx "no changes" "${PATCH}"; then
+  write_verdict no-change "the run changed nothing, so there was nothing to review"
+  exit 0
+fi
+
+# Truncation is recorded in the patch itself and repeated here, so that neither
+# the reviewer nor the morning reader can mistake a partial view for a full one.
+TRUNCATED=false
+PATCH_BYTES=$(wc -c <"${PATCH}" | tr -d ' ')
+if [ "${PATCH_BYTES}" -gt "${HEINZEL_REVIEW_MAX_PATCH_BYTES}" ]; then
+  head -c "${HEINZEL_REVIEW_MAX_PATCH_BYTES}" "${PATCH}" >"${PATCH}.cut"
+  printf '\n\n... TRUNCATED: the change set is %s bytes, %s were shown ...\n' \
+    "${PATCH_BYTES}" "${HEINZEL_REVIEW_MAX_PATCH_BYTES}" >>"${PATCH}.cut"
+  mv -f "${PATCH}.cut" "${PATCH}"
+  TRUNCATED=true
+fi
+
+# --- can we review at all? -------------------------------------------------
+
+if ! engine_available "${HEINZEL_REVIEWER_ENGINE}"; then
+  write_verdict failed "reviewer engine '${HEINZEL_REVIEWER_ENGINE}' is not installed"
+  exit 1
+fi
+if ! engine_auth_ok "${HEINZEL_REVIEWER_ENGINE}"; then
+  write_verdict failed "reviewer engine '${HEINZEL_REVIEWER_ENGINE}' is not authenticated"
+  exit 1
+fi
+
+# --- run the reviewer ------------------------------------------------------
+
+# The value is passed through the environment, not with awk -v: awk rejects a
+# literal newline in a -v assignment, and several of these values are
+# multi-line (a task and its notes, a list of findings). Passing them with -v
+# silently produced an empty prompt.
+render() {
+  local key=$1
+  HZL_RENDER_VAL=$2 awk -v key="${key}" '
+    BEGIN { val = ENVIRON["HZL_RENDER_VAL"] }
+    {
+      while ((i = index($0, key)) > 0)
+        $0 = substr($0, 1, i - 1) val substr($0, i + length(key))
+      print
+    }'
+}
+
+PROMPT="${OUTDIR}/prompt.md"
+# The change set is spliced in from the file rather than passed through a shell
+# variable: it can be hundreds of kilobytes, and argument lists have limits.
+< "${HEINZEL_ROOT}/prompts/review.md" \
+  render '{{WORKDIR}}' "${WORKDIR}" |
+  render '{{RUN_ID}}' "${RUN_ID}" |
+  render '{{TASKS_DONE}}' "${TASKS_DONE}" |
+  awk -v patchfile="${PATCH}" '
+    {
+      if (index($0, "{{CHANGESET}}") > 0) {
+        while ((getline line < patchfile) > 0) print line
+        close(patchfile)
+      } else print
+    }' >"${PROMPT}"
+
+if [ ! -s "${PROMPT}" ]; then
+  write_verdict failed "the rendered review prompt is empty"
+  exit 1
+fi
+if grep -q '{{[A-Z_]*}}' "${PROMPT}"; then
+  write_verdict failed "the review prompt still contains placeholders"
+  exit 1
+fi
+
+engine_run "${HEINZEL_REVIEWER_ENGINE}" reviewer "${WORKDIR}" \
+  "${PROMPT}" "${OUTDIR}" "${HEINZEL_REVIEW_TIMEOUT}" >/dev/null 2>&1
+RC=$?
+
+RESULT="${OUTDIR}/result.json"
+if [ ! -r "${RESULT}" ]; then
+  write_verdict failed "the reviewer produced no result"
+  exit 1
+fi
+
+EV=$(jq -r '.verdict' "${RESULT}" 2>/dev/null)
+if [ "${EV}" != ok ]; then
+  write_verdict failed "the reviewer ended with '${EV}' (exit ${RC})" "${HEINZEL_REVIEWER_ENGINE}"
+  exit 1
+fi
+
+# --- parse the verdict -----------------------------------------------------
+#
+# The schema is enforced by the engine. Stripping a ```json fence is insurance
+# for the day it is not: what must never happen is falling back to grepping
+# prose for the word "approve".
+
+RAW_TEXT=$(jq -r '.text // ""' "${RESULT}" 2>/dev/null)
+[ -n "${RAW_TEXT}" ] || RAW_TEXT=$(cat "${OUTDIR}/last.txt" 2>/dev/null)
+
+PARSED=$(printf '%s' "${RAW_TEXT}" |
+  sed -e 's/^[[:space:]]*```json[[:space:]]*//' -e 's/^[[:space:]]*```[[:space:]]*//' \
+      -e 's/^```[[:space:]]*$//' |
+  jq -c . 2>/dev/null)
+
+if [ -z "${PARSED}" ]; then
+  write_verdict failed "the reviewer's output was not JSON" "${HEINZEL_REVIEWER_ENGINE}"
+  exit 1
+fi
+
+V=$(printf '%s' "${PARSED}" | jq -r '.verdict // "unknown"')
+SUMMARY=$(printf '%s' "${PARSED}" | jq -r '.summary // ""')
+FINDINGS=$(printf '%s' "${PARSED}" | jq -c '.findings // []')
+
+jq -n --arg verdict "${V}" --arg summary "${SUMMARY}" \
+   --arg engine "${HEINZEL_REVIEWER_ENGINE}" --argjson findings "${FINDINGS}" \
+   --argjson truncated "${TRUNCATED}" \
+   --argjson duration_sec "$(jq -r '.duration_sec // 0' "${RESULT}")" \
+   --argjson tokens_in "$(jq -r '.tokens_in // 0' "${RESULT}")" \
+   --argjson tokens_out "$(jq -r '.tokens_out // 0' "${RESULT}")" \
+   '{verdict: $verdict, summary: $summary, engine: $engine, findings: $findings,
+     truncated: $truncated, duration_sec: $duration_sec,
+     tokens_in: $tokens_in, tokens_out: $tokens_out}' >"${VERDICT_JSON}"
+
+case ${V} in
+  approve) exit 0 ;;
+  revise) exit 10 ;;
+  reject) exit 20 ;;
+  *) exit 1 ;;
+esac

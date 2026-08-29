@@ -1,0 +1,13 @@
+# Heinzel - non-TTY-scoped sudo tickets. Managed by hzl(1).
+#
+# Claude Code has no TTY, so a ticket obtained in a VNC Terminal would not
+# otherwise apply to it. Dropping tty scoping is what lets a human authenticate
+# once and keep working remotely.
+#
+# This is a standing, write-capable sudo window. It is installed only while
+# posture is `remote`, and `hzl on` removes it for the duration of an
+# unattended session (DESIGN 4.3). `hzl doctor` reports its presence during a
+# session as a defect, because the only way to get there is a failed restore.
+
+Defaults !tty_tickets
+Defaults timestamp_timeout=__TIMEOUT__
