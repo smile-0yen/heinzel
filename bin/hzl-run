@@ -62,8 +62,11 @@ hzl_validate_conf || { log_event abort "invalid configuration"; exit 1; }
 # be typed at any moment.
 if [ -z "${HZL_LOCKED:-}" ]; then
   mkdir -p "${HEINZEL_HOME}" 2>/dev/null
-  HZL_LOCKED=1 lockf -t 0 -k "${RUN_LOCK}" "$0" --from "${TRIGGER}" \
-    $([ "${DRY_RUN}" = 1 ] && printf -- --dry-run)
+  if [ "${DRY_RUN}" = 1 ]; then
+    HZL_LOCKED=1 lockf -t 0 -k "${RUN_LOCK}" "$0" --from "${TRIGGER}" --dry-run
+  else
+    HZL_LOCKED=1 lockf -t 0 -k "${RUN_LOCK}" "$0" --from "${TRIGGER}"
+  fi
   rc=$?
   [ ${rc} -eq 75 ] && log_event skip "another run holds the lock"
   exit ${rc}

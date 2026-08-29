@@ -105,7 +105,7 @@ _engine_result_claude() {
 }
 
 _engine_result_codex() {
-  local raw=$1 last=$2
+  local raw=$1
   # codex emits JSONL events; there is no USD figure in its telemetry.
   jq -s -c '{
     session_id: (map(.session_id // empty) | last // null),
@@ -206,7 +206,7 @@ engine_run() {
       printf '%s' "${parsed}" | jq -r '.text // ""' >"${outdir}/last.txt" 2>/dev/null
       ;;
     codex)
-      parsed=$(_engine_result_codex "${outdir}/raw" "${outdir}/last.txt")
+      parsed=$(_engine_result_codex "${outdir}/raw")
       ;;
   esac
   [ -n "${parsed}" ] || parsed='{}'

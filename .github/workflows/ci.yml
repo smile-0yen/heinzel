@@ -29,7 +29,12 @@ jobs:
         run: |
           if find bin lib tests -type f 2>/dev/null | grep -q .; then
             brew install shellcheck
-            shellcheck --shell=bash --severity=warning $(find bin lib tests -type f)
+            # -x so sourced libraries are followed from their entry points.
+            # SC2034 is excluded: almost everything in lib/ is assigned there
+            # and consumed by the scripts that source it, which shellcheck
+            # cannot see when it analyses a file on its own.
+            shellcheck --shell=bash --severity=warning -x -e SC2034 \
+              $(find bin lib tests -type f) install.sh
           else
             echo "no shell sources yet (design phase) — skipping"
           fi

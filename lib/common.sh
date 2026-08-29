@@ -121,6 +121,10 @@ parse_duration() {
 abspath() {
   local p=$1 dir base
   [ -n "${p}" ] || return 1
+  # The tilde is quoted on purpose: case patterns undergo tilde expansion, so
+  # an unquoted ~/* would expand to the home directory and never match the
+  # literal "~/..." string this is here to catch.
+  # shellcheck disable=SC2088
   case ${p} in
     /*) ;;
     "~") p=${HOME} ;;
