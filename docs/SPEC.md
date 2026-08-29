@@ -512,6 +512,7 @@ Honest as of 2026-08-29.
 |---|---|
 | **Confinement to the working directory** | Verified 2026-08-30 against the generated permission file: a denied credential path is refused, and a write to `/tmp` is refused through both the Write tool and a shell redirect. The first attempt at this **failed** and the design was changed as a result (DESIGN §4.5) |
 | **A complete unattended task, end to end** | Verified 2026-08-30, run `20260830-001340`: the agent took the task from the backlog, created and verified the file, marked the line `[x]` with `run:<id>`, and the runner counted one completion from the ledger and wrote the handover. 14s, $0.35 |
+| **The timeout path** | Verified 2026-08-30 with a stand-in engine that claims a task then hangs: killed at 61s, `result: "timeout"`, `exit_code: 124`, the task rolled back from `[~]` to `[ ]`, no orphaned process. A *real* engine killed mid-call is still not reproduced |
 | **Capability inside the boundary under `dontAsk`** | Verified: commands never explicitly allowed (`python3`, a `tee` pipeline) still run and write inside the working directory, because a sandboxed command needs no prompt |
 | `hzl_timeout` contract | 124, 137, pass-through, 125 all correct; no orphaned grandchildren after switching to process-group signalling |
 | Ledger operations | Priority ordering, id allocation from the correct maximum, marker transitions, metadata replaced not appended, `[~]` rollback, `run:` targeting |
@@ -529,7 +530,7 @@ Honest as of 2026-08-29.
 | `hzl travel` / `remote` applying | Not run: it would drop the operator's own remote access mid-session |
 | The review pipeline against a live reviewer | Only the no-change and failure paths are exercised |
 | An overnight run under launchd | Not yet |
-| Timeout and HALT in the field | The logic is unit-checked; a real hour-long run and a real credential expiry have not been reproduced |
+| HALT in the field | The auth-failure patterns are desk-checked only; a real credential expiry has not been reproduced |
 
 **Inherited, not re-verified here.** These come from the kobito specification,
 measured on a different machine. They are implemented and commented as

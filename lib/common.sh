@@ -153,7 +153,8 @@ on_ac_power() { pmset -g batt 2>/dev/null | head -1 | grep -q "AC Power"; }
 
 battery_pct() { pmset -g batt 2>/dev/null | grep -o '[0-9]\{1,3\}%' | head -1; }
 
-# pmset -g omits SleepDisabled entirely when it is 0, so an empty read is 0.
+# pmset -g omits SleepDisabled entirely until it has been set at least once,
+# and prints it as 0 afterwards. An empty read therefore means 0 as well.
 sleep_disabled() {
   local v
   v=$(pmset -g 2>/dev/null | awk '/SleepDisabled/{print $2; exit}')

@@ -241,14 +241,46 @@ The `timeout` verdict and its `[~]` rollback have only been unit-checked. To
 exercise them for real, seed a task that cannot finish quickly and give it a
 very short clock:
 
+Seeding a slow *task* turns out not to work: the obvious `sleep 120` is
+refused by the Bash tool outright, and the agent — correctly — blocked the task
+rather than looking for a way around the refusal. Finding work that reliably
+takes longer than the minimum 60s clock is fiddly and costs tokens for nothing.
+
+Test the mechanism directly instead, with a stand-in engine that does what an
+interrupted agent does: claim the task, then hang. No API call, so what is
+under test is the runner's handling rather than the model's behaviour.
+
 ```sh
-hzl on --duration 1h --max-total 1 --timeout 60 --no-kick
-hzl run-now         # expect: result "timeout", exit 124, the task back at [ ]
-hzl off
+mkdir -p /tmp/hzl-stub
+cat > /tmp/hzl-stub/claude <<'STUB'
+#!/bin/bash
+B="$HOME/hzl-scratch/backlog.md"
+/usr/bin/sed -i '' 's/^- \[ \] (id:h-0001)/- [~] (id:h-0001)/' "$B"
+sleep 300
+STUB
+chmod +x /tmp/hzl-stub/claude
 ```
 
-> **Evidence 3b** — `tail -1 ~/.heinzel/logs/runs.jsonl | jq '{result,exit_code}'`
-> and the backlog line afterwards (it must be `[ ]`, not `[~]`).
+Adjust the id to whichever task is next, then:
+
+```sh
+hzl on --duration 1h --max-total 1 --timeout 60 --no-kick
+PATH="/tmp/hzl-stub:$PATH" hzl run-now
+hzl off
+rm -rf /tmp/hzl-stub
+```
+
+Expect roughly 61 seconds, `result: "timeout"`, `exit_code: 124`, the task back
+at `[ ]` rather than stranded at `[~]`, and no leftover `sleep 300` process.
+
+> **Evidence 3b** — `tail -1 ~/.heinzel/logs/runs.jsonl | jq -c '{result,exit_code,duration_sec}'`,
+> the backlog line afterwards, and `pgrep -fl "sleep 300"` (which should print
+> nothing).
+>
+> Verified this way on 2026-08-30. What this does **not** cover is a real
+> engine being killed mid-call: the watchdog's contract and its process-group
+> kill are verified separately, but the two have never been exercised together
+> against a live API call.
 
 ---
 
