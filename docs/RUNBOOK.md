@@ -74,7 +74,7 @@ classification, and it is the thing to look at:
 | Word | Meaning | Your move |
 |---|---|---|
 | *(no line at all)* | No session was running. Writing nothing is the design | Nothing. `HEINZEL_DEBUG=1` records these too |
-| `skip` | A gate closed: outside the window, budget spent, on battery, nothing to do | Usually nothing. For budget messages consider `hzl set` |
+| `skip` | A gate closed: outside the window, budget spent, on battery, nothing to do | Usually nothing. For budget messages consider `hzl set`. `hzl run-now` ignores the window and the battery |
 | `abort` | A precondition failed: a missing directory, an invalid settings file | Needs you. A relative path in the configuration is the classic one |
 | `HALT` | Runs stopped by themselves: auth failure, or three failures running | Fix the cause, then `hzl resume` |
 | `ok` | A run finished. Counts, budget, duration and review outcome on one line | — |
@@ -158,6 +158,8 @@ rather than by task count, set `HEINZEL_MAX_BUDGET_USD`.
 
 **"It did nothing all night."** `hzl status` first. Most likely the session
 expired, the machine went onto battery, or the backlog had no `[ ]` lines.
+Scheduled runs skip on battery deliberately; `hzl run-now` does not, so it is
+the way to check whether anything else is wrong.
 `grep skip ~/.heinzel/logs/runner.log` shows which gate closed and when.
 
 **"It stopped after a few runs."** Look for `HALT`. Three consecutive failures

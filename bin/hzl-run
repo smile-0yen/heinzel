@@ -130,7 +130,17 @@ REMAINING=$((MAX_TOTAL - DONE_TOTAL))
 [ "${REMAINING}" -gt 0 ] || skip "session budget spent (${DONE_TOTAL}/${MAX_TOTAL})"
 
 # --- gate 5: power ---------------------------------------------------------
-on_ac_power || skip "on battery ($(battery_pct))"
+# Scheduled runs never run on battery: the point of the gate is to stop an
+# unattended machine draining itself overnight. A human who typed `hzl run-now`
+# is standing there and has already made that call, so manual runs are exempt -
+# loudly, not silently.
+if ! on_ac_power; then
+  if [ "${TRIGGER}" = manual ]; then
+    warn "running on battery ($(battery_pct)) because you asked for this run explicitly"
+  else
+    skip "on battery ($(battery_pct))"
+  fi
+fi
 
 # --- gate 6: do not start a run that cannot finish ------------------------
 EXPIRES=$(state_get .expires_at_epoch 0)
@@ -177,6 +187,7 @@ ${NEXT_NOTES}"
   printf 'workdir  %s\n' "${WORKDIR}"
   printf 'budget   %s task(s) this run, %s/%s this session\n' "${MAX_TASKS}" "${DONE_TOTAL}" "${MAX_TOTAL}"
   printf 'engine   %s %s effort=%s\n' "${HEINZEL_EXECUTOR_ENGINE}" "${HEINZEL_MODEL}" "${HEINZEL_EFFORT}"
+  printf 'power    %s\n' "$(on_ac_power && echo AC || echo "battery $(battery_pct)")"
   printf 'todo     %s\n\n' "${TODO_BEFORE}"
 } >"${RUN_LOG}"
 

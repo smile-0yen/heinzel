@@ -246,12 +246,19 @@ engine call.
 | 2 | `effective_mode() == heinzel` | silent exit 0, **no log line** |
 | 3 | `in_window()` | `skip` |
 | 4 | session budget remaining > 0 | `skip` |
-| 5 | on AC power | `skip` |
+| 5 | on AC power **or** `--from manual` | `skip` |
 | 6 | time to expiry ≥ `run_timeout_sec` | `skip` |
 | 7 | workdir, backlog, engine, and **valid settings JSON** | `abort` |
 | 8 | at least one `[ ]` task | `skip` |
 
-`--from manual` bypasses gate 3 only. All seven others apply.
+`--from manual` bypasses gates 3 and 5. The other six apply unchanged.
+
+Gate 3 because the operator is present and the schedule exists to keep runs out
+of the working day, not to stop a human. Gate 5 for the same reason: it exists
+so that an unattended machine does not drain its battery overnight, which is not
+a decision a person standing at the machine needs protecting from. A manual run
+on battery warns rather than proceeding quietly, and the power state is recorded
+in the run log either way.
 
 Gate 2 writing nothing is deliberate: it is the common case, and a machine
 without a session must be untouched by having Heinzel installed. `HEINZEL_DEBUG=1`

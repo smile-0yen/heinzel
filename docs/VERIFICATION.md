@@ -141,9 +141,9 @@ hzl on --duration 1h --max-total 1 --max-tasks 1 --timeout 600 --no-kick
 
 Why each flag:
 
-- **Plug the machine in first.** The runner skips on battery and there is no
-  override for that: `--force` only lets the *session* start, it does not make
-  runs happen on battery. A forced session on battery does nothing at all.
+- **Mains power is preferable but no longer required.** Scheduled runs skip on
+  battery; `hzl run-now` does not, and warns instead. On battery you need
+  `hzl on --force` to start the session, and then `run-now` works.
 - `--max-total 1` — one task, so a misbehaving run costs one task's worth.
 - `--timeout 600` — ten minutes, not an hour. If the agent hangs on a denied
   tool call (a behaviour inherited from kobito's notes and never re-verified
