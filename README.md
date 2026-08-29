@@ -27,13 +27,14 @@ travel posture — that combination is refused rather than merely discouraged.
 
 ## Status
 
-**Design phase — not yet implemented.** The design is written down in full first:
+**Early, and honest about it.** The whole system is implemented and its parts
+have been exercised by hand, but **no run has yet called a real engine** — every
+run so far has been a dry run. `docs/SPEC.md` §15 lists exactly what has been
+verified and what has not; nothing there is rounded up.
 
 - [`docs/DESIGN.md`](docs/DESIGN.md) — why it is built this way; the judgements and the traps
-- `docs/SPEC.md` — what is normatively true (interfaces, schemas, limits) — *pending*
-- `docs/RUNBOOK.md` — how to operate it — *pending*
-
-See [`docs/DESIGN.md` §9](docs/DESIGN.md) for the phase plan.
+- [`docs/SPEC.md`](docs/SPEC.md) — what is normatively true: interfaces, schemas, limits
+- [`docs/RUNBOOK.md`](docs/RUNBOOK.md) — how to operate it, and what to do when it stops
 
 ## What it is careful about
 
@@ -69,7 +70,23 @@ macOS does not ship. It carries its own watchdog.
 
 ## Installation
 
-Not yet. Phase 1 will add `hzl install`.
+```sh
+git clone https://github.com/smile-0yen/heinzel.git
+cd heinzel && ./install.sh
+```
+
+That links `hzl` into `~/.local/bin` and copies the example configuration.
+Then edit `etc/heinzel.conf` (at minimum `DEFAULT_WORKDIR` and
+`DEFAULT_BACKLOG`), and:
+
+```sh
+hzl doctor          # check the setup
+hzl install         # generate the launchd agent and the permission file
+hzl on --dry-run    # see what starting a session would do
+```
+
+Nothing runs unattended until you run `hzl on`, and `hzl travel` / `hzl remote`
+refuse to touch anything until you set `HEINZEL_POSTURE=1` deliberately.
 
 ## Prior art
 
