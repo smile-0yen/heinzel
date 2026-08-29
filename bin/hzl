@@ -868,6 +868,29 @@ cmd_doctor() {
     if [ "${mode}" = heinzel ] && [ -f "${SUDOERS_TICKET}" ]; then
       doc_bad "the relaxed sudo ticket window is OPEN during a session - it should have been closed"
     fi
+    # Closing our own ticket file achieves nothing if another drop-in grants
+    # the same thing. Heinzel only manages its own two files, so anything else
+    # in sudoers.d is outside the guarantee and has to be named.
+    local others f
+    others=$(ls /etc/sudoers.d 2>/dev/null | grep -v '^heinzel-' | tr '\n' ' ')
+    if [ -n "${others}" ]; then
+      local leaky=""
+      for f in ${others}; do
+        if sudo -n grep -lq 'tty_tickets\|timestamp_timeout' "/etc/sudoers.d/${f}" 2>/dev/null; then
+          leaky="${leaky}${f} "
+        fi
+      done
+      if [ -n "${leaky}" ]; then
+        doc_bad "another sudoers file keeps a ticket window open: ${leaky}"
+        printf '       hzl on removes its own heinzel-ticket, but these grant the same thing,\n'
+        printf '       so the write-capable sudo window is NOT closed during a session.\n'
+      elif sudo -n true 2>/dev/null; then
+        doc_ok "no other sudoers file grants a ticket window (${others})"
+      else
+        doc_warn "other sudoers files present and not readable from here: ${others}"
+        printf '       they are outside Heinzel'"'"'s control; check them for !tty_tickets by hand.\n'
+      fi
+    fi
   else
     doc_ok "posture management is off"
   fi

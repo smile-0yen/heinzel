@@ -512,6 +512,8 @@ Honest as of 2026-08-29.
 |---|---|
 | **Confinement to the working directory** | Verified 2026-08-30 against the generated permission file: a denied credential path is refused, and a write to `/tmp` is refused through both the Write tool and a shell redirect. The first attempt at this **failed** and the design was changed as a result (DESIGN §4.5) |
 | **A complete unattended task, end to end** | Verified 2026-08-30, run `20260830-001340`: the agent took the task from the backlog, created and verified the file, marked the line `[x]` with `run:<id>`, and the runner counted one completion from the ledger and wrote the handover. 14s, $0.35 |
+| **`travel` blocks inbound traffic** | Verified 2026-08-30: `pfctl` reports `Status: Enabled` with `block drop in all`, and port 5900 becomes unreachable. Screen sharing closes and reopens with the posture |
+| **`hzl on` refuses under `travel`** | Verified: exit 1, naming the posture and telling the operator to run `hzl remote` first. The refused cell of the matrix is unreachable in practice, not only by design |
 | **The sudo ticket interlock** | Verified 2026-08-30 on the real machine: `heinzel-ticket` present under `remote`, removed by `hzl on`, restored by `hzl off`, and `doctor` section 8 reported no defect while the session was live |
 | **`travel` / `remote` transitions** | Verified: screen sharing closes and reopens, posture reports `travel` and `remote`, and `mixed` was correctly reported for a half-configured machine before the first transition |
 | **The timeout path** | Verified 2026-08-30 with a stand-in engine that claims a task then hangs: killed at 61s, `result: "timeout"`, `exit_code: 124`, the task rolled back from `[~]` to `[ ]`, no orphaned process. A *real* engine killed mid-call is still not reproduced |
@@ -529,11 +531,17 @@ Honest as of 2026-08-29.
 | Item | Status |
 |---|---|
 | `hzl on` / `off` end to end | Not run: it installs a LaunchAgent and starts `caffeinate` |
-| That `travel` actually blocks inbound traffic | **Not verified.** The transition applied and wrote a validated pf ruleset, but the read-back was broken (it used the unprivileged reader, which can only answer `unknown`), so a silent failure to block would have looked like success. Fixed; needs re-running |
-| That `hzl on` refuses under `travel` | **Not verified.** The command never ran: a trailing shell comment containing parentheses was parsed by zsh as a glob qualifier and the line failed before executing |
+
 | The review pipeline against a live reviewer | Only the no-change and failure paths are exercised |
 | An overnight run under launchd | Not yet |
 | HALT in the field | The auth-failure patterns are desk-checked only; a real credential expiry has not been reproduced |
+
+> The interlock is verified as *implemented*. On the machine it was tested on
+> it currently has **no effect**, because a sudoers drop-in left over from a
+> predecessor tool grants `!tty_tickets` and the same timeout independently.
+> `hzl doctor` now reports that as a defect rather than leaving it to be
+> discovered. Removing our file does not close a window somebody else is
+> holding open.
 
 **Inherited, not re-verified here.** These come from the kobito specification,
 measured on a different machine. They are implemented and commented as

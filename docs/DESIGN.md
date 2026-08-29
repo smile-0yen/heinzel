@@ -541,5 +541,12 @@ Recorded rather than guessed at.
 4. **FileVault.** An unexpected reboot during a session strands the machine at the unlock screen,
    unreachable remotely. Nothing Heinzel can do about it; it belongs in the RUNBOOK as the reason
    planned reboots go through `sudo fdesetup authrestart`.
-5. **What happens to `macmode`.** Leave `/usr/local/bin/macmode` in place, replace it with a shim
-   that prints the `hzl` equivalent, or remove it. Recommend the shim for one release, then remove.
+5. **What happens to `macmode`.** No longer only a tidiness question. Its
+   `/etc/sudoers.d/claude-code` carries `Defaults !tty_tickets` and
+   `timestamp_timeout=480` — exactly what `heinzel-ticket` carries and what
+   `hzl on` removes for the duration of a session. While that file is
+   installed, closing ours closes nothing: the window stays open through
+   somebody else's file, and §4.3's guarantee does not hold on that machine.
+   `hzl doctor` now detects and names this. The sequence is to verify Heinzel's
+   posture handling, then remove `/etc/sudoers.d/claude-code` and
+   `/usr/local/bin/macmode` together — not to leave both tools installed.
