@@ -35,6 +35,7 @@ verified and what has not; nothing there is rounded up.
 - [`docs/DESIGN.md`](docs/DESIGN.md) — why it is built this way; the judgements and the traps
 - [`docs/SPEC.md`](docs/SPEC.md) — what is normatively true: interfaces, schemas, limits
 - [`docs/RUNBOOK.md`](docs/RUNBOOK.md) — how to operate it, and what to do when it stops
+- [`docs/VERIFICATION.md`](docs/VERIFICATION.md) — the manual test plan for everything SPEC §15 lists as unverified
 
 ## What it is careful about
 
