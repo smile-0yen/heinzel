@@ -883,7 +883,9 @@ generate_plist() {
       -e "s|__HOME__|${HOME}|g" \
       -e "s|__LOGDIR__|${LOG_DIR}|g" \
       "${HEINZEL_ROOT}/etc/agent.plist.in" |
-  awk -v cal="${cal}" '{ if ($0 == "__CALENDAR__") print cal; else print }'
+  HZL_CAL=${cal} awk '
+    BEGIN { cal = ENVIRON["HZL_CAL"] }
+    { if ($0 == "__CALENDAR__") print cal; else print }'
 }
 
 # The deny list has to name the working directory, which is configuration, so
@@ -909,6 +911,10 @@ cmd_install() {
   local wd
   wd=$(state_get .workdir "${DEFAULT_WORKDIR}")
   [ -n "${wd}" ] || die "no workdir configured - set DEFAULT_WORKDIR in etc/heinzel.conf"
+  # Through abspath, exactly as `on` stores it. Without this, installing before
+  # the first session writes allow rules for /tmp/x while the agent runs in
+  # /private/tmp/x, and the rules match nothing.
+  wd=$(abspath "${wd}")
   generate_settings "${wd}" || die "could not generate the agent permission file"
   local pl
   pl=$(plist_path)

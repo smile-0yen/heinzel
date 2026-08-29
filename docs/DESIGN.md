@@ -351,6 +351,14 @@ No associative arrays, no `${var^^}`, no `mapfile`, no `${var@Q}`. Plus two from
   under `set -u` that is an unbound-variable abort. Always `${var}`. Mostly moot now the UI is
   English, but comments and prompt templates still carry UTF-8, so lint keeps the rule.
 - multibyte truncation is locale-dependent. One `trunc` helper, explicit `LC_CTYPE`.
+- **`awk -v` rejects a newline in the value.** Hit twice while building: once
+  rendering a prompt (a task plus its notes), which produced an *empty* prompt
+  that then sailed through the leftover-placeholder check, and once generating
+  the plist's calendar block, which meant `hzl install` wrote no plist at all.
+  Multi-line values go through `ENVIRON` instead. Where the value is text a
+  human typed and the destination is line-oriented, it is flattened with
+  `oneline` rather than passed through — a newline in a backlog reason would
+  break the ledger format even if awk accepted it.
 
 ### 6.4 Inherited but not re-observed
 

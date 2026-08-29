@@ -79,6 +79,13 @@ trunc() {
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Flatten to a single line. The ledger is line-oriented and its metadata lives
+# in a trailing comment, so an embedded newline would break the format; it also
+# happens to be the thing awk -v refuses to accept.
+oneline() {
+  printf '%s' "$*" | tr '\n\r\t' '   ' | sed -e 's/  */ /g' -e 's/^ //' -e 's/ $//'
+}
+
 # --- time ------------------------------------------------------------------
 
 now_epoch() { date +%s; }
@@ -516,12 +523,18 @@ log_event() {
 # Priority: the nearest preceding `## P<n>` heading; before any heading, 99.
 # macOS awk cannot be trusted with [[:space:]], so every pattern uses [ \t].
 
+# The example is inside a fence on purpose. An illustrative `- [ ]` line at the
+# top level is a real todo: the first unattended run would pick it up and spend
+# a task on it.
 BACKLOG_TEMPLATE='# Backlog
 
-Lines Heinzel may pick up look like this:
+Add tasks under a priority heading, like this:
 
+```
 ## P1
-- [ ] first task, most important section first
+- [ ] the most important thing
+      note: indented lines are passed to the agent as context
+```
 
 Markers: [ ] todo   [~] in progress   [x] done   [!] blocked
 Ids are assigned automatically; do not write them by hand.
@@ -541,6 +554,10 @@ backlog_scan() {
   local f=$1
   [ -r "${f}" ] || return 1
   awk '
+    # Fenced blocks are documentation, not work. Without this, an example task
+    # written inside a fence is picked up and attempted like a real one.
+    /^[ \t]*(```|~~~)/ { infence = !infence; next }
+    infence { next }
     /^##[ \t]*[Pp][0-9]+/ {
       line = $0
       sub(/^##[ \t]*[Pp]/, "", line)
@@ -657,6 +674,7 @@ backlog_assign_ids() {
 # rather than appending a second one.
 backlog_set_state() {
   local f=$1 id=$2 marker=$3 meta=${4:-} lineno tmp
+  meta=$(oneline "${meta}")
   lineno=$(backlog_line_of_id "${f}" "${id}")
   [ -n "${lineno}" ] || return 3
   tmp=$(mktemp "${TMPDIR:-/tmp}/hzl-backlog.XXXXXX") || return 1
@@ -677,6 +695,7 @@ backlog_set_state() {
 # Add an indented continuation line directly under a task.
 backlog_add_note() {
   local f=$1 id=$2 note=$3 lineno tmp
+  note=$(oneline "${note}")
   [ -n "${note}" ] || return 0
   lineno=$(backlog_line_of_id "${f}" "${id}")
   [ -n "${lineno}" ] || return 3
