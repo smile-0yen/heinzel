@@ -163,6 +163,23 @@ posture_firewall_priv() {
   esac
 }
 
+# pfctl prints the same four advisories on every macOS run - no ALTQ support,
+# and a warning about -f whenever the main ruleset is involved - plus "pf not
+# enabled" when disabling something already disabled. None is actionable, and
+# printing them makes a successful transition read like a failure. They are
+# filtered by exact text, so anything pfctl says that is not on this list still
+# reaches the operator. The read-back, not the chatter, is what decides whether
+# the step worked.
+pf_quiet() {
+  if [ "${POSTURE_DRY_RUN}" = 1 ]; then
+    printf '  would run: sudo pfctl %s\n' "$*"
+    return 0
+  fi
+  sudo pfctl "$@" 2>&1 |
+    grep -vE 'No ALTQ support in kernel|ALTQ related functions disabled|^pfctl: pf not enabled$|Use of -f option, could result in flushing|present in the main ruleset added by the system|See /etc/pf.conf for further details|^$' >&2
+  return 0
+}
+
 # Echo the command in dry-run mode, run it otherwise.
 prun() {
   if [ "${POSTURE_DRY_RUN}" = 1 ]; then
@@ -220,12 +237,12 @@ posture_set_firewall() {
         printf '    %s\n' "${out}"
         return 1
       fi
-      sudo pfctl -f "${PF_TRAVEL}" >/dev/null 2>&1
-      sudo pfctl -e >/dev/null 2>&1
+      pf_quiet -f "${PF_TRAVEL}"
+      pf_quiet -e
     fi
   else
-    prun sudo pfctl -d
-    prun sudo pfctl -f /etc/pf.conf
+    pf_quiet -d
+    pf_quiet -f /etc/pf.conf
   fi
 
   [ "${POSTURE_DRY_RUN}" = 1 ] && return 0
@@ -263,6 +280,12 @@ posture_set_screenlock() {
   local want=$1 got
   if [ "${POSTURE_DRY_RUN}" = 1 ]; then
     printf '  would set the screen lock delay to %s\n' "${want}"
+    return 0
+  fi
+  # sysadminctl always asks for the login password, so do not ask when there is
+  # nothing to change. This is also what makes the transition idempotent.
+  if [ "$(screenlock_now)" = "${want}" ]; then
+    say "  screen lock is already ${want}"
     return 0
   fi
   say "  setting the screen lock delay to ${want} (this asks for your login password)"
