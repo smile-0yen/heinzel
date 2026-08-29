@@ -435,7 +435,9 @@ cmd_off() {
   if [ -n "${backlog}" ] && [ -r "${backlog}" ]; then
     field "blocked, needs you" "$(backlog_count "${backlog}" "!")"
   fi
-  local notes="${LOG_DIR}/$(date +%Y-%m-%d)/notes.md"
+  local notes today
+  today=$(date +%Y-%m-%d)
+  notes="${LOG_DIR}/${today}/notes.md"
   [ -r "${notes}" ] && field "handover notes" "${notes}"
   printf '\n'
   log_event ok "session off after ${runs} run(s), ${done_n} task(s)"
