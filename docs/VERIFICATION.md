@@ -63,7 +63,12 @@ cd ~/Claude/heinzel
 ./install.sh
 ```
 
-Then edit `etc/heinzel.conf`. At minimum:
+`install.sh` copies the example configuration, which deliberately leaves the
+paths **empty** — there is no sensible default for where your work lives, so it
+does not guess. `hzl doctor` reports them as unconfigured until you fill them
+in, which is the expected state at this point, not a fault.
+
+Edit `etc/heinzel.conf`. At minimum:
 
 ```sh
 DEFAULT_WORKDIR="/Users/<you>/hzl-scratch"     # must be absolute and exist

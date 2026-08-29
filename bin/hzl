@@ -809,13 +809,24 @@ cmd_doctor() {
     doc_ok "sleep suppression matches the session state"
   fi
 
-  printf '\n6. backlog\n'
-  local b
+  printf '\n6. working directory and backlog\n'
+  local b w
+  w=$(state_get .workdir "${DEFAULT_WORKDIR}")
   b=$(state_get .backlog "${DEFAULT_BACKLOG}")
-  if [ -n "${b}" ] && [ -r "${b}" ]; then
-    doc_ok "${b}: $(backlog_count "${b}" " ") todo, $(backlog_count "${b}" "~") in progress, $(backlog_count "${b}" x) done, $(backlog_count "${b}" "!") blocked"
+  if [ -z "${w}" ] || [ -z "${b}" ]; then
+    doc_bad "not configured yet - set DEFAULT_WORKDIR and DEFAULT_BACKLOG in etc/heinzel.conf"
+  elif [ ! -d "${w}" ]; then
+    doc_bad "the working directory does not exist: ${w}"
+    printf '       create it, or point DEFAULT_WORKDIR somewhere that exists.\n'
+    printf "       'hzl on' refuses to start without it, because launchd runs with cwd=/\n"
   else
-    doc_bad "backlog not readable: ${b:-unset}"
+    doc_ok "working directory ${w}"
+    if [ -r "${b}" ]; then
+      doc_ok "${b}: $(backlog_count "${b}" " ") todo, $(backlog_count "${b}" "~") in progress, $(backlog_count "${b}" x) done, $(backlog_count "${b}" "!") blocked"
+    else
+      # Not a fault: `hzl on` creates it from a template.
+      doc_warn "no backlog at ${b} yet - 'hzl on' will create it"
+    fi
   fi
 
   printf '\n7. review pipeline\n'

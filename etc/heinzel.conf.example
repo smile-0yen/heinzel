@@ -7,8 +7,10 @@
 # --- what to work on -------------------------------------------------------
 # Both must be absolute paths. launchd runs with cwd=/, so a relative path is
 # not a latent bug, it is a certain abort.
-DEFAULT_WORKDIR="${HOME}/work"
-DEFAULT_BACKLOG="${HOME}/work/backlog.md"
+# There is no sensible default here, so there isn't one: fill both in.
+# The directory must already exist; the backlog file is created for you.
+DEFAULT_WORKDIR=""       # e.g. "/Users/you/projects"
+DEFAULT_BACKLOG=""       # e.g. "/Users/you/projects/backlog.md"
 
 # --- when to run -----------------------------------------------------------
 # Hours (0-23) at which launchd wakes the runner. The single source of truth
