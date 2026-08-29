@@ -904,9 +904,13 @@ generate_plist() {
 # the file the runner validates is generated rather than shipped.
 generate_settings() {
   local workdir=$1 out="${HEINZEL_ROOT}/etc/heinzel-settings.json"
+  # __HOME__ as well as the rest: the credential denials are written out in
+  # full rather than with a tilde, so they do not depend on permission rules
+  # performing tilde expansion - a behaviour this project has not verified.
   sed -e "s|__WORKDIR__|${workdir}|g" \
       -e "s|__HEINZEL_HOME__|${HEINZEL_HOME}|g" \
       -e "s|__HEINZEL_ROOT__|${HEINZEL_ROOT}|g" \
+      -e "s|__HOME__|${HOME}|g" \
       "${HEINZEL_ROOT}/etc/heinzel-settings.json.in" >"${out}" || return 1
   jq -e . "${out}" >/dev/null 2>&1 || {
     err "generated ${out} is not valid JSON"
