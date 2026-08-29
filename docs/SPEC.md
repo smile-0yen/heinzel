@@ -510,6 +510,8 @@ Honest as of 2026-08-29.
 
 | Item | Result |
 |---|---|
+| **Confinement to the working directory** | Verified 2026-08-30 against the generated permission file: a denied credential path is refused, and a write to `/tmp` is refused through both the Write tool and a shell redirect. The first attempt at this **failed** and the design was changed as a result (DESIGN §4.5) |
+| **Capability inside the boundary under `dontAsk`** | Verified: commands never explicitly allowed (`python3`, a `tee` pipeline) still run and write inside the working directory, because a sandboxed command needs no prompt |
 | `hzl_timeout` contract | 124, 137, pass-through, 125 all correct; no orphaned grandchildren after switching to process-group signalling |
 | Ledger operations | Priority ordering, id allocation from the correct maximum, marker transitions, metadata replaced not appended, `[~]` rollback, `run:` targeting |
 | Change set | git commits, git worktree, added / modified / deleted plain files, no double counting across the git boundary |

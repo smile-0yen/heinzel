@@ -15,9 +15,16 @@ rather than opening a public issue. A first response should take a few days; the
 
 - *An unattended agent escalating privilege.* The unattended lane (launchd → runner → engine) never
   uses `sudo`. This is enforced by the absence of a code path, and independently by the OS.
-- *An unattended agent reaching outside its working directory.* Reads, writes and edits are confined
-  to the configured workdir by a deny list, which is validated before each run — an invalid deny
-  list aborts the run instead of running without it.
+- *An unattended agent reaching outside its working directory.* Writes are confined to the
+  configured workdir by the OS: `sandbox.enabled` puts every Bash command and its child processes
+  inside Seatbelt, and `--permission-mode dontAsk` refuses anything not pre-approved, including
+  Claude's own Write tool. The permission file is validated before each run — an invalid one aborts
+  the run instead of running without it.
+
+  Until 2026-08-30 this said the confinement came from the deny list under `--permission-mode auto`.
+  That was wrong, and testing found it: an `allow` rule pre-approves rather than denying the rest,
+  permission rules do not see a subprocess opening a file itself, and a command the sandbox refuses
+  falls back to being approved unsandboxed. See `docs/DESIGN.md` §4.5.
 - *An unattended agent reaching credentials.* SSH, AWS, gcloud, kube, npm, netrc, `.env` files and
   the agent's own settings are denied explicitly.
 - *A session outliving the human's intent.* Sessions carry a TTL of at most 24 hours and drop to

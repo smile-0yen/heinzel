@@ -144,10 +144,17 @@ engine_run() {
       if [ "${role}" = reviewer ]; then
         # The reviewer has no way to write. A classifier deciding not to write
         # is not the same guarantee as not having the tool.
-        cmd+=(--disallowedTools Write Edit NotebookEdit Bash
+        cmd+=(--permission-mode dontAsk
+              --disallowedTools Write Edit NotebookEdit Bash
               --json-schema "$(cat "${HEINZEL_ROOT}/etc/review-schema.json")")
       else
-        cmd+=(--permission-mode auto
+        # dontAsk, not auto. auto approves whatever its classifier judges to
+        # match the request, which measurably included writing outside the
+        # working directory. dontAsk denies anything not pre-approved, and the
+        # sandbox in the settings file substitutes for the prompt on Bash, so
+        # the agent still runs arbitrary commands inside the working directory
+        # while everything outside it is refused by the OS.
+        cmd+=(--permission-mode dontAsk
               --disallowedTools "Bash(sudo *)" "Bash(sudo)" "Bash(git push *)")
       fi
       [ -n "${model}" ] && cmd+=(--model "${model}")

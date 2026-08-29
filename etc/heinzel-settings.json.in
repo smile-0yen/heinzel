@@ -13,8 +13,20 @@
     "    so the list does not depend on which pattern syntax is current;",
     "  * home paths are written out in full rather than with '~', so they do",
     "    not depend on tilde expansion happening in permission rules.",
-    "Verify with docs/VERIFICATION.md phase 3a rather than trusting this."
+    "Verify with docs/VERIFICATION.md phase 3a rather than trusting this.",
+    "",
+    "The sandbox below is what actually confines the agent to the working",
+    "directory. Permission rules govern Claude's own file tools; they do not",
+    "govern a subprocess that opens a file itself, so a Python script could",
+    "write anywhere without it. Measured: with the sandbox on but the mode set",
+    "to auto, both the Write tool and a shell redirect still reached /tmp,",
+    "because a command the sandbox refuses falls back to the ordinary",
+    "permission flow and auto's classifier approves it. It takes the sandbox",
+    "AND dontAsk together, which is why bin/hzl-run passes that mode."
   ],
+  "sandbox": {
+    "enabled": true
+  },
   "permissions": {
     "deny": [
       "Bash(sudo)", "Bash(sudo *)", "Bash(sudo:*)",

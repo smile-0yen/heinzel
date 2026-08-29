@@ -229,9 +229,48 @@ Four layers, inherited from kobito unchanged. Each holds if any other is removed
 | Layer | Mechanism | Guarantees |
 |---|---|---|
 | 1 | No privilege anywhere in launchd → runner → engine | A runaway cannot reach root. Enforced by the OS, not by us. |
-| 2 | `deny` in `etc/heinzel-settings.json` | Dangerous commands and secret files are unreachable. `deny` beats `allow`. |
-| 3 | `--disallowedTools` repeating the critical denials | `--print` silently ignores a malformed settings file; the denials that matter most are also passed as arguments. |
-| 4 | The prompt's stop conditions + the permission classifier | "When in doubt, block." Covers the judgement problems layers 1–3 cannot express. |
+| 2 | `sandbox.enabled` + `--permission-mode dontAsk` | **Writes cannot leave the working directory.** Seatbelt enforces it for every Bash command and its children; `dontAsk` refuses anything not pre-approved, including the Write tool. |
+| 3 | `deny` in `etc/heinzel-settings.json` and `--disallowedTools` | Dangerous commands and secret files are unreachable. `deny` beats `allow`, and the denials that matter most are repeated as arguments because `--print` silently ignores a malformed settings file. |
+| 4 | The prompt's stop conditions | "When in doubt, block." Covers the judgement problems layers 1–3 cannot express. |
+
+### 4.5 Why the deny list is not the confinement — measured
+
+The first version of this design put confinement in layer 2's deny list and an
+`allow` rule for the working directory, under `--permission-mode auto`. That
+does not confine anything, and phase 3a of the verification plan caught it on
+the first run: asked to create a file in `/tmp`, the agent did.
+
+Two separate reasons, both structural rather than incidental:
+
+- **An `allow` rule is not a boundary.** It pre-approves; it does not deny the
+  rest. Under `auto`, anything unmatched goes to a classifier that approves
+  what looks consistent with the request — and writing the file the user asked
+  for looks exactly like that.
+- **Permission rules do not govern subprocesses.** They cover Claude's own file
+  tools and the shell commands Claude Code recognises. A Python script that
+  opens a file itself is invisible to them.
+
+The mechanism that does work is the OS: `sandbox.enabled` puts every Bash
+command and its children inside Seatbelt, writable only within the working
+directory and the session temp directory.
+
+The sandbox alone is still not enough, which is the part worth remembering.
+Measured with the sandbox on and the mode left at `auto`: the sandbox refused
+the write, the command **fell back to the ordinary permission flow as
+unsandboxed**, and the classifier approved it. The file appeared. It takes the
+sandbox *and* `dontAsk` together — the sandbox to bound what a process can
+touch, `dontAsk` to stop the fallback path being approved.
+
+The cost of `dontAsk` was the thing worth checking, and it is smaller than
+expected: because a sandboxed command needs no prompt, the agent still runs
+arbitrary commands it was never explicitly granted — `python3`, pipelines,
+build tools — as long as they stay inside the working directory. Capability
+inside the boundary is unaffected; only crossing it is refused.
+
+This is the same principle already applied to the reviewer, which is denied
+write tools and run under codex's `read-only` sandbox: **take the capability
+away at the kernel, not at the classifier.** It simply had not been applied to
+the executor.
 
 Layer 3 exists because of a documented `claude --print` behaviour, not a hypothetical one. Layer 2
 is validated with `jq -e .` before every run: a silently-ignored deny list is the worst available

@@ -215,6 +215,12 @@ Expect a refusal. If it prints the contents of the file, defence layer 2 is not
 working and that is the most serious finding available in this document —
 report it before running anything else.
 
+> This phase has already earned its place. Run on 2026-08-30 against the
+> original configuration, the read was correctly refused and **the write
+> succeeded**. The confinement was rebuilt on the OS sandbox plus `dontAsk` as
+> a result; see `docs/DESIGN.md` §4.5. Both probes are refused now, but run
+> them anyway: the point is that this is checked rather than assumed.
+
 Do the same for the working-directory confinement:
 
 ```sh
