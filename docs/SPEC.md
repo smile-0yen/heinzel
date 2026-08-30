@@ -511,6 +511,7 @@ Honest as of 2026-08-29.
 | Item | Result |
 |---|---|
 | **Confinement to the working directory** | Verified 2026-08-30 against the generated permission file: a denied credential path is refused, and a write to `/tmp` is refused through both the Write tool and a shell redirect. The first attempt at this **failed** and the design was changed as a result (DESIGN §4.5) |
+| **A night under launchd** | Verified 2026-08-30. Slots fired at 02:00:02, 03:00:05, 04:00:02 and 05:00:02 — separately and on the hour, not batched on wake. The 02:00 slot completed a task unattended (`trigger: "launchd"`, 53s, $0.58); the remaining three found an empty backlog and cost nothing. Sleep stayed suppressed with the lid closed for the whole session, the budget held at 1/3, and no run fired during the day |
 | **A complete unattended task, end to end** | Verified 2026-08-30, run `20260830-001340`: the agent took the task from the backlog, created and verified the file, marked the line `[x]` with `run:<id>`, and the runner counted one completion from the ledger and wrote the handover. 14s, $0.35 |
 | **`travel` blocks inbound traffic** | Verified 2026-08-30: `pfctl` reports `Status: Enabled` with `block drop in all`, and port 5900 becomes unreachable. Screen sharing closes and reopens with the posture |
 | **`hzl on` refuses under `travel`** | Verified: exit 1, naming the posture and telling the operator to run `hzl remote` first. The refused cell of the matrix is unreachable in practice, not only by design |
@@ -530,10 +531,8 @@ Honest as of 2026-08-29.
 
 | Item | Status |
 |---|---|
-| `hzl on` / `off` end to end | Not run: it installs a LaunchAgent and starts `caffeinate` |
 
 | The review pipeline against a live reviewer | Only the no-change and failure paths are exercised |
-| An overnight run under launchd | Not yet |
 | HALT in the field | The auth-failure patterns are desk-checked only; a real credential expiry has not been reproduced |
 
 > The interlock is verified as *implemented*. On the machine it was tested on
