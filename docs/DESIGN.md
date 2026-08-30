@@ -420,9 +420,17 @@ Carried from macmode, measured on this OS version:
   where the control is greyed out and captioned: **iPhone Mirroring set to
   authenticate automatically forces an immediate lock.** Nothing readable from
   a shell says so; `com.apple.ScreenContinuity` records only that an auth
-  frequency has been chosen, not which. The lesson is narrow but real — when
-  the OS refuses a setting, the UI may be the only place it explains itself,
-  and elimination from the command line can produce a confident wrong answer.
+  frequency has been chosen, not which. Turning that setting off restored the
+  delay immediately — `sysadminctl -screenLock 300` then succeeded and read
+  back as 300 — which confirms it was a feature interaction rather than a
+  property of the machine, and that the setter itself was never at fault.
+
+  Two things carry forward. The narrow one: when the OS refuses a setting, the
+  UI may be the only place it explains itself, and elimination from the command
+  line can produce a confident wrong answer. The load-bearing one: the
+  read-back caught this on the first run and kept saying so. A setter that
+  trusted its own exit code would have reported success every time while the
+  machine sat at `immediate` for as long as anyone cared to look.
 - **`pfctl` cannot be read at all without root.** This one was worse than a
   quirk: the read-back in the firewall setter used the unprivileged reader, so
   it could only ever answer `unknown`, and the transition reported success
