@@ -410,9 +410,19 @@ Carried from macmode, measured on this OS version:
 - `sysadminctl -screenLock` returns 0 on failure and needs the user's password on stdin.
 - On the target machine a *delayed* screen lock is refused outright:
   `-screenLock 300` fails with `MKBDeviceSetGracePeriod error -14` while
-  `immediate` is accepted. That looks like a policy on the machine rather than
-  a bad argument, so Heinzel reports it, names the configuration key that stops
-  it retrying, and does not treat it as its own failure.
+  `immediate` is accepted. The cause took a while to find and is worth
+  recording, because the investigation went down the wrong road first.
+  Everything configurable was ruled out from the command line — no MDM profile,
+  no `/Library/Managed Preferences`, no `com.apple.screensaver` domain, no
+  login-window policy, Lockdown Mode off, secure token fine — which left
+  FileVault as the plausible culprit, and the forums agree with that story.
+  It was wrong. macOS states the real reason in System Settings > Lock Screen,
+  where the control is greyed out and captioned: **iPhone Mirroring set to
+  authenticate automatically forces an immediate lock.** Nothing readable from
+  a shell says so; `com.apple.ScreenContinuity` records only that an auth
+  frequency has been chosen, not which. The lesson is narrow but real — when
+  the OS refuses a setting, the UI may be the only place it explains itself,
+  and elimination from the command line can produce a confident wrong answer.
 - **`pfctl` cannot be read at all without root.** This one was worse than a
   quirk: the read-back in the firewall setter used the unprivileged reader, so
   it could only ever answer `unknown`, and the transition reported success

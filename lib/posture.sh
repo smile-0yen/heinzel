@@ -294,11 +294,16 @@ posture_set_screenlock() {
   if [ "${got}" != "${want}" ]; then
     posture_step_failed "screen lock is ${got}, not ${want}"
     # Measured on macOS 26.6: a non-zero grace period is refused with
-    # MKBDeviceSetGracePeriod error -14 while `immediate` is accepted, which
-    # looks like a policy on the machine rather than a bad argument.
+    # MKBDeviceSetGracePeriod error -14 while `immediate` is accepted. macOS
+    # names the reason in System Settings > Lock Screen, where the control is
+    # greyed out: iPhone Mirroring set to authenticate automatically forces an
+    # immediate lock. There is no readable preference that distinguishes that
+    # choice, so this points at the dial rather than claiming to have found it.
     if [ "${want}" != immediate ] && [ "${got}" = immediate ]; then
-      say "    this machine refuses a delayed screen lock; that is its policy, not a fault here."
-      say "    set HEINZEL_REMOTE_SCREENLOCK=\"immediate\" in etc/heinzel.conf to stop retrying it."
+      say "    macOS is refusing the delay, not failing to apply it."
+      say "    check System Settings > Lock Screen: if the control is greyed out, the reason is"
+      say "    printed under it. iPhone Mirroring set to authenticate automatically forces this."
+      say "    either change that, or set HEINZEL_REMOTE_SCREENLOCK=\"immediate\" to match."
     else
       say "    set it by hand: System Settings > Lock Screen > Require password"
     fi
