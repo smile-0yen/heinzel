@@ -871,8 +871,15 @@ cmd_doctor() {
     # Closing our own ticket file achieves nothing if another drop-in grants
     # the same thing. Heinzel only manages its own two files, so anything else
     # in sudoers.d is outside the guarantee and has to be named.
-    local others f
-    others=$(ls /etc/sudoers.d 2>/dev/null | grep -v '^heinzel-' | tr '\n' ' ')
+    local others="" f
+    for f in /etc/sudoers.d/*; do
+      [ -e "${f}" ] || continue
+      f=${f##*/}
+      case ${f} in
+        heinzel-*) continue ;;
+      esac
+      others="${others}${f} "
+    done
     if [ -n "${others}" ]; then
       local leaky=""
       for f in ${others}; do
