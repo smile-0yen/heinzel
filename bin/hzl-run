@@ -78,7 +78,17 @@ fi
 # normal mode is untouched by having Heinzel installed.
 hzl_eval_mode
 if [ "${HZ_MODE}" != heinzel ]; then
-  [ "${HEINZEL_DEBUG:-0}" = 1 ] && log_event skip "not in a session: ${HZ_REASON}"
+  # Silence here is deliberate for launchd: this is the common case, several
+  # times a night, and a machine with no session should be untouched by having
+  # Heinzel installed. It is the wrong answer for a human who just typed
+  # `hzl run-now` and would otherwise get no output and exit 0.
+  if [ "${TRIGGER}" = manual ]; then
+    log_event skip "not in a session: ${HZ_REASON}"
+    err "nothing to do: ${HZ_REASON}"
+    err "start a session with 'hzl on' first."
+  elif [ "${HEINZEL_DEBUG:-0}" = 1 ]; then
+    log_event skip "not in a session: ${HZ_REASON}"
+  fi
   exit 0
 fi
 
@@ -114,8 +124,18 @@ cleanup() {
 trap cleanup EXIT INT TERM
 printf '%s' "$$" >"${RUN_PID_FILE}"
 
-skip() { log_event skip "$*"; exit 0; }
-abort() { log_event abort "$*"; exit 1; }
+# A gate closing is a log line for launchd and a sentence for a person: the
+# operator asked for this run and is owed the reason it did not happen.
+skip() {
+  log_event skip "$*"
+  [ "${TRIGGER}" = manual ] && err "skipped: $*"
+  exit 0
+}
+abort() {
+  log_event abort "$*"
+  [ "${TRIGGER}" = manual ] && err "aborted: $*"
+  exit 1
+}
 
 # --- gate 3: the schedule window ------------------------------------------
 # launchd replays calendar events it missed while the machine was asleep, all

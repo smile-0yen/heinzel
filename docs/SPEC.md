@@ -264,6 +264,11 @@ Gate 2 writing nothing is deliberate: it is the common case, and a machine
 without a session must be untouched by having Heinzel installed. `HEINZEL_DEBUG=1`
 logs it anyway.
 
+**`--from manual` reports every closed gate on stderr**, gate 2 included. The
+silence is for launchd; a person who typed `hzl run-now` and got no output and
+exit 0 has been told nothing. The exit code is unchanged — a closed gate is a
+normal outcome, not a failure.
+
 Gate 7 is an `abort`, not a `skip`: `claude --print` silently ignores a
 malformed settings file, so a run whose deny list failed to parse would run
 unconfined. It must not run at all.
