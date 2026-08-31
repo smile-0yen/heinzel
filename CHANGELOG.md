@@ -6,6 +6,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-09-01
+
+### Added
+- **`tests/test.sh`, the first regression suite**, covering the two functions
+  the whole run loop is built on. `worksheet_write`: only this run's ids reach
+  the worksheet, continuation lines come with them, priority headings come with
+  them, fenced examples and already-closed tasks do not, and a task beyond the
+  run's budget is left in the ledger. `worksheet_merge`: `[x]` closes with
+  `done:` and the run id, `[!]` records the reason taken from the trailing
+  comment, an untouched task goes back to `[ ]` with its metadata cleared, an
+  id-less line becomes a new task at the end of its own priority section, and an
+  id the runner never put on the worksheet is counted as ignored rather than
+  applied. Also `backlog_assign_ids` skipping fenced blocks, and task text
+  carrying a backslash or a percent sign surviving a merge byte for byte.
+- The four merge counts are asserted as numbers, not just via the resulting
+  file. `bin/hzl-run` splits `worksheet_merge`'s output with `cut -d' '` and
+  logs the fourth field as `N worksheet line(s) ignored`, so the shape of that
+  line is a contract between two files and is now tested as one.
+- The regression from `docs/DESIGN.md` §6.3 has a test that fails without the
+  fix: reverting `worksheet_merge` to `IFS=<tab> read` turns 6 assertions red,
+  including the ignored count that made the original bug look plausible.
+  Removing the fence skip from `backlog_assign_ids`, dropping the worksheet
+  budget, or accepting an out-of-scope id each turn assertions red too — the
+  suite was checked by breaking the code, not only by running it green.
+
+### Changed
+- `tests/test.sh` redirects `HEINZEL_HOME` to a temp directory *before* sourcing
+  `lib/common.sh`, since every state path is derived at source time, then reads
+  `HEINZEL_HOME` and `STATE_FILE` back and refuses to run a single assertion if
+  either resolved outside that directory.
+- `tests/test.sh --live` is refused with exit 2 instead of silently running the
+  offline suite. `CONTRIBUTING.md` documents the flag as exercising the reviewer
+  engine; nothing here calls an engine yet, and a contributor who ran it and saw
+  green would believe otherwise. `CONTRIBUTING.md` now says so too.
+
 ## [0.1.2] - 2026-09-01
 
 ### Fixed

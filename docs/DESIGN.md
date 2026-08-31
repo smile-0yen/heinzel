@@ -568,7 +568,8 @@ No associative arrays, no `${var^^}`, no `mapfile`, no `${var@Q}`. Plus two from
   `id` field, was checked against the allowed-id list, and was discarded as out of scope. The merge
   reported one fewer new task and one more ignored line, which is a plausible-looking number.
   Found by running it, not by reading it. Rows are taken apart with `cut -f` now, and SPEC §8.1
-  says why.
+  says why. `tests/test.sh` pins it: reverting `worksheet_merge` to `IFS=<tab> read` turns six
+  assertions red, the ignored count among them.
 
 ### 6.4 Inherited but not re-observed
 

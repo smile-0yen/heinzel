@@ -28,8 +28,11 @@ One entry point:
 
 ```
 tests/test.sh          # static checks and offline unit tests; makes no API calls
-tests/test.sh --live   # additionally exercises the reviewer engine (costs money)
+tests/test.sh --live   # reserved: will exercise the reviewer engine (costs money)
 ```
+
+`--live` is refused with exit 2 until an engine test exists. A flag that is
+accepted and ignored reports a green suite for work it never did.
 
 Run `tests/test.sh` before opening a pull request. Add a regression test for every bug fixed —
 this project's bug history is its most valuable documentation, and `docs/DESIGN.md` §6 exists to
