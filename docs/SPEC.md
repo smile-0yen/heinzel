@@ -626,6 +626,7 @@ Honest as of 2026-08-29.
 | Item | Status |
 |---|---|
 | The review gate's `reject` path | The rule that matters most in §10 — reverting only the lines carrying this run's id — is unit-checked but has never fired against a real `reject`. Neither has `approve`, nor `fix-once` |
+| **The review gate runs after the push** *(open design question, not a gap in verification)* | The release ritual (`docs/RELEASING.md`) has the executor commit, push and tag inside its own run; `bin/hzl-run` applies the review gate afterwards. So a `reject` reverts the backlog line and leaves the commit, the push and the tag in place — review gates the ledger, not the remote. The two behaviours landed the same day and neither is wrong alone. Three ways out, none chosen: move the push behind the gate and have the runner do it on approval; keep the ritual and have a reject `git revert`; or accept it as an after-the-fact record and say so everywhere. Until it is decided, `HEINZEL_REVIEW=1` buys a second opinion and a morning signal, not prevention |
 | HALT in the field | The auth-failure patterns are desk-checked only; a real credential expiry has not been reproduced |
 
 > The interlock is verified as *implemented*. On the machine it was tested on

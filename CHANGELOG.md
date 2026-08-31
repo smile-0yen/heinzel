@@ -6,6 +6,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-09-01
+
+### Fixed
+- **`SECURITY.md` overstated the review pipeline as a defence for the
+  self-editing carve-out.** It is not one, and the reason is ordering: the
+  release ritual pushes inside the executor's own run, and `bin/hzl-run`
+  applies the review gate afterwards. The reviewer therefore sees the work
+  after it has reached `origin`, and a `reject` reverts the backlog line
+  without reverting the commit, un-pushing it, or moving the tag. Review gates
+  the ledger, not the remote. Recorded as an open design question in
+  `docs/SPEC.md` §15 with the three ways out, rather than patched in a hurry;
+  `SECURITY.md` and `docs/DESIGN.md` §4.8 now say plainly what turning review
+  on does and does not buy.
+
 ## [0.1.1] - 2026-09-01
 
 ### Changed

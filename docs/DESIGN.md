@@ -401,7 +401,11 @@ runs it under `sudo`. The unattended lane still never gains privilege — princi
 written — but it can author code that a person later escalates. There is no permission rule that
 fixes this; the repository *is* the tool. What stands in its place is that every change is
 committed and pushed the same night by the release ritual, so it is reviewable after the fact, and
-that the review pipeline exists and is worth turning on now that the agent edits its own tooling.
+that the review pipeline exists and is worth turning on now that the agent edits its own tooling —
+though not as prevention. The release ritual pushes inside the executor's run and the gate runs
+afterwards, so the reviewer's verdict arrives after the work is on `origin`; `reject` reverts the
+ledger line and nothing else. That ordering is an artefact of two changes landing the same day, and
+it is recorded as an open design question in SPEC §15 rather than patched in a hurry.
 `prompts/backlog-run.md` is writable for the same reason and with the same caveat: the agent can
 edit its own stop conditions, which is consistent with SECURITY.md's threat model — those
 conditions are a safety net for ambiguity, not a defence against an adversary.

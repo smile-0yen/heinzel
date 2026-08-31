@@ -69,9 +69,16 @@ The residual risks are real and accepted:
 
 - **`bin/hzl` is writable, and a human runs it with `sudo`.** The unattended lane still never gains
   privilege itself, but it can now author code that a person later escalates. Nothing in the
-  permission file defends against this. The defences are the git history — every change is
-  committed and pushed by the release ritual, so it is reviewable after the fact — and the review
-  pipeline, which is worth turning on (`HEINZEL_REVIEW=1`) once the agent edits its own tooling.
+  permission file defends against this. What stands in its place is the git history: every change
+  is committed and pushed by the release ritual, so it is reviewable after the fact.
+
+  **The review pipeline is not a second defence here, and it is important not to read it as one.**
+  The release ritual pushes inside the executor's own run; the review gate runs after that. So the
+  reviewer sees the work *after* it has reached `origin`, and a `reject` reverts the backlog line —
+  it does not revert the commit, un-push it, or move the tag. Review gates the ledger, not the
+  remote. Turning it on (`HEINZEL_REVIEW=1`) buys a recorded second opinion and a clear morning
+  signal; it does not buy prevention. Making it prevent anything means moving the push behind the
+  gate, which is a design change, not a setting — see `docs/SPEC.md` §15.
 - **`prompts/backlog-run.md` is writable**, so the agent can edit its own instructions, including
   its stop conditions. This is consistent with the threat model below: the stop conditions are a
   safety net for ambiguity, not a defence against an adversarial agent.
