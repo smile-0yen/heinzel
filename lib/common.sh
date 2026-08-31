@@ -654,7 +654,13 @@ backlog_assign_ids() {
   start=$(($(backlog_max_id_num "${f}") + 1))
   tmp=$(mktemp "${TMPDIR:-/tmp}/hzl-backlog.XXXXXX") || return 1
   # `next` is an awk keyword, so the counter cannot be called that.
+  # Fenced blocks are skipped here for the same reason backlog_scan skips them,
+  # and the omission was visible: the allocator stamped an id onto the example
+  # in the file's own header, directly under the line telling the reader that
+  # ids are never written by hand.
   awk -v seq="${start}" -v prefix="${prefix}" '
+    /^[ \t]*(```|~~~)/ { infence = !infence; print; next }
+    infence { print; next }
     /^[ \t]*-[ \t]+\[.\][ \t]*/ {
       rest = $0
       sub(/^[ \t]*-[ \t]+\[.\][ \t]*/, "", rest)
