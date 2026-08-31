@@ -75,6 +75,30 @@ budget_line() {
   printf '%s/%s tasks this session' "${done_n}" "${total}"
 }
 
+# Where the work is, according to whichever source is entitled to say so.
+#
+# A live session owns its paths: `hzl on --backlog X` is a promise for that
+# session, and the runner must not be moved out from under it by an edit to
+# `heinzel.conf` at 02:00. Outside a session nothing owns them but the
+# configuration file — and `state.json` keeps a finished session's paths, so
+# reading them unconditionally means an edited `heinzel.conf` is ignored with
+# no sign that it was, until the next `hzl on`. `hzl install` then bakes the
+# stale paths into the agent's permission file, which is the version of this
+# that matters: the deny list ends up naming a backlog nobody uses.
+#
+# `hzl on` writes state before it calls `cmd_install`, so a session's own
+# paths are still what gets baked in. That order is load-bearing.
+session_path() {
+  local key=$1 fallback=$2 v
+  if [ "$(effective_mode)" = heinzel ]; then
+    v=$(state_get "${key}" "")
+    if [ -n "${v}" ]; then printf '%s' "${v}"; return 0; fi
+  fi
+  printf '%s' "${fallback}"
+}
+cur_workdir() { session_path .workdir "${DEFAULT_WORKDIR}"; }
+cur_backlog() { session_path .backlog "${DEFAULT_BACKLOG}"; }
+
 cmd_status() {
   local json=0 quiet=0 mode rc
   while [ $# -gt 0 ]; do
@@ -113,7 +137,7 @@ cmd_status() {
   [ "${quiet}" = 1 ] && return ${rc}
 
   local backlog todo blocked posture ss
-  backlog=$(state_get .backlog "${DEFAULT_BACKLOG}")
+  backlog=$(cur_backlog)
   posture=$(posture_now)
 
   printf '\n'
@@ -207,6 +231,17 @@ cmd_on() {
   workdir=$(abspath "${workdir}")
   backlog=$(abspath "${backlog}")
   [ -d "${workdir}" ] || die "workdir does not exist: ${workdir}"
+  # ~/.heinzel is denied to the agent wholesale, on purpose: it holds state.json,
+  # the lock, and the logs. Pointing the working directory at it produces a run
+  # where every write is refused - and the failure reads as an agent that could
+  # not manage the task, not as a configuration mistake.
+  case ${workdir} in
+    "${HEINZEL_HOME}"|"${HEINZEL_HOME}"/*)
+      err "workdir is inside ${HEINZEL_HOME}, which the agent is denied entirely."
+      err "that directory is Heinzel's own state; an agent working there can write nothing."
+      err "point DEFAULT_WORKDIR at the code you want worked on."
+      exit 1 ;;
+  esac
 
   if [ "${timeout}" -gt 3600 ]; then
     warn "a run may use up to ${timeout}s, which is longer than the gap between slots;"
@@ -432,7 +467,7 @@ cmd_off() {
     say "no session was running; cleaned up anyway."
   fi
   local backlog
-  backlog=$(state_get .backlog "${DEFAULT_BACKLOG}")
+  backlog=$(cur_backlog)
   if [ -n "${backlog}" ] && [ -r "${backlog}" ]; then
     field "blocked, needs you" "$(backlog_count "${backlog}" "!")"
   fi
@@ -558,7 +593,7 @@ cmd_remote() {
 
 need_backlog() {
   local b
-  b=$(state_get .backlog "${DEFAULT_BACKLOG}")
+  b=$(cur_backlog)
   [ -n "${b}" ] || die "no backlog configured (DEFAULT_BACKLOG in etc/heinzel.conf)"
   [ -r "${b}" ] || die "backlog not readable: ${b}"
   printf '%s' "${b}"

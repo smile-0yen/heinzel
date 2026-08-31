@@ -94,7 +94,9 @@ Fail-fast, and anything that fails rolls back what came before it.
 1. Refuse if running as root.
 2. Validate arguments. `--duration` ∈ [60s, 24h]; `--max-*` ≥ 1;
    `--timeout` ≥ 60. `workdir` and `backlog` are made absolute; `workdir` must
-   exist.
+   exist, and **must not be `HEINZEL_HOME` or inside it** — that directory is
+   denied to the agent wholesale, so a run there can write nothing, and the
+   failure reads as an incapable agent rather than as a misconfiguration.
 3. **Refuse if posture is `travel`.** No override exists.
 4. Refuse if on battery, unless `--force`.
 5. Warn if a session is already live, including that the task counter resets.
@@ -138,7 +140,7 @@ Mode 0600. Written by validating with `jq` and replacing with `mv`. Writers are
 | `expires_at`, `expires_at_epoch` | string, number | TTL. `now >= expires_at_epoch` ⇒ normal | on |
 | `duration` | string | As given, e.g. `"10h"`. Ceiling 24h, not configurable | on |
 | `boot_id` | string | `kern.bootsessionuuid` | on |
-| `workdir`, `backlog` | string | **Always absolute**; launchd runs with `cwd=/` | on |
+| `workdir`, `backlog` | string | **Always absolute**; launchd runs with `cwd=/`. These are *the session's* paths, and they outlive it in the file | on |
 | `max_tasks_per_run` | number | Per-run ceiling | on / set |
 | `max_tasks_total` | number | Per-session ceiling | on / set |
 | `tasks_done_total` | number | Completed so far; incremented before the run record is written | run |
@@ -155,6 +157,16 @@ Mode 0600. Written by validating with `jq` and replacing with `mv`. Writers are
 > **Normative: `state_get` must not use jq's `//` operator.** `false // $default`
 > yields the default, so every boolean field would read as its default. The
 > implementation uses `.k as $v | if $v == null then $d else $v end`.
+
+> **Normative: `workdir` and `backlog` are read from `state.json` only while a
+> session is live.** With no session the configuration file is authoritative.
+> `state.json` keeps a finished session's paths, so reading them unconditionally
+> means an edited `heinzel.conf` is ignored with no sign that it was — and
+> `hzl install` then bakes the stale paths into the agent's permission file, so
+> the deny list names a backlog nobody uses. `hzl` reads them through
+> `cur_workdir` / `cur_backlog`; the runner reads `state.json` directly and
+> must, because it only ever runs inside a session and `hzl on --backlog X` is
+> a promise for the length of that session.
 
 ## §5 `effective_mode()` (normative)
 
