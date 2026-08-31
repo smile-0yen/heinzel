@@ -781,6 +781,21 @@ cmd_doctor() {
   if [ -f "${settings}" ]; then
     if jq -e . "${settings}" >/dev/null 2>&1; then
       doc_ok "etc/heinzel-settings.json is valid JSON"
+      # The deny list names the ledger, so it goes stale the moment the
+      # configured backlog moves. Nothing else notices: the runner checks the
+      # file parses, not that it is about the right paths.
+      local cur_bl want
+      cur_bl=$(cur_backlog)
+      if [ -n "${cur_bl}" ]; then
+        cur_bl=$(abspath "${cur_bl}")
+        want="Edit(//${cur_bl#/})"
+        if jq -e --arg p "${want}" \
+             '(.permissions.deny // []) | index($p)' "${settings}" >/dev/null 2>&1; then
+          doc_ok "the deny list names the configured backlog"
+        else
+          doc_bad "the deny list does not name ${cur_bl} - run 'hzl install'"
+        fi
+      fi
     else
       # claude --print silently ignores a malformed settings file, which would
       # drop every deny rule without a word.
@@ -847,20 +862,30 @@ cmd_doctor() {
 
   printf '\n6. working directory and backlog\n'
   local b w
-  w=$(state_get .workdir "${DEFAULT_WORKDIR}")
-  b=$(state_get .backlog "${DEFAULT_BACKLOG}")
+  w=$(cur_workdir)
+  b=$(cur_backlog)
   if [ -z "${w}" ] || [ -z "${b}" ]; then
     doc_bad "not configured yet - set DEFAULT_WORKDIR and DEFAULT_BACKLOG in etc/heinzel.conf"
+  elif case ${w} in ("${HEINZEL_HOME}"|"${HEINZEL_HOME}"/*) true ;; (*) false ;; esac; then
+    doc_bad "the working directory is inside ${HEINZEL_HOME} - the agent is denied all of it"
+    printf '       %s holds state.json, the lock and the logs. An agent working\n' "${HEINZEL_HOME}"
+    printf '       there can write nothing, and the run looks like a capable agent failing.\n'
+    printf "       point DEFAULT_WORKDIR at the code you want worked on. 'hzl on' refuses this.\n"
   elif [ ! -d "${w}" ]; then
     doc_bad "the working directory does not exist: ${w}"
     printf '       create it, or point DEFAULT_WORKDIR somewhere that exists.\n'
     printf "       'hzl on' refuses to start without it, because launchd runs with cwd=/\n"
   else
     doc_ok "working directory ${w}"
+    # The agent works from a worksheet the runner merges back, so it never
+    # needs the ledger - and the sandbox is a path boundary, so a ledger kept
+    # outside the working directory is one a subprocess cannot reach either.
     case ${b} in
-      "${w}"/*) ;;
-      *) doc_bad "the backlog is outside the working directory, so the agent cannot update it"
-         printf '       backlog %s\n       workdir %s\n' "${b}" "${w}" ;;
+      "${w}"/*)
+        doc_warn "the backlog is inside the working directory, so the agent can reach it"
+        printf '       backlog %s\n       workdir %s\n' "${b}" "${w}"
+        printf '       move it out (e.g. %s/backlog.md) and re-run '"'"'hzl install'"'"'\n' "${HEINZEL_HOME}" ;;
+      *) doc_ok "the backlog is outside the working directory, out of the agent's reach" ;;
     esac
     if [ -r "${b}" ]; then
       doc_ok "${b}: $(backlog_count "${b}" " ") todo, $(backlog_count "${b}" "~") in progress, $(backlog_count "${b}" x) done, $(backlog_count "${b}" "!") blocked"
@@ -973,7 +998,7 @@ generate_plist() {
 # The deny list has to name the working directory, which is configuration, so
 # the file the runner validates is generated rather than shipped.
 generate_settings() {
-  local workdir=$1 out="${HEINZEL_ROOT}/etc/heinzel-settings.json"
+  local workdir=$1 backlog=$2 out="${HEINZEL_ROOT}/etc/heinzel-settings.json"
   # __HOME__ as well as the rest: the credential denials are written out in
   # full rather than with a tilde, so they do not depend on permission rules
   # performing tilde expansion - a behaviour this project has not verified.
@@ -981,6 +1006,8 @@ generate_settings() {
   # anchors at the settings file's own location, which silently matches
   # nothing. The paths are anchored here so the template cannot get it wrong.
   sed -e "s|__WORKDIR_ABS__|//${workdir#/}|g" \
+      -e "s|__WORKSHEET_ABS__|//${workdir#/}/.heinzel/worksheet.md|g" \
+      -e "s|__BACKLOG_ABS__|//${backlog#/}|g" \
       -e "s|__HEINZEL_HOME_ABS__|//${HEINZEL_HOME#/}|g" \
       -e "s|__HEINZEL_ROOT_ABS__|//${HEINZEL_ROOT#/}|g" \
       -e "s|__WORKDIR__|${workdir}|g" \
@@ -997,14 +1024,20 @@ cmd_install() {
   [ "${1:-}" = --quiet ] && quiet=1
   mkdir -p "${PLIST_DIR}" "${LOG_DIR}" || die "could not create ${PLIST_DIR}"
 
-  local wd
-  wd=$(state_get .workdir "${DEFAULT_WORKDIR}")
+  local wd bl
+  wd=$(cur_workdir)
   [ -n "${wd}" ] || die "no workdir configured - set DEFAULT_WORKDIR in etc/heinzel.conf"
+  # The backlog is named in the deny list, so it has to be known here. An empty
+  # value would render as a path rule of `//`, which is a rule about the whole
+  # filesystem rather than about nothing.
+  bl=$(cur_backlog)
+  [ -n "${bl}" ] || die "no backlog configured - set DEFAULT_BACKLOG in etc/heinzel.conf"
   # Through abspath, exactly as `on` stores it. Without this, installing before
   # the first session writes allow rules for /tmp/x while the agent runs in
   # /private/tmp/x, and the rules match nothing.
   wd=$(abspath "${wd}")
-  generate_settings "${wd}" || die "could not generate the agent permission file"
+  bl=$(abspath "${bl}")
+  generate_settings "${wd}" "${bl}" || die "could not generate the agent permission file"
   local pl
   pl=$(plist_path)
   generate_plist >"${pl}" || die "could not write ${pl}"

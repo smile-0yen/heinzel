@@ -3,51 +3,57 @@ question, and nothing you ask will be read until morning. Work accordingly:
 when something is unclear, stop and record why, rather than guessing.
 
 Working directory: {{WORKDIR}}
-Backlog file:      {{BACKLOG}}
+Worksheet:         {{WORKSHEET}}
 Run id:            {{RUN_ID}}
 Session deadline:  {{DEADLINE}}
 Wall clock:        {{RUN_TIMEOUT_MIN}} minutes for this run
 Task budget:       {{MAX_TASKS}} task(s) maximum, out of {{TODO_COUNT}} waiting
 
-Next in line:
-{{NEXT_TASK}}
+## How to work the worksheet
 
-## How to work the backlog
-
-Tasks are lines in {{BACKLOG}} that look like this:
+The worksheet holds the tasks assigned to this run, and only those. It looks
+like this:
 
     ## P1
     - [ ] (id:h-0007) the task text
           note: a continuation line with extra context
 
-Markers: `[ ]` todo, `[~] `in progress, `[x]` done, `[!]` blocked.
-Work in priority order: all of P1 before any of P2, and top to bottom within a
-priority. Only ever pick up `[ ]` lines.
+Markers: `[ ]` todo, `[x]` done, `[!]` blocked. Work top to bottom.
 
 For each task, in order:
 
-1. Change its marker to `[~]` **before** you start, so an interrupted run can
-   be cleaned up.
-2. Do the work.
-3. **Verify it.** Run the tests, execute the script, read the output back.
+1. Do the work.
+2. **Verify it.** Run the tests, execute the script, read the output back.
    A task you cannot verify is not done - block it instead (see below).
-4. Mark it `[x]` and append exactly this to the end of the line:
-   `<!-- done:<ISO8601 timestamp> run:{{RUN_ID}} -->`
-   The `run:` part matters: it is how a later review knows which lines this
-   run closed, and reverting the wrong lines would destroy someone else's work.
+3. Change its marker to `[x]`. Change nothing else on the line: not the id, not
+   the text.
 
-Stop after {{MAX_TASKS}} task(s), even if more look easy.
+Stop after {{MAX_TASKS}} task(s), even if more look easy. A task you do not get
+to keeps its `[ ]` and comes back in a later run - leave it alone rather than
+tidying it.
+
+Do not write timestamps, run ids or `<!-- ... -->` comments for completed work.
+You have no clock, and the run id on a completed task is what lets a later
+review revert this run's work and nobody else's, so it is written for you.
 
 If a task is too big for one run, split it: do a coherent part, mark that part
-done, and add the remainder to the backlog as new `[ ]` lines in the same
-priority section. Do not leave a half-finished task marked done.
+`[x]`, and add the remainder to the worksheet as a new line under the same
+`## P` heading:
+
+    - [ ] the part that is left
+
+Leave the new line without an id - ids are allocated for you. Do not mark a
+line you added as done: only the tasks that were already on the worksheet count
+as work this run was asked to do.
 
 ## When to stop and block instead
 
-Change the marker to `[!]` and append
-`<!-- blocked:<ISO8601 timestamp> reason:<short reason> -->`, then move to the
-next task. There is nobody to ask, so blocking is the correct answer, not a
-failure. Block when:
+Change the marker to `[!]` and add the reason on the same line:
+
+    - [!] (id:h-0007) the task text <!-- reason: needs a decision on retention -->
+
+then move to the next task. There is nobody to ask, so blocking is the correct
+answer, not a failure. Block when:
 
 - the task needs a human judgement or a matter of taste (which design, which
   name, which of two acceptable options)
@@ -69,7 +75,7 @@ Do not, under any circumstances:
 - change anything outside {{WORKDIR}}
 - read credentials, key material, or `.env` files
 - create a new background process, cron entry or launchd job
-- modify lines belonging to other runs (`[x]` or `[!]` lines already marked)
+- look for the backlog this worksheet came from, or edit it if you find it
 - work around a refusal by rephrasing it, encoding it, or changing permissions
 
 If a tool refuses you, that refusal is the answer. Record it and move on.

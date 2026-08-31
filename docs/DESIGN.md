@@ -307,6 +307,64 @@ Layer 3 exists because of a documented `claude --print` behaviour, not a hypothe
 is validated with `jq -e .` before every run: a silently-ignored deny list is the worst available
 failure, so an invalid settings file aborts the run (principle 6).
 
+### 4.7 The agent is never handed the ledger
+
+The first design gave the agent the backlog file and a prompt describing how to work it: pick the
+top `[ ]` line, mark it `[~]`, do it, mark it `[x]`, and — in bold — do not touch lines belonging
+to other runs. That worked, and it does not scale, for two reasons of very different weight.
+
+The cheap one is tokens. A closed line is about thirty of them; five hundred of them is thirteen
+thousand tokens on every run, a few cents a night. Real, but not the reason.
+
+The expensive one is that **the whole file was inside the agent's write radius, and the only thing
+holding it back was a sentence.** Every `[x]` line a previous run closed, every `[!]` line waiting
+on a human, was one edit away, guarded by a prompt rule — the same class of control §4.6 spends
+three findings explaining that we do not trust. And the run-scoping rule is not decorative: the
+review gate's `reject` path reverts lines by `run:` id, so a run that rewrote another run's
+metadata would make a later reject roll back the wrong work.
+
+The fix is to stop asking. The runner already knew which task was next — `backlog_next_row` had
+computed it before the prompt was rendered — so handing over the file was asking a model to
+re-derive, probabilistically, something the shell had already decided. Now the runner writes a
+**worksheet**: this run's two or three `[ ]` lines, ids and notes, nothing else (SPEC §8.1). The
+agent moves markers there. The runner merges the result back by id and is the ledger's only writer.
+
+What that buys, in order of value:
+
+- **Scope becomes structural.** The merge accepts only ids the runner put on the worksheet, checked
+  against a list kept in the log tree, where the agent cannot reach it. An agent that marks somebody
+  else's task done has written a line that is counted, logged, and dropped.
+- **The prompt loses three rules it was enforcing by hope**: claim before starting, write this exact
+  timestamp, do not touch other runs' lines. The runner does the first, has a clock for the second,
+  and the third is now a property of the merge.
+- **`run:` becomes trustworthy.** It is written by the runner on every transition, so the reject
+  path's precondition holds by construction rather than by the agent's cooperation.
+- Tokens, incidentally.
+
+One thing this cost. The worksheet has to live under `workdir`, because the sandbox is a path
+boundary and that is the only place the agent can write — so it sits in `.heinzel/`, which
+`hzl-changeset` already prunes, and it is removed when the run ends.
+
+That raised a question §4.6 exists to make us ask rather than assume: does an allow rule actually
+reach a file in a dot directory? The rule was written as an exact path so that it would not depend
+on the answer, and then the answer was measured (VERIFICATION phase 3c, two probes, $0.62 all in):
+a real agent under sandbox + `dontAsk` edits the worksheet, and it does so **with the exact rules
+removed** — `Edit(//<workdir>/**)` matches a hidden path fine. The exact rules are therefore
+redundant. They stay, because the one file a run cannot proceed without should not have its
+permission ride on a glob that exists for a different reason and may be narrowed later; and they
+are now documented as redundant rather than as necessary, which is the difference between a
+measurement and a guess.
+
+The whole cycle then ran for real (SPEC §15, run `20260830-215948`): two tasks in the backlog, a
+budget of one, and the agent closed exactly the line it was given, wrote no timestamp and no
+`run:`, and left the other task alone. Its own handover described the second task as *"not visible
+on this run's worksheet"* — the scope limit is legible from inside the run, not only enforced from
+outside it. That is the property the old prompt rule was asking for and could not provide.
+
+The other half of the size problem — a ledger a *human* has to read — is not solved here. Archiving
+closed lines out to a monthly file is a separate change, and it is now a change about human
+ergonomics rather than about agent behaviour.
+
 ## §5 State model
 
 `~/.heinzel/state.json`, 0600, written by validating with `jq` and then `mv` — atomic replace.
@@ -458,6 +516,14 @@ No associative arrays, no `${var^^}`, no `mapfile`, no `${var@Q}`. Plus two from
   human typed and the destination is line-oriented, it is flattened with
   `oneline` rather than passed through — a newline in a backlog reason would
   break the ledger format even if awk accepted it.
+- **`IFS=<tab> read` collapses consecutive tabs.** Tab is one of the shell's IFS *whitespace*
+  characters, so a run of them is a single delimiter and an empty field silently disappears.
+  Reading `backlog_scan`'s TSV that way worked for every row that had an id and failed for exactly
+  the rows that did not: a task the agent had split off arrived with the task text sitting in the
+  `id` field, was checked against the allowed-id list, and was discarded as out of scope. The merge
+  reported one fewer new task and one more ignored line, which is a plausible-looking number.
+  Found by running it, not by reading it. Rows are taken apart with `cut -f` now, and SPEC §8.1
+  says why.
 
 ### 6.4 Inherited but not re-observed
 
@@ -478,7 +544,7 @@ heinzel/
 ├── bin/hzl-run          launchd runner — non-interactive, unprivileged
 ├── bin/hzl-review       changeset → reviewer → verdict.json → exit code
 ├── bin/hzl-changeset    snapshot / diff (shell only, no LLM)
-├── lib/common.sh        state, backlog, time, power
+├── lib/common.sh        state, backlog, worksheet, time, power
 ├── lib/posture.sh       travel / remote, with read-back verification
 ├── lib/engines.sh       the only file that knows engine-specific flags
 ├── lib/watchdog.sh      hzl_timeout (§6.1)
@@ -500,6 +566,10 @@ heinzel/
 The split that matters: **all judgement lives in the runner, all engine knowledge lives in
 `engines.sh`.** Adding an engine touches one file. The runner only ever sees `engine_run` and a
 normalised `result.json`.
+
+The ledger follows that shape too, since §4.7: `worksheet_write` → **executor** → `worksheet_merge`.
+The model moves markers on a file it was given; the shell decides which tasks existed, which ids
+were in scope, and what the ledger says afterwards.
 
 The review pipeline follows the same shape — the LLM decides exactly one step in the middle
 (`snapshot` → executor → `diff` → **reviewer** → gate), and everything before and after it is

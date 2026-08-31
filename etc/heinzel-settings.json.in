@@ -18,6 +18,20 @@
     "  3. Bash commands are matched in both the 'cmd *' and 'cmd:*' forms, so",
     "     the list does not depend on which pattern syntax is current.",
     "",
+    "The worksheet is named in full in the allow list as well as being covered",
+    "by the workdir's '/**' rule. Measured 2026-08-30: '/**' does reach a file",
+    "in a dot directory, so the exact rule is redundant today. It stays because",
+    "it makes the worksheet's permission independent of the workdir rule - the",
+    "one line the run cannot proceed without should not depend on a glob that",
+    "exists for a different reason and may be tightened later.",
+    "",
+    "The backlog is denied by",
+    "name for the opposite reason: the agent works from a worksheet the runner",
+    "merges back, so it has no business in the ledger, and 'the prompt told it",
+    "not to' is not a control. Keep the ledger outside the working directory",
+    "as well - the sandbox is a path boundary, and that is what actually stops",
+    "a subprocess reaching it.",
+    "",
     "The sandbox is what actually confines the agent to the working directory.",
     "Permission rules govern Claude's own file tools; they do not govern a",
     "subprocess that opens a file itself, so a Python script could write",
@@ -76,7 +90,10 @@
       "Edit(__HEINZEL_HOME_ABS__/**)",
       "Edit(__HEINZEL_ROOT_ABS__/**)",
       "Edit(~/.claude/**)",
-      "Edit(~/Library/LaunchAgents/**)"
+      "Edit(~/Library/LaunchAgents/**)",
+
+      "Read(__BACKLOG_ABS__)",
+      "Edit(__BACKLOG_ABS__)"
     ],
     "allow": [
       "Bash(ls *)", "Bash(ls:*)",
@@ -84,7 +101,9 @@
       "Bash(git diff *)", "Bash(git diff:*)",
       "Bash(git log *)", "Bash(git log:*)",
       "Read(__WORKDIR_ABS__/**)",
-      "Edit(__WORKDIR_ABS__/**)"
+      "Edit(__WORKDIR_ABS__/**)",
+      "Read(__WORKSHEET_ABS__)",
+      "Edit(__WORKSHEET_ABS__)"
     ]
   }
 }

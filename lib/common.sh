@@ -745,3 +745,178 @@ backlog_ids_done_by_run() {
     }
   ' "${f}"
 }
+
+# --- the worksheet ---------------------------------------------------------
+#
+# What the agent actually sees. The ledger is the human's file and the runner's
+# record; handing the whole of it to an agent means every line ever closed
+# competes for attention with the one task that matters, and every line ever
+# closed sits inside the agent's write radius, guarded by nothing more than a
+# sentence in a prompt. The worksheet is one run's slice of the ledger: the
+# `[ ]` lines this run may touch, their notes, and nothing else.
+#
+#   ## P1
+#   - [ ] (id:h-0007) refresh the unused-disk report
+#         note: last one is in reports/2026-05.md
+#
+# The agent moves markers here. The runner merges the result back by id and is
+# the ledger's only writer, so the scope of a run is enforced rather than
+# requested: an id the runner did not put on the worksheet is not applied,
+# whatever the agent wrote beside it.
+#
+# Rows from backlog_scan are taken apart with `cut`, never with
+# `IFS=<tab> read`. Tab is one of the shell's IFS whitespace characters, so a
+# run of tabs collapses into a single delimiter: an empty field - which is
+# exactly what an id-less line the agent added looks like - shifts every field
+# after it left, and the new task arrives wearing the next field's value.
+
+# The trailing `<!-- ... -->` on a line, without its delimiters. The worksheet
+# is where the agent states a reason for blocking; timestamps and run ids are
+# the runner's to write, so this is the only metadata read back out of it.
+line_meta() {
+  local f=$1 lineno=$2
+  awk -v target="${lineno}" '
+    NR == target {
+      if (match($0, /<!--.*-->/)) {
+        s = substr($0, RSTART + 4, RLENGTH - 7)
+        gsub(/^[ \t]+|[ \t]+$/, "", s)
+        print s
+      }
+      exit
+    }
+  ' "${f}"
+}
+
+# Write the run's slice of the ledger to `out`, and print the ids it contains,
+# one per line: that list is what the merge will accept, and nothing else.
+# Priority headings are carried across, because a task's priority is context
+# the agent needs when it splits one, and because a new line written under a
+# heading is merged back into that priority.
+worksheet_write() {
+  local f=$1 max=$2 out=$3 rows row prev_prio="" lineno prio id text
+  [ -r "${f}" ] || return 1
+  case ${max} in ""|*[!0-9]*) return 1 ;; esac
+  [ "${max}" -ge 1 ] || return 1
+  rows=$(backlog_scan "${f}" 2>/dev/null |
+    awk -F'\t' '$3 == " " && $4 != ""' |
+    sort -t"$(printf '\t')" -k2,2n -k1,1n |
+    head -n "${max}")
+  [ -n "${rows}" ] || return 1
+  {
+    printf '# Worksheet\n\n'
+    printf 'The tasks this run may work on, in the order to work them.\n'
+    printf 'Markers: [ ] todo   [x] done   [!] blocked.\n'
+  } >"${out}" || return 1
+  while IFS= read -r row; do
+    [ -n "${row}" ] || continue
+    lineno=$(printf '%s' "${row}" | cut -f1)
+    prio=$(printf '%s' "${row}" | cut -f2)
+    id=$(printf '%s' "${row}" | cut -f4)
+    text=$(printf '%s' "${row}" | cut -f5-)
+    [ -n "${id}" ] || continue
+    if [ "${prio}" != "${prev_prio}" ]; then
+      printf '\n## P%s\n' "${prio}" >>"${out}"
+      prev_prio=${prio}
+    fi
+    printf -- '- [ ] (id:%s) %s\n' "${id}" "${text}" >>"${out}"
+    backlog_notes_for_line "${f}" "${lineno}" >>"${out}"
+    printf '%s\n' "${id}"
+  done <<EOF
+${rows}
+EOF
+}
+
+# Insert a new todo at the end of a priority section, after that section's last
+# task *and its continuation lines* - inserting between a task and its notes
+# would silently reassign the notes to the new task. A section that no longer
+# exists gets one at the end of the file, rather than the task dropping into P99.
+backlog_insert_at_priority() {
+  local f=$1 prio=$2 text=$3 last after tmp
+  text=$(oneline "${text}")
+  [ -n "${text}" ] || return 1
+  case ${prio} in ""|*[!0-9]*) prio=99 ;; esac
+  last=$(backlog_scan "${f}" 2>/dev/null |
+    awk -F'\t' -v p="${prio}" '$2 == p {n = $1} END {if (n) print n}')
+  if [ -z "${last}" ]; then
+    printf '\n## P%s\n- [ ] %s\n' "${prio}" "${text}" >>"${f}"
+    return 0
+  fi
+  after=$(awk -v start="${last}" '
+    NR <= start { seen = NR; next }
+    /^[ \t]*-[ \t]+\[.\]/ { exit }
+    /^[ \t]*##/ { exit }
+    /^[ \t]+[^ \t]/ { seen = NR; next }
+    { exit }
+    END { print seen }
+  ' "${f}")
+  [ -n "${after}" ] || return 1
+  tmp=$(mktemp "${TMPDIR:-/tmp}/hzl-backlog.XXXXXX") || return 1
+  # Through ENVIRON, not awk -v: awk -v interprets escape sequences, and this
+  # text was written by an agent that had no reason to avoid a backslash.
+  HZL_INS_TEXT=${text} awk -v target="${after}" '
+    BEGIN { text = ENVIRON["HZL_INS_TEXT"] }
+    { print }
+    NR == target { printf "- [ ] %s\n", text }
+  ' "${f}" >"${tmp}" || { rm -f "${tmp}"; return 1; }
+  cat "${tmp}" >"${f}" && rm -f "${tmp}"
+}
+
+# Merge a finished worksheet into the ledger. Prints `done blocked new ignored`.
+#
+# Timestamps and `run:` fields are written here, not by the agent: an agent has
+# no clock, and `run:` is what lets the review gate revert this run's work and
+# nobody else's. Anything unrecognised is counted and dropped rather than
+# guessed at.
+worksheet_merge() {
+  local ws=$1 f=$2 run_id=$3 allowed=$4
+  local rows row allow_list lineno prio marker id text reason
+  local n_done=0 n_blocked=0 n_new=0 n_ignored=0
+  [ -r "${ws}" ] && [ -r "${allowed}" ] || { printf '0 0 0 0\n'; return 1; }
+  allow_list=" $(tr '\n' ' ' <"${allowed}") "
+  rows=$(backlog_scan "${ws}" 2>/dev/null)
+  while IFS= read -r row; do
+    [ -n "${row}" ] || continue
+    lineno=$(printf '%s' "${row}" | cut -f1)
+    prio=$(printf '%s' "${row}" | cut -f2)
+    marker=$(printf '%s' "${row}" | cut -f3)
+    id=$(printf '%s' "${row}" | cut -f4)
+    text=$(printf '%s' "${row}" | cut -f5-)
+    if [ -z "${id}" ]; then
+      # A task split off from another. Only a todo can arrive without an id: a
+      # line marked done that nobody ever queued is not a completion, and the
+      # runner has nothing to check it against.
+      if [ "${marker}" = " " ]; then
+        backlog_insert_at_priority "${f}" "${prio}" "${text}" &&
+          n_new=$((n_new + 1))
+      else
+        n_ignored=$((n_ignored + 1))
+      fi
+      continue
+    fi
+    case ${allow_list} in
+      *" ${id} "*) ;;
+      *) n_ignored=$((n_ignored + 1)); continue ;;
+    esac
+    case "${marker}" in
+      x|X)
+        backlog_set_state "${f}" "${id}" x "done:$(iso_at) run:${run_id}" &&
+          n_done=$((n_done + 1))
+        ;;
+      "!")
+        reason=$(line_meta "${ws}" "${lineno}" | sed -n 's/.*reason:[ 	]*//p')
+        [ -n "${reason}" ] || reason="not stated"
+        backlog_set_state "${f}" "${id}" "!" \
+          "blocked:$(iso_at) reason:${reason} run:${run_id}" &&
+          n_blocked=$((n_blocked + 1))
+        ;;
+      *)
+        # Never picked up, or left in progress by a run that ran out of clock.
+        # Either way it goes back to the queue rather than staying half-claimed.
+        backlog_set_state "${f}" "${id}" " " ""
+        ;;
+    esac
+  done <<EOF
+${rows}
+EOF
+  printf '%s %s %s %s\n' "${n_done}" "${n_blocked}" "${n_new}" "${n_ignored}"
+}

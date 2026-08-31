@@ -51,7 +51,8 @@ Version: 0.1.0-dev. Target: macOS, `/bin/bash` 3.2.
     <YYYY-MM-DD>/
       run-HHMMSS.log     the run's own log
       notes.md           the handover a human reads
-      exec-HHMMSS/       prompt.md, raw, stderr, last.txt, result.json
+      exec-HHMMSS/       prompt.md, raw, stderr, last.txt, result.json,
+                         worksheet.md (as merged), worksheet-ids.txt
       snapshot-HHMMSS/   files/, manifest.txt, git-heads.txt, git-roots.txt
       review-HHMMSS/     changeset.patch, prompt.md, verdict.json
 ```
@@ -285,13 +286,23 @@ Gate 7 is an `abort`, not a `skip`: `claude --print` silently ignores a
 malformed settings file, so a run whose deny list failed to parse would run
 unconfined. It must not run at all.
 
-After the engine call: apply the review gate, **then** count completions, then
-update state, append to `notes.md` and `runs.jsonl`, rotate logs, release the
-lock.
+Before the engine call, after gate 8: build the worksheet (§8.1), and mark its
+ids `[~]` in the ledger.
+
+After the engine call: **merge the worksheet into the ledger**, then apply the
+review gate, **then** count completions, then update state, append to `notes.md`
+and `runs.jsonl`, rotate logs, release the lock.
 
 > **Normative: completions are counted from the ledger, not from the agent's
-> report** — the difference between `[x]` counts before and after. The count is
-> taken *after* the review gate, so rejected work is not counted as done.
+> report** — the difference between `[x]` counts before and after, taken after
+> the merge and after the review gate, so rejected work is not counted as done.
+> The merge is a mechanical application of the worksheet's markers by id; the
+> agent's prose report is never a source of ledger state.
+
+The merge runs whatever the verdict was, including `timeout`: a run killed at
+the wall clock may still have finished its first task, and the worksheet says
+so either way. Any id the merge does not resolve to `[x]` or `[!]` goes back to
+`[ ]`, so a run that is over never leaves a task claimed.
 
 Effective per-run limit: `min(max_tasks_per_run, max_tasks_total − tasks_done_total)`.
 
@@ -323,6 +334,57 @@ only. The runner can put tasks there and cannot take them out.
 
 Leading zeros are stripped before arithmetic: bash reads `0009` as an invalid
 octal literal.
+
+**The runner is the ledger's only writer.** The agent never sees this file and
+is denied it by name in the permission list; a ledger kept outside the working
+directory is additionally outside the sandbox, which is the only boundary a
+subprocess respects.
+
+### 8.1 The worksheet (normative)
+
+One run's slice of the ledger, at `<workdir>/.heinzel/worksheet.md`. It carries
+the `[ ]` tasks this run may work on — at most `min(max_tasks_per_run,
+max_tasks_total − tasks_done_total)`, in ledger order — with their ids, their
+continuation lines, and their `## P<n>` headings. Nothing that is already `[x]`
+or `[!]` appears on it.
+
+```markdown
+## P1
+- [ ] (id:h-0007) refresh the unused-disk report
+      note: last one is in reports/2026-05.md
+```
+
+| Element | Rule |
+|---|---|
+| Location | Under `workdir`, because the sandbox is a path boundary and that is the only place the agent can write. `.heinzel` is on `hzl-changeset`'s prune list, so it never appears as a reviewable change |
+| Permission | Allowed by **exact path** as well as by the workdir's `/**` rule. Measured 2026-08-30: `/**` does reach a dot directory, so the exact rule is redundant today and kept deliberately — the one file a run cannot proceed without should not depend on a glob that exists for another reason |
+| Lifetime | Written after gate 8, merged after the engine returns, then copied into the run's `exec-*` directory and removed. The `EXIT` trap removes it too |
+| The id list | `exec-*/worksheet-ids.txt`, in the log tree — **not** under `workdir`. It is what the merge checks the agent's work against, so it is out of the agent's reach |
+| Markers the agent may write | `[x]`, `[!]`. `[~]` is the runner's |
+| Metadata the agent may write | `<!-- reason:… -->` on a `[!]` line, and nothing else. Timestamps and `run:` are written by the merge: an agent has no clock, and `run:` is what lets a reject revert this run's work and nobody else's |
+
+Merge rules, applied by id:
+
+| Worksheet line | Effect on the ledger |
+|---|---|
+| `[x]`, id on the id list | `[x]` with `done:<ISO8601> run:<RUN_ID>` |
+| `[!]`, id on the id list | `[!]` with `blocked:<ISO8601> reason:<reason> run:<RUN_ID>`; reason `not stated` if absent |
+| `[ ]` or `[~]`, id on the id list | back to `[ ]`, metadata cleared |
+| Any marker, id **not** on the id list | **not applied**, counted as ignored |
+| `[ ]` with no id | new task, inserted at the end of its priority section (after that section's last task *and its continuation lines*) |
+| `[x]` or `[!]` with no id | not applied, counted as ignored |
+
+The id list is what makes a run's scope structural rather than requested: an id
+the runner did not put on the worksheet cannot be closed, whatever the agent
+wrote beside it. Ignored lines are counted, logged and carried into the
+handover — a prompt that has drifted out of format shows up as an agent that
+reports work no line records.
+
+Rows from `backlog_scan` are taken apart with `cut`, never `IFS=<tab> read`:
+tab is an IFS whitespace character, so consecutive tabs collapse into one
+delimiter. An empty field — exactly what an id-less line the agent added looks
+like — shifts every later field left, and the new task arrives wearing the next
+field's value.
 
 ## §9 Engines (normative)
 
@@ -437,6 +499,7 @@ JSON is `failed`, never a guess parsed from prose.
   "tasks_done": 0, "tasks_blocked": 0,
   "tasks_done_total": 0, "max_tasks_total": 3,
   "todo_before": 0, "todo_after": 0,
+  "worksheet": {"size": 0, "done": 0, "blocked": 0, "new": 0, "ignored": 0},
   "engine": "claude", "model": "…", "effort": "…", "models_used": [],
   "session_id": "…", "cost_usd": 0.0, "turns": 0,
   "tokens_in": 0, "tokens_out": 0,
@@ -480,7 +543,7 @@ the review and model keys, which are environment > conf > default so that
 | `DEFAULT_MAX_TASKS_TOTAL` / `DEFAULT_MAX_TASKS` | `3` / `3` | ≥ 1 |
 | `DEFAULT_RUN_TIMEOUT` | `3600` | ≥ 1 (`set timeout` ≥ 60) |
 | `DEFAULT_DURATION` | `"10h"` | `10h`/`90m`/`3600`, in [60s, 24h] |
-| `DEFAULT_WORKDIR` / `DEFAULT_BACKLOG` | *(none)* | absolute paths; required |
+| `DEFAULT_WORKDIR` / `DEFAULT_BACKLOG` | *(none)* | absolute paths; required. The backlog should sit **outside** the workdir — `hzl doctor` warns if it does not. Both are baked into the generated permission file, so moving either needs `hzl install` again |
 | `HEINZEL_MODEL` / `HEINZEL_EFFORT` | `claude-opus-5` / `xhigh` | effort: `low\|medium\|high\|xhigh\|max` |
 | `HEINZEL_EXECUTOR_ENGINE` / `HEINZEL_REVIEWER_ENGINE` | `claude` / `codex` | `claude\|codex` |
 | `HEINZEL_REVIEW` | `0` | `0\|1` |
@@ -538,6 +601,8 @@ Honest as of 2026-08-29.
 | **`travel` / `remote` transitions** | Verified: screen sharing closes and reopens, posture reports `travel` and `remote`, and `mixed` was correctly reported for a half-configured machine before the first transition |
 | **The timeout path** | Verified 2026-08-30 with a stand-in engine that claims a task then hangs: killed at 61s, `result: "timeout"`, `exit_code: 124`, the task rolled back from `[~]` to `[ ]`, no orphaned process. A *real* engine killed mid-call is still not reproduced |
 | **Capability inside the boundary under `dontAsk`** | Verified: commands never explicitly allowed (`python3`, a `tee` pipeline) still run and write inside the working directory, because a sandboxed command needs no prompt |
+| **A real agent editing the worksheet** | Verified 2026-08-30 (`VERIFICATION.md` phase 3c): a real `claude -p` run under sandbox + `dontAsk` moved a marker in `<workdir>/.heinzel/worksheet.md`, 4 turns, $0.31. Probed a second time with the exact-path allow rules removed and it still worked, which settles the open question: `Edit(//<workdir>/**)` **does** match a file in a dot directory. The exact rules are redundant and kept on purpose |
+| **The worksheet cycle end to end** | Verified 2026-08-30, run `20260830-215948`: a two-task backlog with `max_tasks 1`; the runner put one task on the worksheet, the agent did the work, verified it, and marked `[x]` writing no timestamp and no `run:`; the merge closed exactly that line with `done:… run:20260830-215948`, the second task was untouched and kept its `[ ]`, the worksheet was archived into `exec-*/` and removed from the working directory, and `worksheet: {size:1, done:1, ignored:0}` matched `tasks_done: 1` counted from the ledger. 24s, $0.40, 7 turns. The handover reported the second task as *"not visible on this run's worksheet"* — the scope limit is observable from inside the run, not only from outside it |
 | `hzl_timeout` contract | 124, 137, pass-through, 125 all correct; no orphaned grandchildren after switching to process-group signalling |
 | Ledger operations | Priority ordering, id allocation from the correct maximum, marker transitions, metadata replaced not appended, `[~]` rollback, `run:` targeting |
 | Change set | git commits, git worktree, added / modified / deleted plain files, no double counting across the git boundary |
@@ -550,7 +615,6 @@ Honest as of 2026-08-29.
 
 | Item | Status |
 |---|---|
-
 | The review gate's `reject` path | The rule that matters most in §10 — reverting only the lines carrying this run's id — is unit-checked but has never fired against a real `reject`. Neither has `approve`, nor `fix-once` |
 | HALT in the field | The auth-failure patterns are desk-checked only; a real credential expiry has not been reproduced |
 

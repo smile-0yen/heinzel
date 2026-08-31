@@ -77,8 +77,13 @@ Edit `etc/heinzel.conf`. At minimum:
 
 ```sh
 DEFAULT_WORKDIR="/Users/<you>/hzl-scratch"
-DEFAULT_BACKLOG="/Users/<you>/hzl-scratch/backlog.md"
+DEFAULT_BACKLOG="/Users/<you>/.heinzel/backlog.md"
 ```
+
+The backlog goes **outside** the working directory. The agent works from a
+worksheet the runner merges back (SPEC §8.1), so it never needs the ledger, and
+outside the working directory is outside the sandbox — the one boundary a
+subprocess cannot talk its way around. `hzl doctor` warns if they overlap.
 
 `mkdir -p` the scratch directory first — `hzl on` refuses if the working
 directory does not exist, on purpose, because launchd runs with `cwd=/` and a
@@ -109,11 +114,15 @@ This writes `~/Library/LaunchAgents/local.heinzel.plist`, generates
 directory), and loads the agent. It does **not** start a session: with no
 session, every firing exits without doing anything.
 
-Check the deny list actually names your scratch directory:
+Check the rules actually name your paths — the working directory and the
+worksheet in `allow`, the backlog in `deny`:
 
 ```sh
-jq '.permissions.allow' etc/heinzel-settings.json
+jq '.permissions.allow, .permissions.deny[-2:]' etc/heinzel-settings.json
 ```
+
+An absolute path in a rule carries **two** leading slashes. One slash anchors
+at the settings file's own location and matches nothing, silently.
 
 Reversible with `hzl uninstall`.
 
@@ -125,9 +134,13 @@ Reversible with `hzl uninstall`.
 ## Phase 3 — the first real engine call
 
 First passed on 2026-08-30, after two rounds of fixes that only a real run
-could have surfaced (`docs/DESIGN.md` §4.5 and §4.6). Run it again on your own
-backlog: the value is in the checking, not in the record of it having once
-worked.
+could have surfaced (`docs/DESIGN.md` §4.5 and §4.6), and again the same day on
+the worksheet path (§4.7). Run it again on your own backlog: the value is in
+the checking, not in the record of it having once worked.
+
+Seed **two** tasks and keep `--max-total 1`. One task tells you the run works;
+the second tells you the run stayed inside its worksheet, which is the property
+that matters now — it should still be `[ ]` afterwards, untouched.
 
 Seed the scratch backlog with something small and objectively verifiable:
 
@@ -137,6 +150,7 @@ cat > ~/hzl-scratch/backlog.md <<'EOF'
 
 ## P1
 - [ ] create hello.sh that prints "hello from heinzel", make it executable, and verify it runs
+- [ ] this second task must be left untouched by a one-task run
 EOF
 ```
 
@@ -288,6 +302,52 @@ at `[ ]` rather than stranded at `[~]`, and no leftover `sleep 300` process.
 > against a live API call.
 
 ---
+
+### Phase 3c — can the agent write the worksheet?
+
+**Run this before trusting a single unattended run.** The agent no longer edits
+the backlog; it edits `<workdir>/.heinzel/worksheet.md`, and the runner merges
+that back (SPEC §8.1). If the agent cannot write the worksheet, every run
+completes, reports work in its handover, and closes nothing — a failure that
+reads as an agent that did not manage to do anything, not as a permission
+problem.
+
+The doubt is specific and is the same one Phase 3a exists for: the allow rule
+names the worksheet by exact path *because* the working directory's `/**` rule
+may or may not match a hidden directory, and that is not a behaviour this
+project has measured. The rule being present in the JSON is not the question.
+
+```sh
+cd ~/Claude/heinzel
+W=$(hzl status --json | jq -r '.workdir // empty')
+W=${W:-$HOME/hzl-scratch}
+mkdir -p "$W/.heinzel"
+printf '## P1\n- [ ] (id:h-9999) probe\n' > "$W/.heinzel/worksheet.md"
+
+( cd "$W" && claude -p "Change the marker on the line with id h-9999 in .heinzel/worksheet.md from [ ] to [x]. Change nothing else. Say what you did." \
+    --settings ~/Claude/heinzel/etc/heinzel-settings.json --setting-sources user \
+    --permission-mode dontAsk --output-format json \
+    --model claude-opus-5 --effort low | jq -r '.result' )
+
+cat "$W/.heinzel/worksheet.md"
+rm -f "$W/.heinzel/worksheet.md"; rmdir "$W/.heinzel" 2>/dev/null
+```
+
+Expect `- [x] (id:h-9999) probe`. A refusal, or an unchanged marker with a
+cheerful report that the edit was made, means the allow rule is not reaching
+the file — the same silent-acceptance failure as §4.6. Fix it there rather than
+loosening the deny list.
+
+> First passed 2026-08-30: 4 turns, $0.31, marker moved. The probe was then run
+> a second time against a copy of the settings with the two exact-path
+> worksheet rules deleted, and it **still worked** — so `Edit(//<workdir>/**)`
+> does match a file in a dot directory, and the exact rules are redundant
+> rather than load-bearing. They are kept anyway; SPEC §8.1 says why. Run the
+> probe again after any change to the allow list: the question it answers is
+> about the permission system, not about this repository, and the answer can
+> move under us.
+
+> **Evidence 3c** — the `.result` string and the file's contents afterwards.
 
 ## Phase 4 — posture
 

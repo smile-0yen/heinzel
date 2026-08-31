@@ -57,6 +57,10 @@ design is about bounding it.
   without the denials. A truncated diff says so. A misspelled effort level is rejected at startup.
 - **Its output gets read back.** Changes made by the executor can be reviewed by a second,
   read-only engine before the ledger is allowed to close a task.
+- **The agent never gets the backlog.** Each run is handed a worksheet holding only the tasks it is
+  allowed to work on; the runner merges the result back and is the ledger's only writer. A run
+  cannot close, revert or reword a task it was not given, and that is checked against a list the
+  agent cannot reach rather than asked for in a prompt.
 
 ## Requirements
 
@@ -78,7 +82,7 @@ cd heinzel && ./install.sh
 
 That links `hzl` into `~/.local/bin` and copies the example configuration.
 Then edit `etc/heinzel.conf` (at minimum `DEFAULT_WORKDIR` and
-`DEFAULT_BACKLOG`), and:
+`DEFAULT_BACKLOG` — keep the backlog outside the working directory), and:
 
 ```sh
 hzl doctor          # check the setup

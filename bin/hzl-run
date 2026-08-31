@@ -115,6 +115,12 @@ cleanup() {
   if [ -n "${BACKLOG}" ] && [ -w "${BACKLOG}" ]; then
     backlog_reset_inprogress "${BACKLOG}" >/dev/null 2>&1
   fi
+  # An interrupted run leaves its worksheet in the working directory. It is
+  # scaffolding, and a stale one would be merged by nothing and read by nobody.
+  if [ -n "${WS_DIR:-}" ]; then
+    rm -f "${WS_DIR}/worksheet.md"
+    rmdir "${WS_DIR}" 2>/dev/null
+  fi
   if [ -n "${HEINZEL_ENGINE_PID:-}" ] && pid_alive "${HEINZEL_ENGINE_PID}"; then
     hzl_signal_tree TERM "${HEINZEL_ENGINE_PID}"
   fi
@@ -196,11 +202,33 @@ MAX_TASKS=${MAX_PER_RUN}
 backlog_assign_ids "${BACKLOG}"
 DONE_BEFORE=$(backlog_count "${BACKLOG}" x)
 
-NEXT_ROW=$(backlog_next_row "${BACKLOG}")
-NEXT_TEXT=$(printf '%s' "${NEXT_ROW}" | cut -f5)
-NEXT_NOTES=$(backlog_notes_for_line "${BACKLOG}" "$(printf '%s' "${NEXT_ROW}" | cut -f1)")
-NEXT_TASK="${NEXT_TEXT}
-${NEXT_NOTES}"
+# The agent works from a worksheet, not from the ledger: this run's slice of
+# the queue, carrying the ids it may touch and nothing else. See SPEC §8.1.
+#
+# It lives in the working directory because that is the only place the agent
+# can write - the sandbox is what confines it, and the sandbox is a path
+# boundary. `.heinzel` is already on hzl-changeset's prune list, so the
+# worksheet never shows up as a change the reviewer has to explain.
+#
+# The id list does *not* live there. It is what the merge checks the agent's
+# work against, so it is kept in the log tree, which the agent cannot reach.
+mkdir -p "${EXEC_DIR}" || abort "cannot create ${EXEC_DIR}"
+WS_DIR="${WORKDIR}/.heinzel"
+WORKSHEET="${WS_DIR}/worksheet.md"
+WORKSHEET_IDS="${EXEC_DIR}/worksheet-ids.txt"
+mkdir -p "${WS_DIR}" || abort "cannot create ${WS_DIR}"
+worksheet_write "${BACKLOG}" "${MAX_TASKS}" "${WORKSHEET}" >"${WORKSHEET_IDS}" ||
+  abort "could not build a worksheet from ${BACKLOG}"
+[ -s "${WORKSHEET_IDS}" ] ||
+  abort "the worksheet came out empty with ${TODO_BEFORE} todo(s) waiting"
+
+# Claim them in the ledger before the engine starts, so that a human reading it
+# mid-run sees what is being worked on, and an interrupted run is recognisable
+# as one. The merge, or failing that the EXIT trap, puts them back.
+while IFS= read -r wid; do
+  [ -n "${wid}" ] || continue
+  backlog_set_state "${BACKLOG}" "${wid}" "~" "run:${RUN_ID}"
+done <"${WORKSHEET_IDS}"
 
 {
   printf '=== run %s (%s)\n' "${RUN_ID}" "${TRIGGER}"
@@ -229,16 +257,14 @@ render() {
 }
 
 PROMPT_FILE="${EXEC_DIR}/prompt.md"
-mkdir -p "${EXEC_DIR}"
 < "${HEINZEL_ROOT}/prompts/backlog-run.md" \
   render '{{WORKDIR}}' "${WORKDIR}" |
-  render '{{BACKLOG}}' "${BACKLOG}" |
+  render '{{WORKSHEET}}' "${WORKSHEET}" |
   render '{{MAX_TASKS}}' "${MAX_TASKS}" |
   render '{{TODO_COUNT}}' "${TODO_BEFORE}" |
   render '{{RUN_ID}}' "${RUN_ID}" |
   render '{{DEADLINE}}' "$(short_at "${EXPIRES}")" |
-  render '{{RUN_TIMEOUT_MIN}}' "$((RUN_TIMEOUT / 60))" |
-  render '{{NEXT_TASK}}' "${NEXT_TASK}" >"${PROMPT_FILE}"
+  render '{{RUN_TIMEOUT_MIN}}' "$((RUN_TIMEOUT / 60))" >"${PROMPT_FILE}"
 
 # An empty prompt would sail past the placeholder check below and be sent as a
 # blank instruction. Check for substance before checking for leftovers.
@@ -272,11 +298,41 @@ else
 fi
 [ -n "${VERDICT}" ] || VERDICT=error
 
-# A timeout leaves a task marked in progress; roll it back so the next run can
-# pick it up rather than stepping over it.
-if [ "${VERDICT}" = timeout ]; then
-  backlog_reset_inprogress "${BACKLOG}" >/dev/null
+# --- the merge -------------------------------------------------------------
+# Where the run's work becomes visible, and the only place the ledger is
+# written. It runs whatever the verdict was: a run killed at the wall clock may
+# still have finished its first task, and that is on the worksheet either way.
+# Anything the agent did not close goes back to `[ ]` here rather than staying
+# claimed by a run that is over.
+MERGE_COUNTS=$(worksheet_merge "${WORKSHEET}" "${BACKLOG}" "${RUN_ID}" "${WORKSHEET_IDS}")
+MERGE_RC=$?
+MERGED_DONE=$(printf '%s' "${MERGE_COUNTS}" | cut -d' ' -f1)
+MERGED_BLOCKED=$(printf '%s' "${MERGE_COUNTS}" | cut -d' ' -f2)
+MERGED_NEW=$(printf '%s' "${MERGE_COUNTS}" | cut -d' ' -f3)
+MERGED_IGNORED=$(printf '%s' "${MERGE_COUNTS}" | cut -d' ' -f4)
+if [ "${MERGE_RC}" -ne 0 ]; then
+  log_event skip "the worksheet was unreadable at merge time; nothing was applied"
 fi
+# Loud, because it is how a prompt that has drifted out of the format shows
+# itself: the agent reports work it did and the ledger records none of it.
+if [ "${MERGED_IGNORED}" -gt 0 ]; then
+  log_event skip "${MERGED_IGNORED} worksheet line(s) ignored (out of scope or unparseable)"
+fi
+printf 'merge    %s done, %s blocked, %s new, %s ignored\n' \
+  "${MERGED_DONE}" "${MERGED_BLOCKED}" "${MERGED_NEW}" "${MERGED_IGNORED}" >>"${RUN_LOG}"
+
+# Belt and braces: an id the merge never saw is still marked in progress.
+backlog_reset_inprogress "${BACKLOG}" >/dev/null
+# New tasks arrive without ids, and the ledger is not left in a state where a
+# human could add one by hand before the next run allocates it.
+[ "${MERGED_NEW}" -gt 0 ] && backlog_assign_ids "${BACKLOG}"
+
+# Keep the finished worksheet with the rest of the run's record, then take it
+# out of the working directory: it is the runner's scaffolding, not the user's
+# file. rm -f and rmdir, never rm -r on a path built from configuration.
+cp "${WORKSHEET}" "${EXEC_DIR}/worksheet.md" 2>/dev/null
+rm -f "${WORKSHEET}"
+rmdir "${WS_DIR}" 2>/dev/null
 
 # --- review ----------------------------------------------------------------
 # The gate runs before the tally, so work that is rejected is never counted as
@@ -366,6 +422,7 @@ if [ "${HEINZEL_REVIEW}" = 1 ]; then
                 # added, because a human is better placed to judge the rest.
                 printf -- '- [ ] follow up on review findings from run %s\n' "${RUN_ID}" \
                   >>"${BACKLOG}"
+                backlog_assign_ids "${BACKLOG}"
                 REVIEW_ACTION="revise, one fix pass did not settle it; added a follow-up task"
               fi
             fi
@@ -435,6 +492,10 @@ fi
   if [ -r "${EXEC_DIR}/last.txt" ]; then
     sed -n '/=== HEINZEL SUMMARY ===/,$p' "${EXEC_DIR}/last.txt" | sed 's/^/  /'
   fi
+  if [ "${MERGED_IGNORED}" -gt 0 ] || [ "${MERGED_NEW}" -gt 0 ]; then
+    printf -- '- worksheet: %s new task(s), %s line(s) ignored\n' \
+      "${MERGED_NEW}" "${MERGED_IGNORED}"
+  fi
   printf -- '- review: %s - %s\n' "${REVIEW_VERDICT}" "${REVIEW_ACTION}"
   if [ "${REVIEW_FINDINGS}" -gt 0 ] && [ -r "${REVIEW_DIR}/verdict.json" ]; then
     jq -r '.findings[]? | "  - \(.severity) \(.file):\(.line) \(.what)"' \
@@ -452,6 +513,11 @@ jq -n -c \
   --argjson max_tasks_total "${MAX_TOTAL}" \
   --argjson todo_before "${TODO_BEFORE}" \
   --argjson todo_after "$(backlog_count "${BACKLOG}" " ")" \
+  --argjson ws_size "$(wc -l <"${WORKSHEET_IDS}" | tr -d ' ')" \
+  --argjson ws_done "${MERGED_DONE}" \
+  --argjson ws_blocked "${MERGED_BLOCKED}" \
+  --argjson ws_new "${MERGED_NEW}" \
+  --argjson ws_ignored "${MERGED_IGNORED}" \
   --slurpfile engine_result "${RESULT}" \
   --arg review_verdict "${REVIEW_VERDICT}" \
   --argjson review_engine "${REVIEW_ENGINE}" \
@@ -469,6 +535,8 @@ jq -n -c \
     tasks_done: $tasks_done, tasks_blocked: $tasks_blocked,
     tasks_done_total: $tasks_done_total, max_tasks_total: $max_tasks_total,
     todo_before: $todo_before, todo_after: $todo_after,
+    worksheet: {size: $ws_size, done: $ws_done, blocked: $ws_blocked,
+                new: $ws_new, ignored: $ws_ignored},
     engine: ($engine_result[0].engine // null),
     model: ($engine_result[0].model // null),
     effort: ($engine_result[0].effort // null),

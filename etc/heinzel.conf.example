@@ -9,8 +9,23 @@
 # not a latent bug, it is a certain abort.
 # There is no sensible default here, so there isn't one: fill both in.
 # The directory must already exist; the backlog file is created for you.
+#
+# Keep the backlog OUTSIDE the working directory. The agent works from a
+# worksheet the runner merges back into the backlog afterwards, so it never
+# needs the file itself - and the sandbox that confines the agent is a path
+# boundary, so a backlog outside the working directory is one it cannot reach
+# even through a subprocess. `hzl doctor` warns if the two overlap.
+#
+# The working directory must not be ~/.heinzel or anything inside it: that is
+# Heinzel's own state, denied to the agent wholesale, so a run there could
+# write nothing. `hzl on` refuses it.
+#
+# Editing either path takes effect when there is no live session. A running
+# session keeps the paths it was started with, and `hzl install` bakes whatever
+# is current into the agent's permission file - so after changing one, re-run
+# `hzl install` and check `hzl doctor` section 2.
 DEFAULT_WORKDIR=""       # e.g. "/Users/you/projects"
-DEFAULT_BACKLOG=""       # e.g. "/Users/you/projects/backlog.md"
+DEFAULT_BACKLOG=""       # e.g. "/Users/you/.heinzel/backlog.md"
 
 # --- when to run -----------------------------------------------------------
 # Hours (0-23) at which launchd wakes the runner. The single source of truth

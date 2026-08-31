@@ -86,7 +86,20 @@ the morning, it is written for a human.
 ## The backlog
 
 The ledger lives wherever `DEFAULT_BACKLOG` points, and it is the only place
-you and the unattended runner meet.
+you and the unattended runner meet. Keep it **outside** the working directory:
+`hzl doctor` warns if it is not, and moving it means `hzl install` again,
+because the path is baked into the agent's permission file.
+
+The agent never sees this file. Each run gets a *worksheet* instead — the two
+or three `[ ]` lines that run is allowed to work on — and the runner merges the
+result back here afterwards. Two things follow that are worth knowing when you
+are reading the file in the morning:
+
+- Everything you see was written by the runner, including the timestamps and
+  the `run:` ids. The agent's report is what goes in the handover notes; it is
+  not what moved anything here.
+- A run cannot touch a line that was not on its worksheet. That is enforced by
+  a list the agent cannot reach, not by the prompt asking it nicely.
 
 ```markdown
 ## P1
