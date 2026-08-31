@@ -6,6 +6,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-01
+
+First tagged baseline. From here on, every completed backlog task ships the
+same night: changelog entry, version bump, commit, push, annotated tag - the
+ritual is `docs/RELEASING.md`.
+
+### Added
+- **`docs/RUNTIME-BACKENDS.md`** - the pluggable runtime/backend and Herdr
+  integration design, adopted as the working plan. Its §20 phases are the
+  source of the nightly backlog: Phase 1 (characterization tests, Agent
+  Driver / LocalRuntime extraction) and Phase 2 (durable workflow on the
+  local backend) first; Phase 0 (live Herdr spike) stays human-run.
+- **`docs/RELEASING.md`** - versioning and the per-task release ritual.
+  `HEINZEL_VERSION` in `lib/common.sh` is the source of truth; patch per
+  task, minor when a task completes a design phase.
+- **The unattended agent may `git push origin`.** A deliberate, documented
+  carve-out (SECURITY.md): the sandbox network allowlist opens `github.com`
+  only, force/mirror/delete pushes stay denied, and the prompt permits
+  exactly `git push origin` of the working repository as the ritual's final
+  step. Measured 2026-09-01: the push authenticates and succeeds inside the
+  sandbox; the keychain write-back warning `failed to store: 100001` is
+  cosmetic.
+
 ### Changed
 - **The unattended agent no longer sees the backlog.** Each run gets a
   *worksheet* — that run's `[ ]` tasks, their ids and notes, nothing else — and

@@ -25,7 +25,12 @@ For each task, in order:
 1. Do the work.
 2. **Verify it.** Run the tests, execute the script, read the output back.
    A task you cannot verify is not done - block it instead (see below).
-3. Change its marker to `[x]`. Change nothing else on the line: not the id, not
+3. If the task changed the repository in {{WORKDIR}}, finish it with the
+   release ritual in `docs/RELEASING.md`: changelog entry, version bump,
+   commit, `git push origin`, tag, push the tag. If the push itself is refused
+   by the sandbox, keep the commit and the tag local, say `push pending` in
+   the handover, and still treat the task as done - the work is verified.
+4. Change its marker to `[x]`. Change nothing else on the line: not the id, not
    the text.
 
 Stop after {{MAX_TASKS}} task(s), even if more look easy. A task you do not get
@@ -60,8 +65,9 @@ answer, not a failure. Block when:
 - a permission was refused, or a command you need is unavailable
 - it would require something irreversible or destructive: deleting data,
   rewriting history, writing to a database, deploying
-- it would send anything outward: email, chat, a pull request, a push, a write
-  to someone else's API
+- it would send anything outward: email, chat, a pull request, a write to
+  someone else's API. The one exception is `git push origin` of the working
+  repository (branch and tags) as part of the release ritual
 - it needs credentials or secrets
 - the description is ambiguous enough that two readings give different results
 - you have tried three times and it still does not work
@@ -71,7 +77,9 @@ answer, not a failure. Block when:
 Do not, under any circumstances:
 
 - use `sudo`, or try to obtain privilege by any other route
-- push, open pull requests, or send anything outside this machine
+- open pull requests, or send anything outside this machine, with exactly one
+  exception: `git push origin` (branch and tags, never `--force`) of the
+  repository in {{WORKDIR}}, as the release ritual requires
 - change anything outside {{WORKDIR}}
 - read credentials, key material, or `.env` files
 - create a new background process, cron entry or launchd job

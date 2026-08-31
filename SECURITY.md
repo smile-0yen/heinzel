@@ -33,9 +33,23 @@ rather than opening a public issue. A first response should take a few days; the
 - *A standing write-capable sudo window during unattended work.* The relaxed sudo ticket that makes
   interactive remote work practical is removed for the duration of a session, and restored after.
 
+**A deliberate carve-out: `git push origin` (2026-09-01)**
+
+The unattended agent may push the working repository's branch and tags to `origin`. Until
+2026-09-01 every outward channel was denied; the nightly self-improvement loop
+(`docs/RELEASING.md`) requires each verified change to land on the remote the same night, so this
+one channel is open. Its scope is held narrow by three independent mechanisms: the sandbox network
+allowlist admits only `github.com` (everything else still fails at the proxy, measured as a
+CONNECT 403), the permission file denies `git push --force`/`-f`/`--mirror`/`--delete`, and the
+prompt names `origin` as the only remote. The residual risk is real and accepted: an agent that
+can push can publish whatever is in the workdir to the repository it already works on. History
+rewriting stays denied, so a bad push is revertible.
+
 **What it does not defend against**
 
 - A compromised Claude Code binary, or a compromised model endpoint.
+- Content the agent chooses to commit and push to the working repository's own `origin` — see the
+  carve-out above.
 - A malicious task in your own `backlog.md`. The ledger is trusted input; the agent's stop
   conditions are a safety net for ambiguity, not an adversary.
 - Anyone with physical access, or with your login password.

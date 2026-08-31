@@ -154,8 +154,12 @@ engine_run() {
         # sandbox in the settings file substitutes for the prompt on Bash, so
         # the agent still runs arbitrary commands inside the working directory
         # while everything outside it is refused by the OS.
+        # git push is deliberately NOT disallowed here since 2026-09-01: the
+        # release ritual (docs/RELEASING.md) has the agent push its own work
+        # and tags to origin. The settings file still denies force pushes and
+        # the sandbox network allowlist limits it to github.com.
         cmd+=(--permission-mode dontAsk
-              --disallowedTools "Bash(sudo *)" "Bash(sudo)" "Bash(git push *)")
+              --disallowedTools "Bash(sudo *)" "Bash(sudo)")
       fi
       [ -n "${model}" ] && cmd+=(--model "${model}")
       [ -n "${effort}" ] && cmd+=(--effort "${effort}")

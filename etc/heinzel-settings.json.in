@@ -42,10 +42,20 @@
     "AND --permission-mode dontAsk together, which is why bin/hzl-run passes",
     "that mode. See docs/DESIGN.md section 4.5.",
     "",
-    "Verify with docs/VERIFICATION.md phase 3a rather than trusting any of it."
+    "Verify with docs/VERIFICATION.md phase 3a rather than trusting any of it.",
+    "",
+    "Network: the sandbox proxies outbound traffic and refuses every domain",
+    "not listed below (measured 2026-09-01: CONNECT tunnel 403). github.com is",
+    "allowed deliberately so the agent can `git push origin` and push tags as",
+    "the release ritual in docs/RELEASING.md requires. Everything else stays",
+    "closed. The keychain write-back warning `failed to store: 100001` on push",
+    "is expected inside the sandbox and harmless - the credential read works."
   ],
   "sandbox": {
-    "enabled": true
+    "enabled": true,
+    "network": {
+      "allowedDomains": ["github.com"]
+    }
   },
   "permissions": {
     "deny": [
@@ -66,7 +76,8 @@
       "Bash(halt *)", "Bash(halt:*)",
       "Bash(diskutil *)", "Bash(diskutil:*)",
       "Bash(dd *)", "Bash(dd:*)",
-      "Bash(git push *)", "Bash(git push:*)",
+      "Bash(git push --force*)", "Bash(git push -f*)",
+      "Bash(git push --mirror*)", "Bash(git push --delete*)",
       "Bash(gh pr create *)", "Bash(gh pr create:*)",
       "Bash(gh pr merge *)", "Bash(gh pr merge:*)",
       "Bash(glab mr merge *)", "Bash(glab mr merge:*)",
