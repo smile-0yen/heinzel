@@ -45,6 +45,37 @@ prompt names `origin` as the only remote. The residual risk is real and accepted
 can push can publish whatever is in the workdir to the repository it already works on. History
 rewriting stays denied, so a bad push is revertible.
 
+**A deliberate carve-out: Heinzel edits its own source (2026-09-01)**
+
+The working directory is the Heinzel repository, so the unattended agent writes the tool that runs
+it. The repository was denied wholesale until now; keeping it that way would have denied the point.
+
+The line is drawn at `etc/`, because nothing in `etc/` is code. Every file in it is control
+surface, and each one is a way to widen the boundary rather than do the task: the generated deny
+list and the template it comes from, `heinzel.conf` (budget, schedule, workdir, engine, review),
+`agent.plist.in` (when the runner fires, and with what `PATH`), and the `sudoers-*.in` and
+`pf-travel.conf.in` templates — which a *human* later installs with privilege, so an agent writing
+them is writing a privileged file and waiting for someone to run it. `bin/`, `lib/`, `prompts/`,
+`docs/` and `tests/` are writable; `etc/` is not; `Read` stays allowed throughout, because
+understanding the configuration is not the risk.
+
+Measured 2026-09-01, and the measurement is the reason this is stated as confinement rather than
+as etiquette: under the same settings file, `python3` invoked through Bash — a subprocess opening
+the file itself, the case DESIGN §4.5 warns permission rules do not cover — appended to a file in
+the repository root and was refused in `etc/`. A path `Edit(...)` denial is reflected in the OS
+sandbox, not only in Claude's own file tools.
+
+The residual risks are real and accepted:
+
+- **`bin/hzl` is writable, and a human runs it with `sudo`.** The unattended lane still never gains
+  privilege itself, but it can now author code that a person later escalates. Nothing in the
+  permission file defends against this. The defences are the git history — every change is
+  committed and pushed by the release ritual, so it is reviewable after the fact — and the review
+  pipeline, which is worth turning on (`HEINZEL_REVIEW=1`) once the agent edits its own tooling.
+- **`prompts/backlog-run.md` is writable**, so the agent can edit its own instructions, including
+  its stop conditions. This is consistent with the threat model below: the stop conditions are a
+  safety net for ambiguity, not a defence against an adversarial agent.
+
 **What it does not defend against**
 
 - A compromised Claude Code binary, or a compromised model endpoint.

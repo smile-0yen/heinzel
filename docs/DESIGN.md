@@ -246,9 +246,16 @@ Two separate reasons, both structural rather than incidental:
   rest. Under `auto`, anything unmatched goes to a classifier that approves
   what looks consistent with the request — and writing the file the user asked
   for looks exactly like that.
-- **Permission rules do not govern subprocesses.** They cover Claude's own file
+- **`allow` rules do not govern subprocesses.** They cover Claude's own file
   tools and the shell commands Claude Code recognises. A Python script that
   opens a file itself is invisible to them.
+- **`deny` rules on paths *are* enforced against subprocesses** — measured
+  2026-09-01, after §4.8 made it matter. Under one settings file, `python3`
+  through Bash appended to a file in the working directory's root and was
+  refused for a subdirectory carrying an `Edit(...)` denial. A path denial is
+  reflected into the Seatbelt profile; it is not merely a rule Claude's own
+  tools consult. This asymmetry is worth holding precisely: an `allow` is a
+  pre-approval for one layer, a path `deny` is a boundary at another.
 
 The mechanism that does work is the OS: `sandbox.enabled` puts every Bash
 command and its children inside Seatbelt, writable only within the working
@@ -364,6 +371,40 @@ outside it. That is the property the old prompt rule was asking for and could no
 The other half of the size problem — a ledger a *human* has to read — is not solved here. Archiving
 closed lines out to a monthly file is a separate change, and it is now a change about human
 ergonomics rather than about agent behaviour.
+
+### 4.8 Heinzel works on Heinzel — where the line is drawn
+
+The working directory is now the repository, so the agent writes the tool that runs it. The
+previous rule denied `Edit(<repo>/**)` outright, which would have denied the point.
+
+The question is not *whether* to open the repository but *where inside it to stop*, and the answer
+falls out of what the files are. `bin/`, `lib/`, `prompts/`, `docs/`, `tests/` are code and prose:
+changing them is the work. `etc/` is none of those. Every file in it is control surface — the
+generated deny list and its template, the budget and schedule, the plist that decides when the
+runner fires and with what `PATH`, and the `sudoers-*` and `pf` templates a human installs *with
+privilege*. An agent editing `etc/` is not doing the task; it is adjusting what the task is allowed
+to be. So `etc/` is shut and the rest is open, and that is one rule a person can hold in their
+head, which matters more here than precision.
+
+Two things were measured rather than assumed, both cheap and both load-bearing:
+
+- **A deny beats an allow for a nested path.** `Edit(<repo>/**)` allows and `Edit(<repo>/etc/**)`
+  denies; if that had resolved the other way the agent could rewrite its own deny list. It denies.
+- **The denial reaches a subprocess.** §4.5 records that permission rules do not govern a process
+  that opens a file itself, which would have made this carve-out etiquette rather than
+  confinement. Under the same settings file, `python3` through Bash wrote to the repository root
+  and was refused in `etc/`. Path denials are in the sandbox profile. §4.5 now states the
+  asymmetry precisely.
+
+What this does not solve, and is accepted rather than mitigated: `bin/hzl` is writable and a human
+runs it under `sudo`. The unattended lane still never gains privilege — principle 1 holds as
+written — but it can author code that a person later escalates. There is no permission rule that
+fixes this; the repository *is* the tool. What stands in its place is that every change is
+committed and pushed the same night by the release ritual, so it is reviewable after the fact, and
+that the review pipeline exists and is worth turning on now that the agent edits its own tooling.
+`prompts/backlog-run.md` is writable for the same reason and with the same caveat: the agent can
+edit its own stop conditions, which is consistent with SECURITY.md's threat model — those
+conditions are a safety net for ambiguity, not a defence against an adversary.
 
 ## §5 State model
 

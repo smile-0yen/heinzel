@@ -810,6 +810,20 @@ cmd_doctor() {
           doc_bad "the deny list does not name ${cur_bl} - run 'hzl install'"
         fi
       fi
+      # Self-hosting: when the agent works on Heinzel itself, etc/ is the one
+      # part of the repository it must not reach - every file in there is a way
+      # to widen its own boundary instead of doing the task. Nothing else
+      # notices if that rule goes missing; the run would simply be unconfined
+      # in the direction that matters most.
+      if [ "$(cur_workdir)" = "${HEINZEL_ROOT}" ]; then
+        if jq -e --arg p "Edit(//${HEINZEL_ROOT#/}/etc/**)" \
+             '(.permissions.deny // []) | index($p)' "${settings}" >/dev/null 2>&1; then
+          doc_ok "self-hosting: the agent may edit the repository but not etc/"
+        else
+          doc_bad "self-hosting without the etc/ carve-out - the agent could rewrite its own deny list"
+          printf '       workdir is %s and etc/** is not denied. Run '"'"'hzl install'"'"'.\n' "${HEINZEL_ROOT}"
+        fi
+      fi
     else
       # claude --print silently ignores a malformed settings file, which would
       # drop every deny rule without a word.

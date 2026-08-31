@@ -6,6 +6,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-01
+
+### Changed
+- **Heinzel may now improve itself.** The working directory is the repository,
+  and `Edit(<repo>/**)` is allowed. The blanket denial that stood before would
+  have denied the point. `etc/` stays denied: nothing in it is code, and every
+  file in it is a way to widen the boundary rather than do the task — the
+  generated deny list and its template, the budget and schedule, the plist, and
+  the `sudoers-*` / `pf` templates a human installs with privilege.
+  `hzl doctor` fails if the working directory is the repository and that
+  carve-out is missing. See `SECURITY.md` and `docs/DESIGN.md` §4.8.
+- Measured while doing it, and recorded in `docs/DESIGN.md` §4.5: a path
+  `Edit(...)` **denial is enforced against a subprocess**, not only against
+  Claude's own file tools. `python3` through Bash wrote to the repository root
+  under the same settings file and was refused in `etc/`. `allow` rules remain
+  one-layer-only; the asymmetry is now stated rather than assumed.
+
 ## [0.1.0] - 2026-09-01
 
 First tagged baseline. From here on, every completed backlog task ships the

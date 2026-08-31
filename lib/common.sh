@@ -11,7 +11,7 @@
 # Multibyte truncation is locale-dependent (DESIGN 6.3). Fix it once, here.
 export LC_CTYPE=UTF-8
 
-HEINZEL_VERSION="0.1.0"
+HEINZEL_VERSION="0.1.1"
 
 # The TTL ceiling is deliberately not configurable. A session that can be
 # created with an unbounded lifetime is not a session, it is a mode.
