@@ -187,6 +187,10 @@ SETTINGS="${HEINZEL_ROOT}/etc/heinzel-settings.json"
 [ -f "${SETTINGS}" ] || abort "missing ${SETTINGS} - refusing to run unconfined"
 jq -e . "${SETTINGS}" >/dev/null 2>&1 ||
   abort "${SETTINGS} is not valid JSON - refusing to run unconfined"
+# Valid JSON is not the same as a file that says anything. A rule still holding
+# a `__NAME__` placeholder parses, is accepted, and matches nothing.
+grep -q '__[A-Z_]*__' "${SETTINGS}" &&
+  abort "${SETTINGS} still contains placeholders - run 'hzl install'"
 
 # --- gate 8: is there anything to do? -------------------------------------
 # Last, and immediately before the only expensive thing in this file.

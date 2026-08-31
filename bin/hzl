@@ -30,6 +30,15 @@ HEINZEL_ROOT=$(
 )
 export HEINZEL_ROOT
 
+# The same three directories bin/hzl-run appends, and for a related reason.
+# There it is launchd handing over a minimal environment; here it is that `hzl`
+# can be reached from any shell at all - an ssh command line, a GUI terminal, a
+# cron entry, something that sourced only .zshenv - and the engine it looks for
+# usually lives in ~/.local/bin. The runner hardened this and the CLI did not,
+# so `hzl doctor` could report an engine as missing that the 03:00 run would
+# then find perfectly well. Disagreeing about that is worse than either answer.
+export PATH="${PATH}:/usr/local/bin:/opt/homebrew/bin:${HOME}/.local/bin"
+
 # shellcheck source=lib/common.sh
 . "${HEINZEL_ROOT}/lib/common.sh"
 # shellcheck source=lib/posture.sh
@@ -756,7 +765,12 @@ cmd_doctor() {
   if have "${HEINZEL_EXECUTOR_ENGINE}"; then
     doc_ok "${HEINZEL_EXECUTOR_ENGINE} ($(${HEINZEL_EXECUTOR_ENGINE} --version 2>/dev/null | head -1))"
   else
+    # "not on PATH" is not a diagnosis, and this is the one prerequisite whose
+    # absence depends on how hzl was invoked rather than on what is installed.
+    # Print what was actually searched, so the next report is answerable.
     doc_bad "executor engine '${HEINZEL_EXECUTOR_ENGINE}' is not on PATH"
+    printf '       searched: %s\n' "${PATH}"
+    printf '       set HEINZEL_EXECUTOR_ENGINE in etc/heinzel.conf, or put the CLI on PATH.\n'
   fi
   # Absence is expected on stock macOS and is not a problem: we ship our own.
   if have timeout || have gtimeout; then
@@ -817,7 +831,11 @@ cmd_doctor() {
     if generate_plist | diff -q - "${pl}" >/dev/null 2>&1; then
       doc_ok "the installed plist matches the current configuration"
     else
-      doc_bad "the installed plist has drifted from HEINZEL_HOURS - run 'hzl install'"
+      # Name what differs. This is a whole-file diff, not an HEINZEL_HOURS
+      # check, and saying otherwise sends the reader to the one line that is
+      # usually fine.
+      doc_bad "the installed plist differs from what this configuration generates - run 'hzl install'"
+      generate_plist | diff - "${pl}" 2>/dev/null | sed -n '1,12p;13s/.*/       .../p' | sed 's/^/       /'
     fi
   else
     doc_warn "no plist at ${pl}"
@@ -984,9 +1002,16 @@ generate_plist() {
   # $'\n' literal and put a blank line into the plist.
   cal=${cal%
 }
+  # A generated file must be a function of configuration and nothing else. This
+  # baked in `${PATH}` - the path of whichever shell happened to run `hzl
+  # install` - so the plist differed between one install and the next, and the
+  # drift check below (a whole-file diff) then reported a schedule that had not
+  # moved. The runner appends these three directories itself; the plist gives
+  # launchd a sane base, and now a reproducible one.
+  local plist_path="/usr/local/bin:/opt/homebrew/bin:${HOME}/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
   sed -e "s|__LABEL__|${HEINZEL_LABEL}|g" \
       -e "s|__RUNNER__|${RUNNER}|g" \
-      -e "s|__PATH__|${PATH}|g" \
+      -e "s|__PATH__|${plist_path}|g" \
       -e "s|__HOME__|${HOME}|g" \
       -e "s|__LOGDIR__|${LOG_DIR}|g" \
       "${HEINZEL_ROOT}/etc/agent.plist.in" |
@@ -1016,6 +1041,13 @@ generate_settings() {
     err "generated ${out} is not valid JSON"
     return 1
   }
+  # A placeholder that survived is the worst shape this file can take: still
+  # valid JSON, so the runner's gate 7 passes, and every rule carrying one
+  # matches nothing. Accepted and then ignored, exactly as in DESIGN 4.6.
+  if grep -q '__[A-Z_]*__' "${out}"; then
+    err "generated ${out} still contains placeholders: $(grep -o '__[A-Z_]*__' "${out}" | sort -u | tr '\n' ' ')"
+    return 1
+  fi
 }
 
 cmd_install() {

@@ -61,6 +61,14 @@ Version: 0.1.0-dev. Target: macOS, `/bin/bash` 3.2.
 resolved from the executable through any number of symlinks, so reaching `hzl`
 through `~/.local/bin/hzl` is supported.
 
+> **Normative: `hzl` and `hzl-run` append the same three directories to `PATH`**
+> — `/usr/local/bin`, `/opt/homebrew/bin`, `~/.local/bin`. The runner needs it
+> because launchd hands over a minimal environment; the CLI needs it because it
+> can be reached from any shell at all. If only one of them does it, the two
+> disagree about which engines exist, and `hzl doctor` can call an engine
+> missing that the 03:00 run finds without trouble. A tool that reports a
+> working setup as broken is worse than either answer on its own.
+
 ## §3 CLI (normative)
 
 `hzl` **must refuse to run as root**, on every subcommand without exception.
@@ -569,6 +577,7 @@ default, invisibly; codex gets a 400.
 | `Label` | `HEINZEL_LABEL` | |
 | `ProgramArguments` | `<repo>/bin/hzl-run --from launchd` | the trigger is recorded by being an argument |
 | `StartCalendarInterval` | generated from `HEINZEL_HOURS` | one source of truth |
+| `EnvironmentVariables.PATH` | a fixed base, **not the installing shell's `PATH`** | the plist is generated from configuration; anything ambient makes it differ between installs and the drift check fires on a schedule that never moved |
 | `ThrottleInterval` | `300` | suppress back-to-back firing |
 | `RunAtLoad` | `false` | the boot id will not match anyway |
 | `ProcessType` | `Standard` | `Background` lowers CPU priority |

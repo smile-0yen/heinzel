@@ -31,10 +31,26 @@ if [ ! -f "${ROOT}/etc/heinzel.conf" ]; then
   printf 'created %s from the example\n' "${ROOT}/etc/heinzel.conf"
 fi
 
-case ":${PATH}:" in
-  *":${BINDIR}:"*) ;;
-  *) printf '\nNote: %s is not on your PATH.\n' "${BINDIR}" ;;
-esac
+# PATH entries carry trailing slashes in the wild - a `~/bin/` entry is why
+# `which hzl` prints `/Users/you/bin//hzl`. Comparing the strings as they come
+# reports a directory as absent when it is sitting right there, which is the
+# one thing this note must not get wrong.
+on_path=0
+saved_ifs=${IFS}
+set -f
+IFS=:
+for d in ${PATH}; do
+  [ "${d%/}" = "${BINDIR%/}" ] && on_path=1
+done
+IFS=${saved_ifs}
+set +f
+if [ "${on_path}" -eq 0 ]; then
+  printf '\nNote: %s is not on your PATH, so `hzl` will not be found by name.\n' "${BINDIR}"
+  printf 'Add it to your shell profile, or link hzl into a directory that is:\n'
+  printf '  ln -sf %s/bin/hzl <somewhere-on-your-PATH>/hzl\n' "${ROOT}"
+  printf 'Either is fine. hzl finds its own libraries through the symlink, and it\n'
+  printf 'adds the usual engine directories to PATH itself.\n'
+fi
 
 cat <<NEXT
 
