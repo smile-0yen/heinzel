@@ -83,6 +83,14 @@ classification, and it is the thing to look at:
 to graph. `~/.heinzel/logs/<date>/notes.md` is the handover: read that first in
 the morning, it is written for a human.
 
+`~/.heinzel/runs/<run-id>/` is one directory per run that got as far as calling
+an engine: `workflow.json` says where that run had got to and which task ids it
+was holding, and `events.jsonl` says what happened, one line at a time. A run
+killed at the deadline or by `hzl off` leaves a `run.interrupted` line and a
+snapshot naming the tasks it was holding — which is how you tell a run that was
+stopped from one that finished quietly. Nothing reads these to decide anything
+yet; they are there to be read by you.
+
 Those records carry a `schema_version`, and so do `state.json` and each run's
 `result.json`. A file without the field is version 1 and is read as one — by
 this build and by anything you wrote against it. Nothing rewrites a record it

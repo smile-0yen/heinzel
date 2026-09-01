@@ -50,6 +50,8 @@ mkdir -p "${HEINZEL_HOME}"
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=../lib/common.sh
 . "${TEST_ROOT}/lib/common.sh"
+# shellcheck source=../lib/runstore.sh
+. "${TEST_ROOT}/lib/runstore.sh"
 
 # Read back what common.sh actually resolved, through `:-` so that a state path
 # it failed to define reads as empty and is refused rather than skipped. If
@@ -1166,6 +1168,146 @@ engine_normalize_result "${RT_DIR}/launch.json" "${RT_DIR}/collected.json" \
   "${TMPROOT}/backend-default.json"
 t_eq "and a caller that names none gets local, as every v1 caller meant" \
   local "$(jq -r '.backend' "${TMPROOT}/backend-default.json")"
+
+# --- the durable per-run store ---------------------------------------------
+#
+# One directory per run under HEINZEL_HOME (§14.1). HEINZEL_HOME is already
+# redirected into the temp tree at the top of this file, and the suite refused
+# to start otherwise, so every path below is under ${TMPROOT} by construction.
+
+group 'runstore ids'
+
+RS_ID=$(runstore_new_id)
+RS_ID2=$(runstore_new_id)
+
+# r-YYYYMMDDTHHMMSS-xxxxxx. Asserted as a shape rather than as a length,
+# because the shape is what makes it sortable: fixed-width time, first.
+case ${RS_ID} in
+  r-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]-[a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9]) RS_SHAPE=0 ;;
+  *) RS_SHAPE=1 ;;
+esac
+t_eq "a run id is a fixed-width timestamp and a random suffix" 0 "${RS_SHAPE}"
+
+# Two runs can start in the same second; a store keyed by the second alone
+# would put the later one on top of the earlier one.
+t_eq "two ids made in the same second are still different" \
+  "different" "$([ "${RS_ID}" != "${RS_ID2}" ] && echo different || echo same)"
+
+# The whole point of the shape: `sort` on the strings is chronological order.
+t_eq "ids sort chronologically as plain strings" \
+  "r-20260901T235959-aaaaaa r-20260902T000000-000000 r-20260902T031500-zzzzzz" \
+  "$(printf 'r-20260902T031500-zzzzzz\nr-20260901T235959-aaaaaa\nr-20260902T000000-000000\n' |
+     sort | tr '\n' ' ' | sed 's/ *$//')"
+
+# A run id and a task id must never be mistaken for one another: the ledger's
+# allocator reads `<letters>-<digits>` and would otherwise count a run id as
+# the highest task number ever issued.
+RS_LEDGER=${TMPROOT}/runid-vs-taskid.md
+{
+  printf '# Backlog\n\n## P1\n'
+  printf -- '- [x] (id:h-0007) a real task\n'
+  printf -- '- [ ] (id:%s) a line wearing a run id\n' "${RS_ID}"
+} >"${RS_LEDGER}"
+t_eq "a run id is not read as a task number" \
+  7 "$(backlog_max_id_num "${RS_LEDGER}")"
+
+group 'runstore layout'
+
+runstore_dir "${RS_ID}" >/dev/null
+t_ok "a well-formed id resolves to a directory" "$?"
+t_eq "which is under HEINZEL_HOME, where the agent cannot reach it" \
+  "${HEINZEL_HOME}/runs/${RS_ID}" "$(runstore_dir "${RS_ID}")"
+
+runstore_dir "../../etc/passwd" 2>/dev/null
+t_fails "an id that is not an id is refused rather than joined onto a path" "$?"
+runstore_dir "" 2>/dev/null
+t_fails "and so is an empty one" "$?"
+
+runstore_init "${RS_ID}"
+t_ok "the store for a run is created" "$?"
+RS_DIR=$(runstore_dir "${RS_ID}")
+[ -d "${RS_DIR}" ]
+t_ok "and the directory is really there" "$?"
+
+group 'runstore snapshot'
+
+# The failure that produces a half-written file is a write that starts and does
+# not finish. Here it is provoked directly: content that will not parse. If the
+# target were opened for writing, it would exist and be broken; it is only ever
+# renamed into place, so it does not exist at all.
+runstore_snapshot "${RS_ID}" '{"broken": ' 2>/dev/null
+t_fails "a snapshot that does not parse is refused" "$?"
+[ -e "${RS_DIR}/workflow.json" ]
+t_fails "and no partial file is left where a reader would look for one" "$?"
+
+runstore_snapshot "${RS_ID}" '{"schema_version":1,"runner_state":"queued"}'
+t_ok "a valid snapshot is written" "$?"
+t_eq "and reads back whole" \
+  '{"schema_version":1,"runner_state":"queued"}' \
+  "$(runstore_read "${RS_ID}" | jq -c .)"
+
+RS_FIRST=$(cksum <"${RS_DIR}/workflow.json")
+runstore_snapshot "${RS_ID}" '{"runner_state": ' 2>/dev/null
+t_fails "a later snapshot that does not parse is refused too" "$?"
+t_eq "and the snapshot already there is untouched, not truncated" \
+  "${RS_FIRST}" "$(cksum <"${RS_DIR}/workflow.json")"
+t_ok "so the file a reader finds always parses" \
+  "$(jq -e . "${RS_DIR}/workflow.json" >/dev/null 2>&1; printf %s $?)"
+
+runstore_snapshot "${RS_ID}" '{"schema_version":1,"runner_state":"running"}'
+t_eq "a snapshot replaces the one before it" \
+  running "$(runstore_read "${RS_ID}" | jq -r '.runner_state')"
+
+# The temp file is made in the same directory as the target — which is what
+# makes the rename atomic rather than a copy across filesystems — and it is
+# gone afterwards, on the failing path as well as the succeeding one.
+t_eq "no temp file survives a write, successful or refused" \
+  0 "$(find "${RS_DIR}" -maxdepth 1 -name '.workflow.*' | wc -l | tr -d ' ')"
+
+runstore_read "r-20260101T000000-nosuch" 2>/dev/null
+t_fails "reading a run with no store is a failure, not an empty snapshot" "$?"
+
+group 'runstore events'
+
+runstore_event "${RS_ID}" run.queued "1 task"
+runstore_event "${RS_ID}" engine.started "claude executor"
+t_ok "events are appended" "$?"
+RS_EVENTS=${RS_DIR}/events.jsonl
+t_eq "one line per event" 2 "$(wc -l <"${RS_EVENTS}" | tr -d ' ')"
+t_eq "in the order they happened" \
+  "run.queued engine.started" \
+  "$(jq -r '.kind' "${RS_EVENTS}" | tr '\n' ' ' | sed 's/ *$//')"
+t_ok "and every line is valid JSON on its own" \
+  "$(jq -e -s . "${RS_EVENTS}" >/dev/null 2>&1; printf %s $?)"
+
+# Append-only means the bytes already written are never rewritten. A trail that
+# could be edited after the fact is not evidence of anything.
+RS_PREFIX=$(cksum <"${RS_EVENTS}")
+RS_PREFIX_LINES=$(wc -l <"${RS_EVENTS}" | tr -d ' ')
+runstore_event "${RS_ID}" run.ended "ok"
+t_eq "appending leaves every earlier byte where it was" \
+  "${RS_PREFIX}" "$(head -n "${RS_PREFIX_LINES}" "${RS_EVENTS}" | cksum)"
+t_eq "and the new event is on the end" \
+  run.ended "$(tail -1 "${RS_EVENTS}" | jq -r '.kind')"
+
+# A message with a newline in it would otherwise become two lines, one of
+# which is not JSON.
+runstore_event "${RS_ID}" note "$(printf 'first\nsecond')"
+t_eq "a multi-line message is still one line" \
+  4 "$(wc -l <"${RS_EVENTS}" | tr -d ' ')"
+t_eq "with the message kept, flattened" \
+  "first second" "$(tail -1 "${RS_EVENTS}" | jq -r '.message')"
+
+runstore_event "r-20260101T000000-nosuch" note "no store" 2>/dev/null
+t_fails "an event for a run with no store is refused, not written elsewhere" "$?"
+
+group 'runstore listing'
+
+runstore_init r-20260101T000000-aaaaaa
+runstore_init r-20251231T235959-bbbbbb
+t_eq "the runs with a store are listed oldest first" \
+  "r-20251231T235959-bbbbbb r-20260101T000000-aaaaaa ${RS_ID}" \
+  "$(runstore_runs | tr '\n' ' ' | sed 's/ *$//')"
 
 # --- verdict ---------------------------------------------------------------
 

@@ -6,6 +6,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-02
+
+### Added
+- **`lib/runstore.sh`: one durable directory per run under `HEINZEL_HOME`**
+  (`docs/RUNTIME-BACKENDS.md` §14.1). `workflow.json` is the recovery snapshot —
+  what is true now — and `events.jsonl` is the append-only trail of what
+  happened. Two files because they answer two questions: a snapshot that grew a
+  history would eventually be too big to rewrite atomically, and a log that had
+  to be rewritten to answer "where is this run" would stop being an audit trail
+  the first time it was compacted. `HEINZEL_HOME` is the point of the location:
+  the agent is denied that path wholesale, so a record kept there is one the
+  thing being recorded cannot edit.
+- **Sortable run ids** (§14.2): `r-20260902T031500-k7w3m2`. Fixed-width
+  timestamp first, so plain string order is chronological order; a random
+  suffix, because two runs can begin in the same second and a store keyed by
+  the second alone would put the later one on top of the earlier one; and a
+  shape the ledger's `<letters>-<digits>` id allocator cannot match, so a run
+  id can never be counted as the highest task number ever issued. There is an
+  assertion for exactly that.
+- The runner writes the store alongside everything it already wrote. The
+  second-precision `RUN_ID` is unchanged and still what the ledger's `run:`
+  provenance and `runs.jsonl` are written in; the snapshot records it as
+  `legacy_run_id`. The exec directory contains what it contained.
+- A `run.interrupted` event from the EXIT trap. A run killed at the deadline or
+  by `hzl off` now leaves a snapshot naming the task ids it was holding and a
+  line saying nobody finished — which is what makes a stopped run recognisable
+  as one afterwards, rather than as a run that ended quietly.
+- Thirty assertions, against a temp `HEINZEL_HOME`. The one the task was for:
+  a snapshot that does not parse is refused *before* anything is replaced, so
+  with no snapshot yet the target file does not exist at all rather than
+  existing and being broken, and with a snapshot already there the old one is
+  byte-identical afterwards. The temp file is made in the same directory as the
+  target — which is what makes the rename atomic rather than a copy — and none
+  survives either path.
+
+### Changed
+- `runner_state` in the snapshot is lowercase (`queued`, `running`, `merging`,
+  `ended`) and `workflow_state` / `workflow_outcome` are present and null. The
+  uppercase states of §9.2 belong to a state machine this runner is not yet, and
+  a legacy run labelling itself `RUNNING` would be claiming to be one. The two
+  reserved fields mean the shape does not change when that machine fills them.
+
+### Not in this change
+- Nothing reads the store to decide anything. A run whose store cannot be
+  written is a run that still happens, and says so with a `skip` line in the
+  runner log — a run must not fail because its own bookkeeping did.
+- Retention (§14.7). The store grows without bound today; the log tree's
+  14-day prune has no counterpart here yet, and adding a delete was left as its
+  own task rather than folded into the one that created the directories.
+
 ## [0.2.0] - 2026-09-02
 
 Phase 1 of `docs/RUNTIME-BACKENDS.md` is complete: the characterization tests,

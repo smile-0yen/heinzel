@@ -39,6 +39,8 @@ export HOME="${HOME:-$(cd ~ && pwd)}"
 . "${HEINZEL_ROOT}/lib/posture.sh"
 # shellcheck source=lib/watchdog.sh
 . "${HEINZEL_ROOT}/lib/watchdog.sh"
+# shellcheck source=lib/runstore.sh
+. "${HEINZEL_ROOT}/lib/runstore.sh"
 # shellcheck source=lib/runtimes.sh
 . "${HEINZEL_ROOT}/lib/runtimes.sh"
 # shellcheck source=lib/engines.sh
@@ -95,6 +97,11 @@ if [ "${HZ_MODE}" != heinzel ]; then
 fi
 
 RUN_ID=$(date +%Y%m%d-%H%M%S)
+# The durable run id, alongside the second-precision one and not instead of it.
+# `RUN_ID` is what the ledger's `run:` provenance and `runs.jsonl` are written
+# in and it does not change; this one keys the store under HEINZEL_HOME, where a
+# second is not fine enough to tell two runs apart (§14.2).
+STORE_RUN_ID=$(runstore_new_id)
 RUN_DAY=$(date +%Y-%m-%d)
 RUN_DIR="${LOG_DIR}/${RUN_DAY}"
 RUN_LOG="${RUN_DIR}/run-$(date +%H%M%S).log"
@@ -114,6 +121,13 @@ DONE_TOTAL=$(state_get .tasks_done_total 0)
 # lock, whatever happens from here on.
 cleanup() {
   local rc=$?
+  # A run that stops here stopped early: killed at the deadline, `hzl off`, a
+  # closed lid. The snapshot already says which tasks it was holding, and this
+  # is the line that says nobody finished. Recovery reads the two together.
+  if [ -n "${STORE_READY:-}" ] && [ -z "${STORE_ENDED:-}" ]; then
+    runstore_event "${STORE_RUN_ID}" run.interrupted \
+      "the runner stopped before the run ended (status ${rc})" 2>/dev/null
+  fi
   if [ -n "${BACKLOG}" ] && [ -w "${BACKLOG}" ]; then
     backlog_reset_inprogress "${BACKLOG}" >/dev/null 2>&1
   fi
@@ -143,6 +157,76 @@ abort() {
   log_event abort "$*"
   [ "${TRIGGER}" = manual ] && err "aborted: $*"
   exit 1
+}
+
+# --- the durable store ------------------------------------------------------
+# Written under HEINZEL_HOME, which the agent cannot reach, alongside the day
+# log rather than instead of it (§14.1). Nothing here is load-bearing yet: it
+# records, and a store that cannot be written leaves a line in the runner log
+# and changes nothing else. A run must not fail because its own record failed.
+
+STORE_READY=""
+
+# The ids this run claimed, as a JSON array. Empty until the worksheet exists,
+# and empty rather than absent if it cannot be read: a snapshot that says "no
+# tasks" is recoverable, one that will not parse is not.
+store_task_ids() {
+  local v=""
+  if [ -n "${WORKSHEET_IDS:-}" ] && [ -r "${WORKSHEET_IDS}" ]; then
+    v=$(jq -R -s -c 'split("\n") | map(select(length > 0))' \
+        "${WORKSHEET_IDS}" 2>/dev/null)
+  fi
+  case ${v} in
+    "") printf '[]' ;;
+    *) printf '%s' "${v}" ;;
+  esac
+}
+
+# The recovery snapshot: which run this was, where it was working, which task
+# ids it had claimed, and how far it got. Everything in it is already true when
+# it is written — nothing here is a prediction, because a snapshot is read by
+# something trying to find out what happened after this process stopped.
+#
+# `runner_state` is lowercase on purpose. The uppercase workflow states of §9.2
+# belong to a state machine this runner is not yet, and a legacy run that
+# labelled itself `RUNNING` would be claiming to be one. The two fields that
+# machine will fill are here and null, so the shape does not change under it.
+store_snapshot() { # runner-state
+  [ -n "${STORE_READY}" ] || return 0
+  local snap
+  snap=$(jq -n \
+    --argjson schema_version "${RUNSTORE_SCHEMA}" \
+    --arg run_id "${STORE_RUN_ID}" \
+    --arg legacy_run_id "${RUN_ID}" \
+    --arg runner_state "$1" \
+    --arg trigger "${TRIGGER}" \
+    --arg workdir "${WORKDIR}" \
+    --arg backlog "${BACKLOG}" \
+    --arg runtime_backend "${HEINZEL_RUNTIME:-local}" \
+    --arg started_at "$(iso_at "${STARTED:-}")" \
+    --arg updated_at "$(iso_at)" \
+    --arg exec_dir "${EXEC_DIR}" \
+    --arg log "${RUN_LOG}" \
+    --argjson task_ids "$(store_task_ids)" \
+    --arg verdict "${VERDICT:-}" \
+    '{schema_version: $schema_version, run_id: $run_id,
+      legacy_run_id: $legacy_run_id, runner_state: $runner_state,
+      workflow_state: null, workflow_outcome: null,
+      trigger: $trigger, workdir: $workdir, backlog: $backlog,
+      runtime_backend: $runtime_backend,
+      started_at: $started_at, updated_at: $updated_at,
+      task_ids: $task_ids, exec_dir: $exec_dir, log: $log,
+      verdict: (if $verdict == "" then null else $verdict end)}' 2>/dev/null) ||
+    { log_event skip "could not build the run snapshot for ${STORE_RUN_ID}"; return 0; }
+  runstore_snapshot "${STORE_RUN_ID}" "${snap}" ||
+    log_event skip "could not write the run snapshot for ${STORE_RUN_ID}"
+  return 0
+}
+
+store_event() { # kind [message]
+  [ -n "${STORE_READY}" ] || return 0
+  runstore_event "${STORE_RUN_ID}" "$@" 2>/dev/null
+  return 0
 }
 
 # --- gate 3: the schedule window ------------------------------------------
@@ -219,6 +303,20 @@ DONE_BEFORE=$(backlog_count "${BACKLOG}" x)
 # The id list does *not* live there. It is what the merge checks the agent's
 # work against, so it is kept in the log tree, which the agent cannot reach.
 mkdir -p "${EXEC_DIR}" || abort "cannot create ${EXEC_DIR}"
+
+# The store is created here, past the last gate, so the four nights in five with
+# nothing to do leave no directories behind. A store that cannot be created is
+# a line in the log and nothing more: this run is not about to fail over its
+# own bookkeeping.
+if runstore_init "${STORE_RUN_ID}"; then
+  STORE_READY=1
+  store_snapshot queued
+  store_event run.queued \
+    "${MAX_TASKS} task(s) allowed, ${TODO_BEFORE} todo, trigger ${TRIGGER}"
+else
+  log_event skip "could not create the run store for ${STORE_RUN_ID}"
+fi
+
 WS_DIR="${WORKDIR}/.heinzel"
 WORKSHEET="${WS_DIR}/worksheet.md"
 WORKSHEET_IDS="${EXEC_DIR}/worksheet-ids.txt"
@@ -291,6 +389,13 @@ fi
 STARTED=$(now_epoch)
 [ "${DRY_RUN}" = 1 ] && export HEINZEL_DRY_RUN=1
 
+# The claimed ids are on the worksheet by now, so the snapshot written here is
+# the one that matters for recovery: it names what a run that never comes back
+# was holding.
+store_snapshot running
+store_event engine.started \
+  "${HEINZEL_EXECUTOR_ENGINE} executor, ${RUN_TIMEOUT}s, tasks $(store_task_ids)"
+
 engine_run "${HEINZEL_EXECUTOR_ENGINE}" executor "${WORKDIR}" \
   "${PROMPT_FILE}" "${EXEC_DIR}" "${RUN_TIMEOUT}" >>"${RUN_LOG}" 2>&1
 ENGINE_RC=$?
@@ -315,6 +420,10 @@ fi
 [ -n "${VERDICT}" ] || VERDICT=error
 [ -n "${ATTEMPT_OUTCOME}" ] || ATTEMPT_OUTCOME=UNKNOWN
 
+store_event engine.ended \
+  "verdict ${VERDICT}, outcome ${ATTEMPT_OUTCOME}, backend ${ATTEMPT_BACKEND}, exit ${ENGINE_RC}, $((ENDED - STARTED))s"
+store_snapshot merging
+
 # --- the merge -------------------------------------------------------------
 # Where the run's work becomes visible, and the only place the ledger is
 # written. It runs whatever the verdict was: a run killed at the wall clock may
@@ -337,6 +446,8 @@ if [ "${MERGED_IGNORED}" -gt 0 ]; then
 fi
 printf 'merge    %s done, %s blocked, %s new, %s ignored\n' \
   "${MERGED_DONE}" "${MERGED_BLOCKED}" "${MERGED_NEW}" "${MERGED_IGNORED}" >>"${RUN_LOG}"
+store_event worksheet.merged \
+  "${MERGED_DONE} done, ${MERGED_BLOCKED} blocked, ${MERGED_NEW} new, ${MERGED_IGNORED} ignored"
 
 # Belt and braces: an id the merge never saw is still marked in progress.
 backlog_reset_inprogress "${BACKLOG}" >/dev/null
@@ -578,6 +689,11 @@ jq -n -c \
              duration_sec: $review_duration, reverted: $review_reverted,
              fixed: $review_fixed, truncated: $review_truncated},
     log: $log}' >>"${RUNS_JSONL}" 2>/dev/null
+
+store_event run.ended \
+  "${VERDICT} review=${REVIEW_VERDICT} ${TASKS_DONE} done, ${TASKS_BLOCKED} blocked"
+store_snapshot ended
+STORE_ENDED=1
 
 log_event ok "${RUN_ID} ${VERDICT} review=${REVIEW_VERDICT} ${TASKS_DONE} done, ${TASKS_BLOCKED} blocked, $((ENDED - STARTED))s, total $(state_get .tasks_done_total 0)/${MAX_TOTAL}"
 
