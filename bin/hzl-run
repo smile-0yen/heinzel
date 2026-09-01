@@ -39,6 +39,8 @@ export HOME="${HOME:-$(cd ~ && pwd)}"
 . "${HEINZEL_ROOT}/lib/posture.sh"
 # shellcheck source=lib/watchdog.sh
 . "${HEINZEL_ROOT}/lib/watchdog.sh"
+# shellcheck source=lib/runtimes.sh
+. "${HEINZEL_ROOT}/lib/runtimes.sh"
 # shellcheck source=lib/engines.sh
 . "${HEINZEL_ROOT}/lib/engines.sh"
 

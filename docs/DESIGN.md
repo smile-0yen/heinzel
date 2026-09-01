@@ -593,6 +593,8 @@ heinzel/
 ├── lib/common.sh        state, backlog, worksheet, time, power
 ├── lib/posture.sh       travel / remote, with read-back verification
 ├── lib/engines.sh       the only file that knows engine-specific flags
+├── lib/runtimes.sh      backend registry — a backend is a key, not a case arm
+├── lib/runtimes/local.sh  starts a process on this machine, under the watchdog
 ├── lib/watchdog.sh      hzl_timeout (§6.1)
 ├── etc/heinzel.conf              the tuning surface
 ├── etc/heinzel-settings.json     deny/allow for the unattended agent

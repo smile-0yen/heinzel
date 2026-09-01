@@ -6,6 +6,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-09-02
+
+### Added
+- **`lib/runtimes.sh`, the runtime backend registry**, and
+  **`lib/runtimes/local.sh`**, which owns process start, the watchdog and
+  output collection. A backend is now a key, a file and a registration. Nothing
+  outside `lib/runtimes/` branches on the key: dispatch is by constructed
+  function name, so the second backend is an addition and not an edit to the
+  code that dispatches to it (`docs/RUNTIME-BACKENDS.md` §8.4).
+- `engine_run` delegates to the registry. `HEINZEL_RUNTIME` names the backend
+  and defaults to `local`; a name the registry does not know fails the run
+  rather than quietly running the job here. There is no fallback to local,
+  because a run that was asked to happen somewhere else and happened here is
+  not the run that was asked for.
+- `run.json`: where to run, how long to allow, and where the three streams go.
+  It is a separate file from `launch.json` because they answer separate
+  questions — what to start, and under what conditions — and a backend that is
+  not this shell needs both without needing an output directory layout.
+- Fourteen assertions on the registry: an unregistered backend is refused,
+  registering twice is idempotent, a key that is not a plain name is refused,
+  the exit status and the collected record come back from the backend, the temp
+  file it renamed from is gone, and a launch environment the local backend
+  cannot carry is refused rather than dropped.
+
+### Changed
+- `lib/engines.sh` is the Agent Driver and nothing else now: it knows engines
+  and no longer knows how to start a process. `bin/hzl-run` and `bin/hzl-review`
+  source `lib/runtimes.sh` alongside the libraries they already sourced.
+- Behaviour, exit codes and `result.json` are unchanged, which is what the
+  0.1.4 characterization tests are there to say: all 99 of them pass
+  unmodified across the move.
+
 ## [0.1.5] - 2026-09-02
 
 ### Changed

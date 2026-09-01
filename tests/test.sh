@@ -381,6 +381,9 @@ t_fails "and reports failure" "${MG_ST}"
 # shellcheck source=../lib/watchdog.sh
 . "${TEST_ROOT}/lib/watchdog.sh"
 # shellcheck source-path=SCRIPTDIR
+# shellcheck source=../lib/runtimes.sh
+. "${TEST_ROOT}/lib/runtimes.sh"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=../lib/engines.sh
 . "${TEST_ROOT}/lib/engines.sh"
 
@@ -886,6 +889,72 @@ fake_reset
 
 engine_auth_ok nosuchengine
 t_fails "an unknown engine is never authenticated" "$?"
+
+# --- the runtime backend registry ------------------------------------------
+#
+# A backend is a key, a file and a registration — never an arm in a case
+# statement (RUNTIME-BACKENDS §8.4). These assertions are what stops the second
+# backend from being added the other way.
+
+group 'runtime registry'
+
+t_eq "the local backend is registered, and it is the only one" \
+  local "$(runtime_backends | tr '\n' ' ' | sed 's/ *$//')"
+
+runtime_known local
+t_ok "a registered backend is known" "$?"
+runtime_known herdr
+t_fails "an unregistered one is not" "$?"
+
+runtime_register local
+t_ok "registering the same backend twice is not an error" "$?"
+t_eq "and does not list it twice" \
+  1 "$(runtime_backends | grep -c '^local$')"
+
+runtime_register 'local; rm -rf /' 2>/dev/null
+t_fails "a key that is not a plain name is refused" "$?"
+
+runtime_run_batch herdr "${SPEC}" "${SPEC}" "${TMPROOT}/never.json" 2>/dev/null
+t_fails "running on an unregistered backend is refused, not fallen back from" "$?"
+
+RT_OUT=${TMPROOT}/runtime-unknown
+HEINZEL_RUNTIME=herdr engine_run claude executor "${RUN_WORK}" \
+  "${RUN_PROMPT}" "${RT_OUT}" 60 2>/dev/null
+t_fails "and engine_run fails rather than quietly running it here" "$?"
+[ -e "${RT_OUT}/result.json" ]
+t_fails "leaving no result.json to be mistaken for a run" "$?"
+
+# The launch spec and the run spec are separate files because they answer
+# separate questions: what to start, and where and for how long.
+RT_RUN=${TMPROOT}/runtime-run.json
+RT_DIR=${TMPROOT}/runtime-batch
+mkdir -p "${RT_DIR}"
+fake_reset
+FAKE_RC=5
+jq -n --arg cwd "${RUN_WORK}" --arg d "${RT_DIR}" \
+  '{schema_version: 1, cwd: $cwd, timeout_sec: 60, kill_after_sec: 5,
+    stdout_path: ($d + "/raw"), stderr_path: ($d + "/stderr"),
+    output_path: ($d + "/last.txt")}' >"${RT_RUN}"
+engine_build_launch claude executor batch "${RUN_WORK}" "${RUN_PROMPT}" \
+  "${RT_DIR}" "${RT_DIR}/launch.json"
+runtime_run_batch local "${RT_DIR}/launch.json" "${RT_RUN}" \
+  "${RT_DIR}/collected.json"
+t_status "the backend returns the process's own exit status" 5 "$?"
+t_eq "and writes it down, with the paths it used" \
+  '{"schema_version":1,"exit_code":5}' \
+  "$(jq -c '{schema_version, exit_code}' "${RT_DIR}/collected.json")"
+t_eq "the stream paths in the record are the ones it was given" \
+  "${RT_DIR}/raw ${RT_DIR}/stderr ${RT_DIR}/last.txt" \
+  "$(jq -r '[.stdout_path, .stderr_path, .output_path] | join(" ")' \
+      "${RT_DIR}/collected.json")"
+[ -e "${RT_DIR}/collected.json.tmp" ]
+t_fails "the temp file it renamed from is gone" "$?"
+
+jq '.env = {"API_KEY": "x"}' "${RT_DIR}/launch.json" >"${RT_DIR}/env-launch.json"
+runtime_run_batch local "${RT_DIR}/env-launch.json" "${RT_RUN}" \
+  "${TMPROOT}/never.json" 2>/dev/null
+t_fails "a launch environment it cannot carry is refused, not dropped" "$?"
+fake_reset
 
 # --- verdict ---------------------------------------------------------------
 

@@ -2,26 +2,20 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # lib/engines.sh — the Agent Driver: the only file that knows how to start an
-# agent CLI, plus the local supervision that engine_run still performs itself.
+# agent CLI.
 #
 # The runner knows two things and no more: engine_run, and the normalised
 # result.json it leaves behind. Adding an engine touches this file only.
 #
-# The file is in two halves, and the line between them is the point
-# (docs/RUNTIME-BACKENDS.md §7):
-#
-#   Agent Driver          knows engines, knows nothing about processes. It
-#                         turns an engine and a role into a launch spec, and a
-#                         collected output back into a result.
-#   local supervision     knows processes, knows nothing about engines. It
-#                         starts the executable a launch spec names, under the
-#                         watchdog, and records what it left behind.
+# This file knows engines and knows nothing about processes
+# (docs/RUNTIME-BACKENDS.md §7). It turns an engine and a role into a launch
+# spec, and a collected output back into a result. Starting anything, holding it
+# to a wall clock and collecting what it wrote belongs to a runtime backend —
+# lib/runtimes/local.sh today — which in turn knows nothing about engines.
 #
 # The launch is structured data — executable, argv array, env — never a shell
 # command string, so that a runtime that is not this shell can start it
-# (§7, §8.4). Phase 2 moves the supervision half to lib/runtimes/local.sh
-# behind the backend registry; keeping the boundary here first means that move
-# is a move rather than a rewrite.
+# (§7, §8.4).
 #
 # Public contract:
 #
@@ -38,12 +32,13 @@
 #   last.txt       the final message, in the same place for every engine
 #   stderr         standard error; the input to auth-failure detection
 #   result.json    the engine-independent result. Callers read only this.
-#   launch.json    the launch spec that was used
-#   collected.json what supervision observed: exit code, duration, paths
+#   launch.json    the launch spec handed to the runtime backend
+#   run.json       where to run it, how long to allow, where the streams go
+#   collected.json what the backend observed: exit code, duration, paths
 #   dry-run.cmd    with HEINZEL_DRY_RUN=1: the command, NUL-separated so that
 #                  a multi-line argument stays one argument
 #
-# Requires lib/common.sh and lib/watchdog.sh.
+# Requires lib/common.sh and lib/runtimes.sh.
 
 # --- availability and authentication ---------------------------------------
 
@@ -318,81 +313,17 @@ engine_normalize_result() {
   mv "${result}.tmp" "${result}"
 }
 
-# --- local supervision -----------------------------------------------------
-#
-# Nothing below this line knows what an engine is.
-
-# Start what a launch spec names, under the watchdog, and record what it left
-# behind. Returns the process's own status; the collected record carries it too,
-# because the caller of a real backend will read the file rather than $?.
-_engine_collect_local() {
-  local spec=$1 collected=$2 workdir=$3 outdir=$4 tmo=$5
-  local executable rc started ended prev_pwd arg
-  local -a cmd
-
-  executable=$(jq -r '.executable' "${spec}" 2>/dev/null) || return 1
-  case ${executable} in
-    ""|null) err "launch spec names no executable"; return 1 ;;
-  esac
-
-  # Phase 1 never sets a launch environment. Refusing beats dropping it: a
-  # backend that silently ignores half a launch spec is worse than one that
-  # says plainly it cannot honour it (§8.1).
-  if [ "$(jq -r '.env | length' "${spec}" 2>/dev/null)" != 0 ]; then
-    err "the local runtime does not carry a launch environment yet"
-    return 1
-  fi
-
-  # argv is restored NUL-delimited through process substitution, never split on
-  # newlines and never rebuilt with eval: an argument may hold anything a byte
-  # can hold except NUL itself, which is exactly why NUL is the separator. A
-  # `while` at the end of a pipe would run in a subshell and the array would
-  # not survive it (§8.4).
-  cmd=()
-  while IFS= read -r -d '' arg; do
-    cmd[${#cmd[@]}]="${arg}"
-  done < <(jq -j -r '.argv[] | ., ([0] | implode)' "${spec}")
-  [ ${#cmd[@]} -gt 0 ] || { err "launch spec has an empty argv"; return 1; }
-
-  started=$(now_epoch)
-
-  # cd here rather than wrapping the command in a subshell: `( cd x && cmd ) &`
-  # would make $! the subshell's pid, and killing that leaves the engine itself
-  # running as an orphan. stdin is closed because codex exec treats a non-TTY
-  # stdin as additional input and waits for EOF, which hangs forever under
-  # launchd even when the prompt was passed as an argument.
-  prev_pwd=${PWD}
-  cd "${workdir}" || { err "cannot cd to ${workdir}"; return 1; }
-  hzl_timeout 30 "${tmo}" "${executable}" "${cmd[@]}" \
-    >"${outdir}/raw" 2>"${outdir}/stderr" </dev/null
-  rc=$?
-  cd "${prev_pwd}" || true
-
-  ended=$(now_epoch)
-
-  # Same-directory temp file and rename, so a reader never sees half a record.
-  jq -n \
-    --argjson exit_code "${rc}" \
-    --argjson duration_sec "$((ended - started))" \
-    --arg stdout_path "${outdir}/raw" \
-    --arg stderr_path "${outdir}/stderr" \
-    --arg output_path "${outdir}/last.txt" \
-    '{schema_version: 1, exit_code: $exit_code, duration_sec: $duration_sec,
-      stdout_path: $stdout_path, stderr_path: $stderr_path,
-      output_path: $output_path}' >"${collected}.tmp" || return 1
-  mv "${collected}.tmp" "${collected}" || return 1
-
-  return "${rc}"
-}
-
 # --- the facade ------------------------------------------------------------
 
 # Unchanged from the outside: same arguments, same exit status, same
-# result.json. Inside, it is now Agent Driver -> supervision -> Agent Driver.
+# result.json. Inside, it is Agent Driver -> runtime backend -> Agent Driver.
+#
+# The backend is named by a string. There is one, `local`, and a misspelling is
+# refused by the registry rather than quietly served by it.
 engine_run() {
   local engine=$1 role=$2 workdir=$3 promptfile=$4 outdir=$5
   local tmo=${6:-3600}
-  local rc spec collected
+  local rc spec run collected backend=${HEINZEL_RUNTIME:-local}
 
   mkdir -p "${outdir}" || return 1
   : >"${outdir}/stderr"
@@ -400,6 +331,7 @@ engine_run() {
   : >"${outdir}/last.txt"
 
   spec=${outdir}/launch.json
+  run=${outdir}/run.json
   collected=${outdir}/collected.json
 
   engine_build_launch "${engine}" "${role}" batch "${workdir}" \
@@ -413,10 +345,25 @@ engine_run() {
     return 0
   fi
 
-  _engine_collect_local "${spec}" "${collected}" "${workdir}" "${outdir}" "${tmo}"
+  # Where to run it, how long to allow, and where the three streams go. The
+  # backend is told; it does not go looking in an output directory it was never
+  # given the layout of.
+  jq -n \
+    --arg cwd "${workdir}" \
+    --argjson timeout_sec "${tmo}" \
+    --arg stdout_path "${outdir}/raw" \
+    --arg stderr_path "${outdir}/stderr" \
+    --arg output_path "${outdir}/last.txt" \
+    '{schema_version: 1, cwd: $cwd, timeout_sec: $timeout_sec,
+      kill_after_sec: 30, stdout_path: $stdout_path,
+      stderr_path: $stderr_path, output_path: $output_path}' \
+    >"${run}.tmp" || return 1
+  mv "${run}.tmp" "${run}" || return 1
+
+  runtime_run_batch "${backend}" "${spec}" "${run}" "${collected}"
   rc=$?
 
-  # No collected record means supervision never got as far as running anything;
+  # No collected record means the backend never got as far as running anything;
   # there is nothing to normalise, and its failure is the caller's answer.
   [ -r "${collected}" ] || return 1
 
