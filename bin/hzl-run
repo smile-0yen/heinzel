@@ -45,6 +45,8 @@ export HOME="${HOME:-$(cd ~ && pwd)}"
 . "${HEINZEL_ROOT}/lib/claims.sh"
 # shellcheck source=lib/locks.sh
 . "${HEINZEL_ROOT}/lib/locks.sh"
+# shellcheck source=lib/finalize.sh
+. "${HEINZEL_ROOT}/lib/finalize.sh"
 # shellcheck source=lib/runtimes.sh
 . "${HEINZEL_ROOT}/lib/runtimes.sh"
 # shellcheck source=lib/engines.sh
@@ -335,6 +337,27 @@ else
   skip "could not take the lock for run ${STORE_RUN_ID}"
 fi
 
+# --- a ledger commit that was interrupted -----------------------------------
+# A run that stopped inside its commit left an intent and no receipt: the ledger
+# transition it was about to make, and nothing saying it made it. This run holds
+# the writer lease for the checkout now, so it is the one that finishes it —
+# once, and before it writes the ledger itself (§13.4, §21.1).
+#
+# Recovery moves `tasks_done_total`, because a run that stopped there never
+# reached its own counter. So gate 4 is asked again afterwards: a completion
+# recovered here is spent budget, and a run that starts anyway would be spending
+# it twice.
+while IFS= read -r pending; do
+  [ -n "${pending}" ] || continue
+  [ "${pending}" = "${STORE_RUN_ID}" ] && continue
+  log_event skip "finished the ledger commit left unrecorded by run ${pending} ($(finalize_recover "${pending}" "${BACKLOG}"))"
+done <<EOF
+$(finalize_pending "${BACKLOG}")
+EOF
+DONE_TOTAL=$(state_get .tasks_done_total 0)
+REMAINING=$((MAX_TOTAL - DONE_TOTAL))
+[ "${REMAINING}" -gt 0 ] || skip "session budget spent (${DONE_TOTAL}/${MAX_TOTAL})"
+
 # --- claims left behind ----------------------------------------------------
 # A run that was killed left its claims in `HEINZEL_HOME`, where nothing it ran
 # could have tidied them. The writer lease above means no other run is working
@@ -520,8 +543,24 @@ store_snapshot merging
 # still have finished its first task, and that is on the worksheet either way.
 # Anything the agent did not close goes back to `[ ]` here rather than staying
 # claimed by a run that is over.
-MERGE_COUNTS=$(worksheet_merge "${WORKSHEET}" "${BACKLOG}" "${RUN_ID}" "${WORKSHEET_IDS}")
-MERGE_RC=$?
+#
+# It goes through `finalize_commit`: the worksheet is parsed into candidates and
+# checked for scope, an intent naming them and digesting the ledger they are
+# about to be applied to is saved, the transition is applied once under the
+# backlog lock, and a receipt digesting the ledger it produced is written
+# (§13.4). The transition itself is the same `worksheet_merge` it always was.
+# Without a run store there is nowhere to put an intent, so the merge runs on
+# its own and says so: the store is not load-bearing, and a run must not lose
+# its work because its own bookkeeping failed.
+if [ -n "${STORE_READY}" ]; then
+  MERGE_COUNTS=$(finalize_commit "${STORE_RUN_ID}" "${WORKSHEET}" "${BACKLOG}" \
+    "${RUN_ID}" "${WORKSHEET_IDS}" "${WS_IDENTITY}")
+  MERGE_RC=$?
+else
+  log_event skip "no run store for ${STORE_RUN_ID}; the ledger commit leaves no receipt"
+  MERGE_COUNTS=$(worksheet_merge "${WORKSHEET}" "${BACKLOG}" "${RUN_ID}" "${WORKSHEET_IDS}")
+  MERGE_RC=$?
+fi
 MERGED_DONE=$(printf '%s' "${MERGE_COUNTS}" | cut -d' ' -f1)
 MERGED_BLOCKED=$(printf '%s' "${MERGE_COUNTS}" | cut -d' ' -f2)
 MERGED_NEW=$(printf '%s' "${MERGE_COUNTS}" | cut -d' ' -f3)

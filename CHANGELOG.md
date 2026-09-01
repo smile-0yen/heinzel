@@ -6,6 +6,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-09-02
+
+### Added
+- **`lib/finalize.sh`: the ledger commit is four steps and a crash boundary**
+  (`docs/RUNTIME-BACKENDS.md` §13.4, §9.2). The merge was one motion — parse a
+  line, apply it, parse the next — so a process killed in the middle left half a
+  merge and nothing saying so. Now: the worksheet is **parsed** into candidates
+  and **checked** for scope while nothing is written; an **intent** naming them,
+  digesting the worksheet they came from and the ledger they are about to be
+  applied to, is saved *before* the ledger is touched; the **transition** is
+  applied once under the backlog lock; and a **receipt** digesting the ledger it
+  produced is written after. The transition itself is the same
+  `worksheet_merge` it always was — separating the parse from the commit is not
+  a reason to have a second thing that moves markers.
+- **Recovery, exactly once, at both crash points.** An intent with no receipt is
+  a run that stopped inside the commit, and the intent's digest of the ledger it
+  was about to change says where: a ledger that still digests to it was never
+  written; one that does not was written at least in part. On the first path the
+  whole intent is applied; on the second every id is checked and only the ones
+  that did not land are. A marker is a setting, not an increment, so re-applying
+  one is harmless — counting it twice is not, and a run with a receipt is never
+  recovered.
+- **`tasks_done_total` moves with the receipt.** A run that stopped between the
+  intent and the receipt stopped long before its own counter, so its completion
+  was in the ledger and missing from the total. Recovery counts it, once, and
+  records how many in the receipt.
+- The runner finishes any interrupted commit for its own backlog on the way in —
+  after it holds the writer lease, before it writes the ledger itself — and asks
+  gate 4 again afterwards, because a completion recovered there is spent budget.
+- The backlog lock has its first caller: the transition is applied under it.
+
+### Changed
+- New tasks are the one part of a commit that is not idempotent, since inserting
+  a line is not a setting. On the moved-ledger recovery path one is inserted only
+  if no line with exactly that text is in the ledger already; the first
+  application is unchanged, so a run that completes normally behaves exactly as
+  it did.
+- A ledger that moved between the intent and the lock is recorded
+  (`ledger_moved`) and applied anyway. The check that protects the ledger is
+  scope, enforced line by line; refusing to record a finished run's work because
+  somebody closed an unrelated task by hand would lose the work to protect the
+  record of it.
+
+### Not in this change
+- A run that survives still counts its own completions after the review gate,
+  which is where they have to be counted — the gate can revert them. So a crash
+  between the receipt and that counter still loses the count. Closing that
+  window means moving the review gate in front of the commit, which is the open
+  question already recorded in `docs/SPEC.md` §15.
+- Without a run store there is nowhere to put an intent, so the merge runs on
+  its own and the runner logs that it left no receipt. The store is not
+  load-bearing, and a run must not lose its work because its own bookkeeping
+  failed.
+
 ## [0.2.3] - 2026-09-02
 
 ### Added

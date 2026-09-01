@@ -598,6 +598,7 @@ heinzel/
 ├── lib/runstore.sh      one durable directory per run, where the agent cannot reach
 ├── lib/claims.sh        run-scoped task claims; the ledger's [~] is their display
 ├── lib/locks.sh         backlog lock, per-run lock, one writer lease per checkout
+├── lib/finalize.sh      the ledger commit: parse, check, intent, transition, receipt
 ├── lib/watchdog.sh      hzl_timeout (§6.1)
 ├── etc/heinzel.conf              the tuning surface
 ├── etc/heinzel-settings.json     deny/allow for the unattended agent

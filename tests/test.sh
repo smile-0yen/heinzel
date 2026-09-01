@@ -56,6 +56,8 @@ mkdir -p "${HEINZEL_HOME}"
 . "${TEST_ROOT}/lib/claims.sh"
 # shellcheck source=../lib/locks.sh
 . "${TEST_ROOT}/lib/locks.sh"
+# shellcheck source=../lib/finalize.sh
+. "${TEST_ROOT}/lib/finalize.sh"
 
 # Read back what common.sh actually resolved, through `:-` so that a state path
 # it failed to define reads as empty and is refused rather than skipped. If
@@ -1592,6 +1594,153 @@ lease_acquire "${LS_ID}" "${LS_A}" "$$"
 t_eq "the generation still only goes up, across a release" \
   4 "$(lease_generation "${LS_ID}")"
 lease_release "${LS_ID}" "${LS_A}"
+
+# --- the ledger commit, and the two places it can be interrupted ------------
+#
+# The merge used to be one motion: parse a line, apply it, parse the next. A
+# process killed in the middle of that left half a merge and nothing saying so.
+# Now it is parse, check, intent, commit, receipt (§13.4), and the two crash
+# points are the acceptance: killed between the intent and the commit, and
+# between the commit and the receipt. Either way the ledger line and
+# `tasks_done_total` come out applied exactly once (§21.1).
+
+group 'finalize: the candidate parse'
+
+FN_WS=${TMPROOT}/fin-worksheet.md
+FN_IDS=${TMPROOT}/fin-ids.txt
+cat >"${FN_WS}" <<'FNWS'
+# Worksheet
+
+## P1
+- [x] (id:h-0101) finished
+- [!] (id:h-0102) stopped <!-- reason:needs a decision -->
+- [ ] (id:h-0103) never picked up
+- [ ] a task split off from another
+- [x] (id:h-0199) never on this worksheet
+FNWS
+printf 'h-0101\nh-0102\nh-0103\n' >"${FN_IDS}"
+
+FN_CANDS=$(finalize_candidates "${FN_WS}" "${FN_IDS}")
+t_eq "a done marker in scope is a candidate completion" \
+  "done	h-0101" "$(printf '%s\n' "${FN_CANDS}" | awk -F'\t' '$1 == "done" {print $1 "\t" $2}')"
+t_eq "a blocked marker carries the reason the agent gave" \
+  "needs a decision" \
+  "$(printf '%s\n' "${FN_CANDS}" | awk -F'\t' '$1 == "blocked" {print $4}')"
+t_eq "an untouched task is a reopen, not a completion" \
+  h-0103 "$(printf '%s\n' "${FN_CANDS}" | awk -F'\t' '$1 == "reopen" {print $2}')"
+t_eq "a line with no id is a new task, with its priority" \
+  "1	a task split off from another" \
+  "$(printf '%s\n' "${FN_CANDS}" | awk -F'\t' '$1 == "new" {print $3 "\t" $4}')"
+# The scope check, made before anything is written rather than during.
+t_eq "an id this run was not given is ignored, and named" \
+  h-0199 "$(printf '%s\n' "${FN_CANDS}" | awk -F'\t' '$1 == "ignored" {print $2}')"
+t_eq "and the parse writes nothing at all" \
+  "$(finalize_digest "${FN_WS}")" "$(finalize_digest "${FN_WS}")"
+
+# A ledger to commit against, rebuilt for each case so that one crash point
+# cannot be read through the state the other left.
+fn_ledger() { # path
+  cat >"$1" <<'FNLED'
+# Backlog
+
+## P1
+- [~] (id:h-0101) finished <!-- run:20260902-040000 -->
+- [~] (id:h-0102) stopped <!-- run:20260902-040000 -->
+- [~] (id:h-0103) never picked up <!-- run:20260902-040000 -->
+FNLED
+}
+
+state_write '{"schema_version": 2, "mode": "normal", "tasks_done_total": 0}'
+
+group 'finalize: the whole commit'
+
+FN_LED=${TMPROOT}/fin-ledger.md
+fn_ledger "${FN_LED}"
+FN_RUN=r-20260902T040000-fin001
+runstore_init "${FN_RUN}"
+
+# One done, one blocked, one new task, and one line ignored: the id that was
+# never on this run's worksheet, which is the scope check doing its job.
+t_eq "the commit reports what it applied" \
+  "1 1 1 1" "$(finalize_commit "${FN_RUN}" "${FN_WS}" "${FN_LED}" 20260902-040000 "${FN_IDS}")"
+t_eq "and leaves a receipt, so the transition is on the record" \
+  receipt "$(finalize_state "${FN_RUN}")"
+t_eq "the completion is in the ledger" x "$(backlog_marker_of_id "${FN_LED}" h-0101)"
+t_eq "the blocked task is blocked" "!" "$(backlog_marker_of_id "${FN_LED}" h-0102)"
+t_eq "and the untouched one is back in the queue" \
+  " " "$(backlog_marker_of_id "${FN_LED}" h-0103)"
+t_eq "the intent named the completion before it happened" \
+  h-0101 "$(jq -r '.done[0]' "${HEINZEL_HOME}/runs/${FN_RUN}/finalize.intent.json")"
+t_eq "and the receipt digests the ledger the commit produced" \
+  "$(finalize_digest "${FN_LED}")" \
+  "$(jq -r '.ledger_digest_after' "${HEINZEL_HOME}/runs/${FN_RUN}/finalize.receipt.json")"
+t_eq "a committed run is not pending" \
+  "" "$(finalize_pending "${FN_LED}")"
+
+group 'finalize: killed between the intent and the commit'
+
+FN_LED2=${TMPROOT}/fin-ledger-2.md
+fn_ledger "${FN_LED2}"
+FN_RUN2=r-20260902T041000-fin002
+runstore_init "${FN_RUN2}"
+state_update '.tasks_done_total = 0'
+
+# The crash: the intent is saved and the process is gone before the ledger is
+# touched.
+finalize_intent "${FN_RUN2}" "${FN_WS}" "${FN_LED2}" 20260902-041000 "${FN_IDS}"
+t_ok "the intent is saved before the ledger is touched" "$?"
+t_eq "so the ledger is exactly as it was" \
+  "~" "$(backlog_marker_of_id "${FN_LED2}" h-0101)"
+t_eq "and the run is pending: an intent with nothing saying it was applied" \
+  "${FN_RUN2}" "$(finalize_pending "${FN_LED2}")"
+
+t_eq "recovery applies the whole intent" \
+  "1 1 1 0" "$(finalize_recover "${FN_RUN2}" "${FN_LED2}")"
+t_eq "the completion lands" x "$(backlog_marker_of_id "${FN_LED2}" h-0101)"
+t_eq "and is counted, once" 1 "$(state_get .tasks_done_total 0)"
+t_eq "the run is finalized, so it is no longer pending" \
+  receipt "$(finalize_state "${FN_RUN2}")"
+
+finalize_recover "${FN_RUN2}" "${FN_LED2}" >/dev/null
+t_fails "a second recovery is refused" "$?"
+t_eq "the completion is not counted twice" 1 "$(state_get .tasks_done_total 0)"
+t_eq "and the ledger line is applied once" \
+  1 "$(backlog_count "${FN_LED2}" x)"
+
+group 'finalize: killed between the commit and the receipt'
+
+FN_LED3=${TMPROOT}/fin-ledger-3.md
+fn_ledger "${FN_LED3}"
+FN_RUN3=r-20260902T042000-fin003
+runstore_init "${FN_RUN3}"
+state_update '.tasks_done_total = 0'
+
+# The other crash: the ledger transition happened and the receipt did not. The
+# run never reached its own counter either - that is the last thing it does -
+# so the completion is in the ledger and missing from the total.
+finalize_intent "${FN_RUN3}" "${FN_WS}" "${FN_LED3}" 20260902-042000 "${FN_IDS}"
+finalize_apply "${FN_RUN3}" "${FN_WS}" "${FN_LED3}" 20260902-042000 "${FN_IDS}" >/dev/null
+t_eq "the ledger transition is already applied" \
+  x "$(backlog_marker_of_id "${FN_LED3}" h-0101)"
+t_eq "but nothing says so" intent "$(finalize_state "${FN_RUN3}")"
+t_eq "so the run is pending" \
+  "${FN_RUN3}" "$(finalize_pending "${FN_LED3}")"
+FN_NEW_LINES=$(grep -cF 'a task split off from another' "${FN_LED3}")
+
+t_eq "recovery re-applies nothing, because nothing is missing" \
+  "0 0 0 0" "$(finalize_recover "${FN_RUN3}" "${FN_LED3}")"
+t_eq "the completion is still applied exactly once" \
+  1 "$(backlog_count "${FN_LED3}" x)"
+t_eq "the new task the run added is not added a second time" \
+  "${FN_NEW_LINES}" "$(grep -cF 'a task split off from another' "${FN_LED3}")"
+t_eq "and the completion the run never counted is counted, once" \
+  1 "$(state_get .tasks_done_total 0)"
+t_eq "the receipt says the recovery wrote it" \
+  true "$(jq -r '.recovered' "${HEINZEL_HOME}/runs/${FN_RUN3}/finalize.receipt.json")"
+
+finalize_recover "${FN_RUN3}" "${FN_LED3}" >/dev/null
+t_fails "and a second recovery is refused here too" "$?"
+t_eq "leaving the total where it was" 1 "$(state_get .tasks_done_total 0)"
 
 # --- verdict ---------------------------------------------------------------
 
