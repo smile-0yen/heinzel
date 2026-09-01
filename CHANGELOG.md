@@ -6,6 +6,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-09-02
+
+### Changed
+- **`lib/engines.sh` is now an Agent Driver and a supervisor with a line
+  between them** (`docs/RUNTIME-BACKENDS.md` §7). Above the line is everything
+  Heinzel knows about agent CLIs — subcommands, flag order, which tools are
+  withheld, which sandbox is asked for — and it knows nothing about processes.
+  Below it is code that starts what a launch spec names, under the watchdog,
+  and knows nothing about engines. `engine_run` is unchanged from the outside:
+  same arguments, same exit status, same `result.json`. `bin/hzl-run` and
+  `bin/hzl-review` did not have to change.
+- **The launch is structured data, not a command string.** `launch.json` holds
+  an `executable`, an `argv` array and an `env` object, and supervision restores
+  the argv NUL-delimited through process substitution — never split on newlines,
+  never rebuilt with `eval`. NUL is the separator because it is the one byte an
+  argument cannot contain. This is what makes a runtime that is not this shell
+  possible at all (§8.4).
+- `engine_run` now also leaves `launch.json` and `collected.json` in the output
+  directory. The runner reads neither; they are the seam a backend plugs into.
+  `docs/SPEC.md` §9 records them.
+
+### Added
+- `engine_build_launch` and `engine_normalize_result` as named functions, and
+  `security_profile` recorded in the launch spec — named, not enforced, so that
+  a later phase's launch attestation has something to compare against.
+- Six assertions on the launch spec itself: the shape of the record, that
+  `argv` is an array rather than a string, that it does not repeat the
+  executable, and that a multi-line prompt is still one element. An io mode the
+  driver cannot build is refused rather than quietly served as batch.
+- The 92 characterization tests from 0.1.4 were not touched: they pass
+  unmodified against the split. That was the point of writing them first.
+
 ## [0.1.4] - 2026-09-02
 
 ### Added

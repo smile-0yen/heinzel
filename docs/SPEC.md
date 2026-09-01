@@ -402,12 +402,29 @@ Four public functions. The runner knows nothing else about engines.
 engine_available     <engine>                      -> 0/1
 engine_auth_ok       <engine>                      -> 0/1
 engine_is_auth_error <engine> <rc> <errfile>       -> 0/1
+engine_build_launch  <engine> <role> <io-mode> <workdir> <promptfile>
+                     <outdir> <spec.json>
+engine_normalize_result <spec.json> <collected.json> <result.json>
 engine_run <engine> <role> <workdir> <promptfile> <outdir> [timeout_sec]
 ```
 
+`engine_run` is the compatibility facade the runner calls; inside, it is the
+Agent Driver building a launch, local supervision running it, and the Agent
+Driver normalising what came back (`docs/RUNTIME-BACKENDS.md` §7, §8.4).
+
 `engine_run` writes into `<outdir>`: `raw`, `last.txt`, `stderr`,
-`result.json`, and with `HEINZEL_DRY_RUN=1` a NUL-separated `dry-run.cmd` (NUL,
-so a multi-line argument survives as one argument).
+`result.json`, `launch.json`, `collected.json`, and with `HEINZEL_DRY_RUN=1` a
+NUL-separated `dry-run.cmd` (NUL, so a multi-line argument survives as one
+argument).
+
+### 9.0 `launch.json` and `collected.json`
+
+The launch is structured, never a shell command string: an `executable`, an
+`argv` array and an `env` object, plus the `engine`, `role`, `io_mode` and the
+`security_profile` those flags are meant to add up to. `collected.json` is what
+supervision observed and nothing more — `exit_code`, `duration_sec`, and the
+paths it wrote stdout, stderr and the final message to. Neither file is read by
+the runner; they are the seam a runtime backend is plugged into.
 
 ### 9.1 `result.json`
 

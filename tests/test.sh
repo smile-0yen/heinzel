@@ -640,6 +640,44 @@ HEINZEL_DRY_RUN=1 engine_run nosuchengine executor "${ARGV_WORK}" \
   "${ARGV_PROMPT}" "${TMPROOT}/argv-unknown" 2>/dev/null
 t_fails "an unknown engine is refused" "$?"
 
+# --- the launch spec -------------------------------------------------------
+#
+# The spec is what a runtime backend is handed instead of a command string
+# (RUNTIME-BACKENDS §7). Its shape is a contract between the Agent Driver and
+# every backend, so it is asserted directly rather than only through the argv
+# that happens to be rendered from it.
+
+group 'engine_build_launch'
+
+SPEC=${TMPROOT}/launch-spec.json
+engine_build_launch codex reviewer batch "${ARGV_WORK}" "${ARGV_PROMPT}" \
+  "${TMPROOT}/spec-out" "${SPEC}"
+t_ok "a launch spec is built" "$?"
+t_eq "it names the engine, the executable, the role and the profile" \
+  '{"schema_version":1,"engine":"codex","agent_kind":"codex","executable":"codex","role":"reviewer","io_mode":"batch","security_profile":"review-read-only-v1","model":"test-codex-model","effort":"test-codex-effort","env":{}}' \
+  "$(jq -c '{schema_version, engine, agent_kind, executable, role, io_mode,
+             security_profile, model, effort, env}' "${SPEC}")"
+t_eq "argv is an array of arguments, not a command string" \
+  array "$(jq -r '.argv | type' "${SPEC}")"
+t_eq "and it does not repeat the executable" \
+  exec "$(jq -r '.argv[0]' "${SPEC}")"
+
+# The prompt is one argument however many lines it has. A spec that split it
+# would still launch, and the engine would be given four arguments of prose.
+t_eq "a multi-line argument survives as a single element" \
+  "${PROMPT_ARG}" "$(jq -r '.argv[-1]' "${SPEC}")"
+
+engine_build_launch claude executor interactive "${ARGV_WORK}" \
+  "${ARGV_PROMPT}" "${TMPROOT}/spec-out" "${TMPROOT}/never-spec.json" 2>/dev/null
+t_fails "an io mode the driver cannot build is refused, not served as batch" "$?"
+
+# The executor profile is the one that may write. Naming it in the spec is how
+# a later phase can compare what was asked for against what was launched.
+engine_build_launch claude executor batch "${ARGV_WORK}" "${ARGV_PROMPT}" \
+  "${TMPROOT}/spec-out" "${SPEC}"
+t_eq "the executor asks for the writing profile" \
+  execute-workspace-write-v1 "$(jq -r '.security_profile' "${SPEC}")"
+
 # --- engine_is_auth_error --------------------------------------------------
 #
 # Per engine, deliberately: codex prints MCP 401s on runs that succeeded, and
