@@ -266,6 +266,63 @@ FIXTURE
 worksheet_write "${WS_EMPTY}" 3 "${TMPROOT}/never.md" >/dev/null 2>&1
 t_fails "a ledger with nothing to do is refused" "$?"
 
+# --- worksheet_render ------------------------------------------------------
+#
+# The rebuild the runner does once it knows which of the tasks it wanted it
+# actually got. What it takes is a list of ids, not a budget: a task another run
+# claimed first is not on the worksheet at all, rather than on it without a
+# marker (docs/RUNTIME-BACKENDS.md §13.4).
+
+group 'worksheet_render'
+
+RD_LEDGER=${TMPROOT}/rd-ledger.md
+cat >"${RD_LEDGER}" <<'FIXTURE'
+# Backlog
+
+## P1
+- [~] (id:h-0001) claimed by this run <!-- run:20260902-050000 -->
+      note: a continuation line the agent needs
+- [ ] (id:h-0002) claimed by somebody else
+
+## P2
+- [~] (id:h-0003) also claimed by this run <!-- run:20260902-050000 -->
+
+## P3
+- [ ] (id:h-0004) never on the worksheet at all
+FIXTURE
+
+RD_IDFILE=${TMPROOT}/rd-ids.txt
+RD_OUT=${TMPROOT}/rd-worksheet.md
+printf 'h-0001\nh-0003\n' >"${RD_IDFILE}"
+RD_IDS=$(worksheet_render "${RD_LEDGER}" "${RD_IDFILE}" "${RD_OUT}" |
+  tr '\n' ' ' | sed 's/ *$//')
+t_eq "only the listed ids come back, in ledger order" "h-0001 h-0003" "${RD_IDS}"
+t_has "a claimed task is handed to the agent as a todo, not as [~]" \
+  "${RD_OUT}" '- [ ] (id:h-0001) claimed by this run'
+t_lacks "the run: metadata of the claim is not shown to the agent" \
+  "${RD_OUT}" 'run:20260902-050000'
+t_has "continuation lines survive the rebuild" \
+  "${RD_OUT}" '      note: a continuation line the agent needs'
+t_lacks "a task claimed by another run is not in front of the agent at all" \
+  "${RD_OUT}" 'h-0002'
+t_lacks "and neither is one this run never asked for" "${RD_OUT}" 'h-0004'
+t_has "the priority heading of a rendered task comes with it" "${RD_OUT}" '## P1'
+t_has "so does the second one" "${RD_OUT}" '## P2'
+t_lacks "a priority with nothing left in it gets no heading" "${RD_OUT}" '## P3'
+
+printf 'h-9999\n' >"${RD_IDFILE}"
+RD_IDS=$(worksheet_render "${RD_LEDGER}" "${RD_IDFILE}" "${TMPROOT}/never.md")
+t_fails "an id that is not in the ledger is not invented" "$?"
+t_eq "and nothing is printed for it" "" "${RD_IDS}"
+
+: >"${RD_IDFILE}"
+worksheet_render "${RD_LEDGER}" "${RD_IDFILE}" "${TMPROOT}/never.md" >/dev/null 2>&1
+t_fails "an empty id list is refused rather than rendered blank" "$?"
+
+worksheet_render "${RD_LEDGER}" "${TMPROOT}/no-such-ids.txt" "${TMPROOT}/never.md" \
+  >/dev/null 2>&1
+t_fails "so is a missing id list" "$?"
+
 # --- worksheet_merge -------------------------------------------------------
 #
 # The four counts are a contract: bin/hzl-run splits this line with `cut -d' '`

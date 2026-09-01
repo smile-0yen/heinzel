@@ -440,17 +440,47 @@ worksheet_write "${BACKLOG}" "${MAX_TASKS}" "${WORKSHEET}" >"${WORKSHEET_IDS}" |
 #
 # A task already claimed by another run does not get a marker: displaying a
 # claim this run does not hold would be a false statement about the ledger, and
-# a quiet one. It stays on the worksheet, which is the gap the workflow state
-# machine closes; here it is logged rather than papered over.
+# a quiet one.
+CLAIMED_IDS="${EXEC_DIR}/claimed-ids.txt"
+: >"${CLAIMED_IDS}" || abort "cannot write ${CLAIMED_IDS}"
 while IFS= read -r wid; do
   [ -n "${wid}" ] || continue
   if [ -n "${CLAIMS_READY}" ] &&
      ! claims_acquire "${WS_IDENTITY}" "${wid}" "${STORE_RUN_ID}"; then
-    log_event skip "task ${wid} is claimed by run $(claims_holder "${WS_IDENTITY}" "${wid}") - leaving its marker alone"
+    log_event skip "task ${wid} is claimed by run $(claims_holder "${WS_IDENTITY}" "${wid}") - leaving it off the worksheet"
     continue
   fi
   backlog_set_state "${BACKLOG}" "${wid}" "~" "run:${RUN_ID}"
+  printf '%s\n' "${wid}" >>"${CLAIMED_IDS}"
 done <"${WORKSHEET_IDS}"
+
+# What the run holds is what the run works on. The worksheet was written from
+# the ledger before any claim was taken, so a task another run got to first is
+# still on it — with no `[~]`, and with nothing but a log line saying why. That
+# is a task in front of the agent that it may not touch, and asking it not to
+# touch one is a weaker guarantee than not showing it (§13.4).
+#
+# So the worksheet is written again from the claims this run actually holds, and
+# the id list the merge checks scope against is replaced with the same set. The
+# two must not disagree: the ids file is what makes the scope enforced rather
+# than requested.
+if ! cmp -s "${CLAIMED_IDS}" "${WORKSHEET_IDS}"; then
+  [ -s "${CLAIMED_IDS}" ] ||
+    skip "every task on the worksheet is claimed by another run"
+  # Into a temp file and then into place: the id list is the scope of the run,
+  # and a render that failed half-way through must not leave a truncated one
+  # behind for the merge to read.
+  worksheet_render "${BACKLOG}" "${CLAIMED_IDS}" "${WORKSHEET}" >"${WORKSHEET_IDS}.new" ||
+    abort "could not rebuild the worksheet from this run's claims"
+  [ -s "${WORKSHEET_IDS}.new" ] ||
+    abort "the rebuilt worksheet came out empty with $(wc -l <"${CLAIMED_IDS}" | tr -d ' ') claim(s) held"
+  mv -f "${WORKSHEET_IDS}.new" "${WORKSHEET_IDS}" ||
+    abort "could not replace the worksheet id list"
+  # The agent is told how many tasks it may close, and it is now a smaller
+  # number than the budget this run started with.
+  MAX_TASKS=$(wc -l <"${WORKSHEET_IDS}" | tr -d ' ')
+  log_event skip "worksheet rebuilt: ${MAX_TASKS} task(s) claimed by this run"
+fi
 
 {
   printf '=== run %s (%s)\n' "${RUN_ID}" "${TRIGGER}"

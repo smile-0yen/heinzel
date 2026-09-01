@@ -11,7 +11,7 @@
 # Multibyte truncation is locale-dependent (DESIGN 6.3). Fix it once, here.
 export LC_CTYPE=UTF-8
 
-HEINZEL_VERSION="0.2.5"
+HEINZEL_VERSION="0.2.6"
 
 # The TTL ceiling is deliberately not configurable. A session that can be
 # created with an unbounded lifetime is not a session, it is a mode.
@@ -840,20 +840,28 @@ line_meta() {
   ' "${f}"
 }
 
-# Write the run's slice of the ledger to `out`, and print the ids it contains,
-# one per line: that list is what the merge will accept, and nothing else.
-# Priority headings are carried across, because a task's priority is context
-# the agent needs when it splits one, and because a new line written under a
-# heading is merged back into that priority.
-worksheet_write() {
-  local f=$1 max=$2 out=$3 rows row prev_prio="" lineno prio id text
-  [ -r "${f}" ] || return 1
-  case ${max} in ""|*[!0-9]*) return 1 ;; esac
-  [ "${max}" -ge 1 ] || return 1
+# Write a worksheet holding exactly the ids listed in `ids` - one per line -
+# and print the ids it wrote, in the order it wrote them. Priority headings are
+# carried across, because a task's priority is context the agent needs when it
+# splits one, and because a new line written under a heading is merged back into
+# that priority.
+#
+# The ledger's own marker is not consulted, and deliberately: a run rebuilds its
+# worksheet *after* it has claimed its tasks, when those lines read `[~]`, and
+# what the agent is handed is always a todo. Membership of the id list is the
+# only thing that decides what appears.
+#
+# An id that is not in the ledger is skipped rather than invented, and a render
+# that wrote nothing fails: an empty worksheet handed to an agent is a prompt
+# with no work in it.
+worksheet_render() {
+  local f=$1 ids=$2 out=$3
+  local rows row want prev_prio="" lineno prio id text n=0
+  [ -r "${f}" ] && [ -r "${ids}" ] || return 1
+  want=" $(tr '\n' ' ' <"${ids}") "
   rows=$(backlog_scan "${f}" 2>/dev/null |
-    awk -F'\t' '$3 == " " && $4 != ""' |
-    sort -t"$(printf '\t')" -k2,2n -k1,1n |
-    head -n "${max}")
+    awk -F'\t' '$4 != ""' |
+    sort -t"$(printf '\t')" -k2,2n -k1,1n)
   [ -n "${rows}" ] || return 1
   {
     printf '# Worksheet\n\n'
@@ -867,6 +875,10 @@ worksheet_write() {
     id=$(printf '%s' "${row}" | cut -f4)
     text=$(printf '%s' "${row}" | cut -f5-)
     [ -n "${id}" ] || continue
+    case ${want} in
+      *" ${id} "*) ;;
+      *) continue ;;
+    esac
     if [ "${prio}" != "${prev_prio}" ]; then
       printf '\n## P%s\n' "${prio}" >>"${out}"
       prev_prio=${prio}
@@ -874,9 +886,35 @@ worksheet_write() {
     printf -- '- [ ] (id:%s) %s\n' "${id}" "${text}" >>"${out}"
     backlog_notes_for_line "${f}" "${lineno}" >>"${out}"
     printf '%s\n' "${id}"
+    n=$((n + 1))
   done <<EOF
 ${rows}
 EOF
+  [ "${n}" -gt 0 ]
+}
+
+# Write the run's slice of the ledger to `out`, and print the ids it contains,
+# one per line: that list is what the merge will accept, and nothing else.
+# The slice is the first `max` todos in the order of attack; the writing of it
+# is `worksheet_render`, which the runner calls again if the claims it takes
+# turn out to cover fewer tasks than this.
+worksheet_write() {
+  local f=$1 max=$2 out=$3 ids tmp rc
+  [ -r "${f}" ] || return 1
+  case ${max} in ""|*[!0-9]*) return 1 ;; esac
+  [ "${max}" -ge 1 ] || return 1
+  ids=$(backlog_scan "${f}" 2>/dev/null |
+    awk -F'\t' '$3 == " " && $4 != ""' |
+    sort -t"$(printf '\t')" -k2,2n -k1,1n |
+    head -n "${max}" |
+    cut -f4)
+  [ -n "${ids}" ] || return 1
+  tmp=$(mktemp "${TMPDIR:-/tmp}/hzl-worksheet.XXXXXX") || return 1
+  printf '%s\n' "${ids}" >"${tmp}" || { rm -f "${tmp}"; return 1; }
+  worksheet_render "${f}" "${tmp}" "${out}"
+  rc=$?
+  rm -f "${tmp}"
+  return ${rc}
 }
 
 # Insert a new todo at the end of a priority section, after that section's last

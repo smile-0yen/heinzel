@@ -72,7 +72,8 @@ Version: 0.1.0-dev. Target: macOS, `/bin/bash` 3.2.
       run-HHMMSS.log     the run's own log
       notes.md           the handover a human reads
       exec-HHMMSS/       prompt.md, raw, stderr, last.txt, result.json,
-                         worksheet.md (as merged), worksheet-ids.txt
+                         worksheet.md (as merged), worksheet-ids.txt,
+                         claimed-ids.txt
       snapshot-HHMMSS/   files/, manifest.txt, git-heads.txt, git-roots.txt
       review-HHMMSS/     changeset.patch, prompt.md, verdict.json
 ```
@@ -340,8 +341,10 @@ workspace whose lease is held by a live run is a `skip`, not an abort — the
 other run is working, which is a normal outcome and not a fault. Both are
 released by the EXIT trap, after the engine has been signalled to stop.
 
-Before the engine call, after gate 8: build the worksheet (§8.1), and mark its
-ids `[~]` in the ledger.
+Before the engine call, after gate 8: build the worksheet (§8.1), claim its ids
+(§11.2) and mark them `[~]` in the ledger, then write the worksheet again from
+the claims the run actually took. A run that got none of them skips rather than
+calling an engine with an empty worksheet.
 
 After the engine call: **merge the worksheet into the ledger** — through the
 four steps of §11.4, not as a bare merge — then apply the review gate, **then**
@@ -413,7 +416,8 @@ or `[!]` appears on it.
 |---|---|
 | Location | Under `workdir`, because the sandbox is a path boundary and that is the only place the agent can write. `.heinzel` is on `hzl-changeset`'s prune list, so it never appears as a reviewable change |
 | Permission | Allowed by **exact path** as well as by the workdir's `/**` rule. Measured 2026-08-30: `/**` does reach a dot directory, so the exact rule is redundant today and kept deliberately — the one file a run cannot proceed without should not depend on a glob that exists for another reason |
-| Lifetime | Written after gate 8, merged after the engine returns, then copied into the run's `exec-*` directory and removed. The `EXIT` trap removes it too |
+| Lifetime | Written after gate 8, written again once the claims are taken, merged after the engine returns, then copied into the run's `exec-*` directory and removed. The `EXIT` trap removes it too |
+| Contents | Exactly the tasks this run holds a claim on. A task another run claimed first is not on it |
 | The id list | `exec-*/worksheet-ids.txt`, in the log tree — **not** under `workdir`. It is what the merge checks the agent's work against, so it is out of the agent's reach |
 | Markers the agent may write | `[x]`, `[!]`. `[~]` is the runner's |
 | Metadata the agent may write | `<!-- reason:… -->` on a `[!]` line, and nothing else. Timestamps and `run:` are written by the merge: an agent has no clock, and `run:` is what lets a reject revert this run's work and nobody else's |
@@ -434,6 +438,21 @@ the runner did not put on the worksheet cannot be closed, whatever the agent
 wrote beside it. Ignored lines are counted, logged and carried into the
 handover — a prompt that has drifted out of format shows up as an agent that
 reports work no line records.
+
+> **Normative: the worksheet is rebuilt from the claims a run holds.** It is
+> first written from the ledger, before any claim exists, so a task another run
+> got to first is on it — and a task with no claim behind it gets no `[~]`, so
+> it would be in front of the agent looking exactly like work it may do. Once
+> the claims are taken the worksheet is written again from the ids this run
+> actually holds, `worksheet-ids.txt` is replaced with the same set, and the
+> per-run task budget in the prompt is lowered to match. The two files must not
+> disagree: the id list is what makes the scope enforced rather than requested.
+> A run that took no claim at all `skip`s before the engine is called.
+
+`worksheet_render <ledger> <ids-file> <out>` is the writing of it and
+`worksheet_write` is `worksheet_render` over the first *n* todos. The render
+consults the id list and not the ledger's marker: by the time a run rebuilds,
+its tasks read `[~]`, and what the agent is handed is always a todo.
 
 Rows from `backlog_scan` are taken apart with `cut`, never `IFS=<tab> read`:
 tab is an IFS whitespace character, so consecutive tabs collapse into one
@@ -780,6 +799,12 @@ becomes what it is good at (`docs/RUNTIME-BACKENDS.md` §13.4):
 > **Normative: a rollback returns only `[~]` to `[ ]`.** A task the merge has
 > already marked `[x]` or `[!]` keeps that marker when its claim is released:
 > the work happened, and releasing the claim is not a reason to undo it.
+
+> **Normative: a refused claim removes the task from the run.** The task keeps
+> its marker, gets no `[~]`, and comes off the worksheet and out of
+> `worksheet-ids.txt` when the run rebuilds them (§8.1). Logging the refusal and
+> leaving the line in front of the agent would be asking it not to touch
+> something, which is a weaker guarantee than not showing it.
 
 The workspace identity is `<short hostname>:<canonical absolute path>`, so two
 spellings of one directory are one workspace; the directory name is a 16-hex

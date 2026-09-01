@@ -6,6 +6,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-09-02
+
+### Changed
+- **The worksheet is rebuilt from the claims a run holds** (`docs/SPEC.md` §8.1,
+  §11.2; `docs/RUNTIME-BACKENDS.md` §13.4). The worksheet is written from the
+  ledger before any claim exists, so a task another run got to first was still
+  on it: no `[~]`, a line in the runner log, and otherwise indistinguishable
+  from work the agent was invited to do. Only the global `run.lock` and the
+  reconcile in front of it made that path unreachable, and both are on their way
+  out. Once the claims are taken the worksheet is now written again from the ids
+  this run actually holds, and `worksheet-ids.txt` — the scope the merge checks
+  against — is replaced with the same set, so the two cannot disagree.
+- The per-run task budget in the prompt is lowered to the number of tasks
+  claimed. An agent told it may close three tasks, on a worksheet holding two,
+  is being told something untrue by its own prompt.
+- A run that could claim none of its tasks `skip`s before the engine is called,
+  rather than sending an agent a worksheet it may not touch a line of.
+
+### Added
+- `worksheet_render <ledger> <ids-file> <out>` — the writing of a worksheet,
+  from an explicit list of ids rather than from a budget. `worksheet_write` is
+  now that function over the first *n* todos, so there is one renderer and not
+  two. The render consults the id list and not the ledger's marker: by the time
+  a run rebuilds, its own tasks read `[~]`, and what the agent is handed is
+  always a todo.
+- `exec-*/claimed-ids.txt`, alongside `worksheet-ids.txt`: what the run asked
+  for and what it got, kept apart so a refusal is legible after the fact.
+
 ## [0.2.5] - 2026-09-02
 
 ### Added
