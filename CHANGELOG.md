@@ -6,6 +6,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-09-02
+
+### Added
+- **Characterization tests for the engine layer**, the safety net Phase 1 of
+  `docs/RUNTIME-BACKENDS.md` asks for before `lib/engines.sh` is split into an
+  Agent Driver and a LocalRuntime. They pin what the code does today, so the
+  extraction can be judged by whether anything observable moved.
+- The launch is compared **argument for argument**, as a NUL-separated byte
+  stream rather than a line per argument: the reviewer's `--json-schema` is a
+  whole file, and a comparison that split on newlines would stay green while
+  the real argv fell apart into thirty arguments. Covered: `claude` executor
+  and reviewer, `codex` executor and reviewer, `ignore_user_config`, a budget
+  cap, and a prompt whose trailing newline `$(cat ...)` strips before the
+  engine sees it.
+- `hzl_timeout`: exit status passed through, 124 on the wall clock, 137 for a
+  child that ignores `TERM`, 125 for a missing command or a non-numeric
+  timeout, and — the reason the child is never wrapped in a subshell — a
+  grandchild that dies with the process group instead of surviving and billing.
+- `engine_run` against a fake engine: exit codes propagated to the caller, and
+  `result.json` normalised for `ok`, `error`, `auth` and `timeout`, including
+  the two cases that are easy to lose in a refactor — `claude` reporting a
+  failed run inside a zero exit, and an unparseable body degrading to empty
+  fields rather than to a broken result.
+- `engine_is_auth_error` per engine: a `codex` MCP transport 401 is not an auth
+  failure, not being logged in is, and a run that exited 0 is never one.
+
+### Changed
+- The fake `claude` / `codex` the tests use is a shell script on a temporary
+  `PATH`, dropped there by the suite. No real engine is started, so the suite
+  is still free and still works offline. `--live` stays refused with exit 2:
+  its message now says the engine tests use a fake engine, rather than that no
+  engine test exists.
+
 ## [0.1.3] - 2026-09-01
 
 ### Added
