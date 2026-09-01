@@ -123,10 +123,28 @@ MAX_PER_RUN=$(state_get .max_tasks_per_run 3)
 MAX_TOTAL=$(state_get .max_tasks_total 3)
 DONE_TOTAL=$(state_get .tasks_done_total 0)
 
+# The ledger half of the cleanup, as one function, so that the whole of it goes
+# under one lock rather than a lock per marker.
+cleanup_ledger() {
+  if [ -n "${CLAIMS_READY:-}" ]; then
+    claims_rollback_run "${WS_IDENTITY}" "${BACKLOG}" "${STORE_RUN_ID}" \
+      >/dev/null 2>&1
+  fi
+  if [ -n "${BACKLOG}" ] && [ -w "${BACKLOG}" ]; then
+    backlog_reset_inprogress "${BACKLOG}" >/dev/null 2>&1
+  fi
+  return 0
+}
+
 # Roll back an in-progress marker left by an interrupted run, and release the
 # lock, whatever happens from here on.
 cleanup() {
   local rc=$?
+  # First, and before anything below tries to take it: a run killed inside a
+  # ledger mutation is still holding the backlog lock, and it is holding it
+  # against itself. `lock_release` drops it only if this process is the holder,
+  # so a lock somebody else has is left exactly where it is.
+  lock_release "${LOCK_BACKLOG}" >/dev/null 2>&1
   # A run that stops here stopped early: killed at the deadline, `hzl off`, a
   # closed lid. The snapshot already says which tasks it was holding, and this
   # is the line that says nobody finished. Recovery reads the two together.
@@ -140,14 +158,10 @@ cleanup() {
   fi
   # This run's claims first, and only this run's: the tasks it was holding go
   # back to `[ ]` and the claims go with them. Then the blanket pass, which is
-  # the legacy path and catches a `[~]` no claim ever covered.
-  if [ -n "${CLAIMS_READY:-}" ]; then
-    claims_rollback_run "${WS_IDENTITY}" "${BACKLOG}" "${STORE_RUN_ID}" \
-      >/dev/null 2>&1
-  fi
-  if [ -n "${BACKLOG}" ] && [ -w "${BACKLOG}" ]; then
-    backlog_reset_inprogress "${BACKLOG}" >/dev/null 2>&1
-  fi
+  # the legacy path and catches a `[~]` no claim ever covered. One transaction,
+  # because a reader who caught the ledger between the two would see a run that
+  # had given half its tasks back.
+  with_backlog_lock cleanup_ledger >/dev/null 2>&1
   # An interrupted run leaves its worksheet in the working directory. It is
   # scaffolding, and a stale one would be merged by nothing and read by nobody.
   if [ -n "${WS_DIR:-}" ]; then
@@ -376,7 +390,7 @@ if [ -n "${WS_IDENTITY}" ]; then
   while IFS= read -r stale_run; do
     [ -n "${stale_run}" ] || continue
     [ "${stale_run}" = "${STORE_RUN_ID}" ] && continue
-    log_event skip "released the claims left by run ${stale_run} ($(claims_rollback_run "${WS_IDENTITY}" "${BACKLOG}" "${stale_run}") marker(s) reset)"
+    log_event skip "released the claims left by run ${stale_run} ($(with_backlog_lock claims_rollback_run "${WS_IDENTITY}" "${BACKLOG}" "${stale_run}") marker(s) reset)"
   done <<EOF
 $(claims_runs "${WS_IDENTITY}")
 EOF
@@ -387,7 +401,7 @@ fi
 # The blanket reset stays: it is the legacy path, and it is what puts back a
 # `[~]` that no claim ever covered — one written by hand, or by a build older
 # than the claims directory.
-backlog_reset_inprogress "${BACKLOG}" >/dev/null
+with_backlog_lock backlog_reset_inprogress "${BACKLOG}" >/dev/null
 TODO_BEFORE=$(backlog_count "${BACKLOG}" " ")
 [ "${TODO_BEFORE}" -gt 0 ] || skip "nothing to do (0 todo)"
 
@@ -396,7 +410,7 @@ TODO_BEFORE=$(backlog_count "${BACKLOG}" " ")
 MAX_TASKS=${MAX_PER_RUN}
 [ "${REMAINING}" -lt "${MAX_TASKS}" ] && MAX_TASKS=${REMAINING}
 
-backlog_assign_ids "${BACKLOG}"
+with_backlog_lock backlog_assign_ids "${BACKLOG}"
 DONE_BEFORE=$(backlog_count "${BACKLOG}" x)
 
 # The agent works from a worksheet, not from the ledger: this run's slice of
@@ -443,16 +457,24 @@ worksheet_write "${BACKLOG}" "${MAX_TASKS}" "${WORKSHEET}" >"${WORKSHEET_IDS}" |
 # a quiet one.
 CLAIMED_IDS="${EXEC_DIR}/claimed-ids.txt"
 : >"${CLAIMED_IDS}" || abort "cannot write ${CLAIMED_IDS}"
-while IFS= read -r wid; do
-  [ -n "${wid}" ] || continue
-  if [ -n "${CLAIMS_READY}" ] &&
-     ! claims_acquire "${WS_IDENTITY}" "${wid}" "${STORE_RUN_ID}"; then
-    log_event skip "task ${wid} is claimed by run $(claims_holder "${WS_IDENTITY}" "${wid}") - leaving it off the worksheet"
-    continue
-  fi
-  backlog_set_state "${BACKLOG}" "${wid}" "~" "run:${RUN_ID}"
-  printf '%s\n' "${wid}" >>"${CLAIMED_IDS}"
-done <"${WORKSHEET_IDS}"
+# One transaction: the markers this run is about to show a human go into the
+# ledger together, and a reader arriving in the middle of it sees the run before
+# it started or after it claimed, never half way through claiming.
+claim_worksheet_tasks() {
+  local wid
+  while IFS= read -r wid; do
+    [ -n "${wid}" ] || continue
+    if [ -n "${CLAIMS_READY}" ] &&
+       ! claims_acquire "${WS_IDENTITY}" "${wid}" "${STORE_RUN_ID}"; then
+      log_event skip "task ${wid} is claimed by run $(claims_holder "${WS_IDENTITY}" "${wid}") - leaving it off the worksheet"
+      continue
+    fi
+    backlog_set_state "${BACKLOG}" "${wid}" "~" "run:${RUN_ID}"
+    printf '%s\n' "${wid}" >>"${CLAIMED_IDS}"
+  done <"${WORKSHEET_IDS}"
+  return 0
+}
+with_backlog_lock claim_worksheet_tasks
 
 # What the run holds is what the run works on. The worksheet was written from
 # the ledger before any claim was taken, so a task another run got to first is
@@ -619,15 +641,20 @@ store_event worksheet.merged \
 # this and the blanket pass below it.
 if [ -n "${CLAIMS_READY}" ]; then
   printf 'claims   %s marker(s) returned to todo, this run only\n' \
-    "$(claims_rollback_run "${WS_IDENTITY}" "${BACKLOG}" "${STORE_RUN_ID}")" \
+    "$(with_backlog_lock claims_rollback_run "${WS_IDENTITY}" "${BACKLOG}" "${STORE_RUN_ID}")" \
     >>"${RUN_LOG}"
 fi
 # Belt and braces, and the legacy path: an id the merge never saw, or a `[~]`
-# that no claim ever covered, is still marked in progress.
-backlog_reset_inprogress "${BACKLOG}" >/dev/null
-# New tasks arrive without ids, and the ledger is not left in a state where a
-# human could add one by hand before the next run allocates it.
-[ "${MERGED_NEW}" -gt 0 ] && backlog_assign_ids "${BACKLOG}"
+# that no claim ever covered, is still marked in progress. Then the ids: new
+# tasks arrive without one, and the ledger is not left in a state where a human
+# could add one by hand before the next run allocates it. One transaction,
+# because a ledger seen between the two has lines nothing can refer to.
+finish_ledger() {
+  backlog_reset_inprogress "${BACKLOG}" >/dev/null
+  [ "${MERGED_NEW}" -gt 0 ] && backlog_assign_ids "${BACKLOG}"
+  return 0
+}
+with_backlog_lock finish_ledger
 
 # Keep the finished worksheet with the rest of the run's record, then take it
 # out of the working directory: it is the runner's scaffolding, not the user's
@@ -640,6 +667,33 @@ rmdir "${WS_DIR}" 2>/dev/null
 # The gate runs before the tally, so work that is rejected is never counted as
 # done. Nothing here may cost a task: a reviewer that is absent, broken or slow
 # leaves the ledger exactly as the executor left it.
+
+# Move back to `[!]` exactly what this run closed, and print how many. The
+# `run:` field on the completion line is what makes that possible: without it a
+# reject would roll back other runs' work and lines a human closed by hand.
+#
+# It prints its count rather than incrementing a variable, because it is called
+# inside a command substitution and a variable set there is set in a shell that
+# is about to end. One function for both the reject and the revise-to-blocked
+# path: they differ by the reason and by nothing else.
+review_revert_done() { # reason
+  local reason=$1 rid n=0
+  while IFS= read -r rid; do
+    [ -z "${rid}" ] && continue
+    backlog_set_state "${BACKLOG}" "${rid}" "!" \
+      "blocked:$(iso_at) reason:${reason} run:${RUN_ID}" && n=$((n + 1))
+  done < <(backlog_ids_done_by_run "${BACKLOG}" "${RUN_ID}")
+  printf '%s' "${n}"
+}
+
+# The follow-up a fix pass that did not settle leaves behind: a line with no id
+# yet, and the allocation that gives it one. Both, or a ledger with a task a
+# human could collide with by adding an id by hand.
+add_review_followup() {
+  printf -- '- [ ] follow up on review findings from run %s\n' "${RUN_ID}" \
+    >>"${BACKLOG}" || return 1
+  backlog_assign_ids "${BACKLOG}"
+}
 
 REVIEW_VERDICT=disabled
 REVIEW_ACTION="review is off"
@@ -681,12 +735,8 @@ if [ "${HEINZEL_REVIEW}" = 1 ]; then
         # note-only by default: record the findings and leave the work alone.
         case ${HEINZEL_REVIEW_ON_REVISE} in
           block)
-            while IFS= read -r rid; do
-              [ -z "${rid}" ] && continue
-              backlog_set_state "${BACKLOG}" "${rid}" "!" \
-                "blocked:$(iso_at) reason:review-revise run:${RUN_ID}"
-              REVIEW_REVERTED=$((REVIEW_REVERTED + 1))
-            done < <(backlog_ids_done_by_run "${BACKLOG}" "${RUN_ID}")
+            REVIEW_REVERTED=$(with_backlog_lock review_revert_done review-revise)
+            : "${REVIEW_REVERTED:=0}"
             REVIEW_ACTION="revise, moved ${REVIEW_REVERTED} task(s) back to blocked"
             ;;
           fix-once)
@@ -722,9 +772,7 @@ if [ "${HEINZEL_REVIEW}" = 1 ]; then
               else
                 # Still not right: the work stays done and a follow-up task is
                 # added, because a human is better placed to judge the rest.
-                printf -- '- [ ] follow up on review findings from run %s\n' "${RUN_ID}" \
-                  >>"${BACKLOG}"
-                backlog_assign_ids "${BACKLOG}"
+                with_backlog_lock add_review_followup
                 REVIEW_ACTION="revise, one fix pass did not settle it; added a follow-up task"
               fi
             fi
@@ -735,15 +783,8 @@ if [ "${HEINZEL_REVIEW}" = 1 ]; then
         esac
         ;;
       20)
-        # Revert only what this run closed. The run: field on the completion
-        # line is what makes that possible; without it a reject would roll back
-        # other runs' work and lines a human closed by hand.
-        while IFS= read -r rid; do
-          [ -z "${rid}" ] && continue
-          backlog_set_state "${BACKLOG}" "${rid}" "!" \
-            "blocked:$(iso_at) reason:review-reject run:${RUN_ID}"
-          REVIEW_REVERTED=$((REVIEW_REVERTED + 1))
-        done < <(backlog_ids_done_by_run "${BACKLOG}" "${RUN_ID}")
+        REVIEW_REVERTED=$(with_backlog_lock review_revert_done review-reject)
+        : "${REVIEW_REVERTED:=0}"
         REVIEW_ACTION="rejected, reverted ${REVIEW_REVERTED} task(s): ${REVIEW_ACTION}"
         ;;
       *)
@@ -762,19 +803,23 @@ TASKS_DONE=$((DONE_AFTER - DONE_BEFORE))
 [ "${TASKS_DONE}" -lt 0 ] && TASKS_DONE=0
 TASKS_BLOCKED=$(backlog_count "${BACKLOG}" "!")
 
+# Session state moves under the same lock as the ledger, and for the same
+# reason: `state_update` reads the file, filters it and renames the result over
+# the top, so two of them at once is one of them lost — and a completion counted
+# in `state.json` but not in the ledger is the same bug either way round.
 case ${VERDICT} in
   ok)
-    state_update ".consecutive_failures = 0 | .runs_completed = (.runs_completed + 1)"
+    with_backlog_lock state_update ".consecutive_failures = 0 | .runs_completed = (.runs_completed + 1)"
     ;;
   auth)
     # No point retrying every hour against an expired credential.
-    state_update '.halt_reason = "auth"'
+    with_backlog_lock state_update '.halt_reason = "auth"'
     log_event HALT "authentication failed - fix it, then run 'hzl resume'"
     ;;
   timeout|error)
-    state_update ".consecutive_failures = (.consecutive_failures + 1)"
+    with_backlog_lock state_update ".consecutive_failures = (.consecutive_failures + 1)"
     if [ "$(state_get .consecutive_failures 0)" -ge 3 ]; then
-      state_update '.halt_reason = "consecutive-failures"'
+      with_backlog_lock state_update '.halt_reason = "consecutive-failures"'
       log_event HALT "three failures in a row - fix the cause, then 'hzl resume'"
     fi
     ;;
@@ -783,7 +828,7 @@ esac
 # Add to the session total before writing the run record, so the same number is
 # never computed in two places.
 if [ "${TASKS_DONE}" -gt 0 ]; then
-  state_update ".tasks_done_total = (.tasks_done_total + ${TASKS_DONE})"
+  with_backlog_lock state_update ".tasks_done_total = (.tasks_done_total + ${TASKS_DONE})"
 fi
 
 # The handover: what a human reads in the morning instead of the logs.

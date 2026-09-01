@@ -26,6 +26,7 @@
 #   lock_holder   <name>                   -> the pid, or empty
 #   lock_reclaim  <name>                   -> breaks a dead holder's lock
 #   lock_with     <name> <timeout> <cmd…>  -> acquire, run, release
+#   with_backlog_lock <cmd…>               -> one ledger or session mutation
 #
 #   lease_acquire <identity> <run-id> [pid] -> 0 held, 1 held by another run
 #   lease_release <identity> <run-id>       -> only this run's lease
@@ -212,6 +213,29 @@ lock_with() { # name timeout cmd...
   "$@"
   rc=$?
   lock_release "${name}"
+  return ${rc}
+}
+
+# One ledger or session mutation, under the short global lock, spelled the same
+# way everywhere. The point of the single spelling is that "is this mutation
+# guarded" becomes a question about one name rather than about whether a caller
+# remembered the right lock and the right timeout.
+#
+# A caller that needs several mutations to be one transaction wraps the sequence
+# in a function and passes that — the command runs in this shell, so it can be
+# one. Nothing here is reentrant: a caller already inside the lock must not use
+# it again, which is why `finalize_commit` and `finalize_recover`, which take the
+# lock themselves, are called without it.
+#
+# Failing to take it is loud. Ten seconds is far longer than a ledger mutation,
+# so a refusal means something is holding the lock that is not one, and the
+# mutation silently not happening is how a completion goes missing.
+with_backlog_lock() { # cmd...
+  local rc
+  lock_with "${LOCK_BACKLOG}" "${LOCK_WAIT_SEC}" "$@"
+  rc=$?
+  [ ${rc} -eq 75 ] &&
+    err "could not take the ${LOCK_BACKLOG} lock in ${LOCK_WAIT_SEC}s: '$1' did not run"
   return ${rc}
 }
 

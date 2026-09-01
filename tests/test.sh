@@ -1577,6 +1577,58 @@ lock_acquire "${LOCK_BACKLOG}" 0
 t_ok "and it can be taken again" "$?"
 lock_release "${LOCK_BACKLOG}"
 
+# --- with_backlog_lock ------------------------------------------------------
+#
+# The one spelling every ledger and session mutation in `bin/hzl-run` and
+# `bin/hzl` goes through, so that "is this mutation guarded" is a question about
+# one name (docs/RUNTIME-BACKENDS.md §14.3).
+
+group 'with_backlog_lock'
+
+WB_LEDGER=${TMPROOT}/wb-ledger.md
+cat >"${WB_LEDGER}" <<'FIXTURE'
+# Backlog
+
+## P1
+- [ ] (id:h-0001) a task a human is about to close
+FIXTURE
+
+with_backlog_lock backlog_set_state "${WB_LEDGER}" h-0001 x "done:now by:human"
+t_ok "a mutation under the lock succeeds" "$?"
+t_eq "and it happened" x "$(backlog_marker_of_id "${WB_LEDGER}" h-0001)"
+t_eq "the lock is not still held afterwards" "" "$(lock_holder "${LOCK_BACKLOG}")"
+
+t_eq "stdout comes back through the lock" \
+  "1" "$(with_backlog_lock backlog_count "${WB_LEDGER}" x)"
+
+with_backlog_lock backlog_set_state "${WB_LEDGER}" h-9999 x ""
+t_status "and so does a status: no such id is still 3" 3 "$?"
+
+# Held by a live process that is not us. The mutation must not happen at all —
+# a write that went ahead anyway is the bug the lock exists to prevent.
+sleep 30 &
+WB_LIVE=$!
+_lock_take "$(lock_file "${LOCK_BACKLOG}")" "$(jq -c -n --argjson pid "${WB_LIVE}" \
+  --arg acquired_at "$(iso_at)" \
+  '{schema_version: 1, name: "backlog", pid: $pid, acquired_at: $acquired_at}')"
+WB_SAVED_WAIT=${LOCK_WAIT_SEC}
+LOCK_WAIT_SEC=1
+with_backlog_lock backlog_set_state "${WB_LEDGER}" h-0001 "!" "blocked:now" 2>/dev/null
+t_status "a mutation that cannot take the lock reports 75" 75 "$?"
+t_eq "and did not touch the ledger" x "$(backlog_marker_of_id "${WB_LEDGER}" h-0001)"
+WB_ERR=$(with_backlog_lock backlog_set_state "${WB_LEDGER}" h-0001 "!" "x" 2>&1 >/dev/null)
+case ${WB_ERR} in
+  *"did not run"*) t_ok "a refusal says so rather than passing quietly" 0 ;;
+  *) t_ok "a refusal says so rather than passing quietly" 1 ;;
+esac
+LOCK_WAIT_SEC=${WB_SAVED_WAIT}
+
+kill "${WB_LIVE}" 2>/dev/null
+wait "${WB_LIVE}" 2>/dev/null
+with_backlog_lock backlog_set_state "${WB_LEDGER}" h-0001 " " ""
+t_ok "once the holder is gone the mutation goes through" "$?"
+t_eq "and the ledger moved" " " "$(backlog_marker_of_id "${WB_LEDGER}" h-0001)"
+
 group 'the workspace writer lease'
 
 # One writer per checkout (§14.3, invariant 13). Two runs on one working tree

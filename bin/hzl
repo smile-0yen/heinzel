@@ -49,6 +49,14 @@ export PATH="${PATH}:/usr/local/bin:/opt/homebrew/bin:${HOME}/.local/bin"
 # awake to see why (DESIGN principle 6).
 # shellcheck source=lib/runtimes.sh
 . "${HEINZEL_ROOT}/lib/runtimes.sh"
+# The workspace identity, which the lock file names need, and the short backlog
+# lock. A human typing `hzl done` and a run merging its worksheet are two
+# writers of one ledger, and this is the side of that pair that used to write
+# with nothing held at all.
+# shellcheck source=lib/claims.sh
+. "${HEINZEL_ROOT}/lib/claims.sh"
+# shellcheck source=lib/locks.sh
+. "${HEINZEL_ROOT}/lib/locks.sh"
 
 RUNNER="${HEINZEL_ROOT}/bin/hzl-run"
 PLIST_DIR="${HOME}/Library/LaunchAgents"
@@ -408,7 +416,10 @@ cmd_on() {
       sudo_used: $sudo_used, ticket_suspended: $ticket_suspended,
       halt_reason: null, consecutive_failures: 0, runs_completed: 0}')
 
-  if ! state_write "${state}"; then
+  # Under the lock like every other session mutation: this one replaces the file
+  # wholesale, so an update landing between the compose above and the rename
+  # would be written over rather than merged with.
+  if ! with_backlog_lock state_write "${state}"; then
     kill "${caff_pid}" 2>/dev/null
     rm -f "${CAFFEINATE_PID_FILE}"
     [ "${use_sudo}" = 1 ] && sudo pmset -a disablesleep 0
@@ -449,7 +460,8 @@ cmd_off() {
   # 1. First, so that any run starting from here on no-ops. Everything else is
   # cleanup and can fail without leaving a session that still fires.
   if [ -f "${STATE_FILE}" ]; then
-    state_update '.mode = "normal"' || warn "could not update ${STATE_FILE}"
+    with_backlog_lock state_update '.mode = "normal"' ||
+      warn "could not update ${STATE_FILE}"
   fi
 
   # 2. Stop a run in flight. Its EXIT trap rolls [~] back to [ ].
@@ -486,7 +498,7 @@ cmd_off() {
     if [ "$(posture_sudoers)" = remote ]; then
       posture_install_sudoers ticket && say "the relaxed sudo ticket window is open again"
     fi
-    state_update '.ticket_suspended = false' >/dev/null 2>&1
+    with_backlog_lock state_update '.ticket_suspended = false' >/dev/null 2>&1
   fi
 
   [ "${unload}" = 1 ] && cmd_uninstall --quiet
@@ -523,7 +535,7 @@ cmd_resume() {
     say "not halted; nothing to do."
     return 0
   fi
-  state_update '.halt_reason = null | .consecutive_failures = 0' ||
+  with_backlog_lock state_update '.halt_reason = null | .consecutive_failures = 0' ||
     die "could not update ${STATE_FILE}"
   good "cleared the halt (was: ${halt}). Runs will resume at the next slot."
 }
@@ -543,11 +555,11 @@ cmd_set() {
   case ${val} in ""|*[!0-9]*) die "set ${key}: needs a positive integer" ;; esac
   case ${key} in
     max-total) [ "${val}" -ge 1 ] || die "max-total must be >= 1"
-      state_update ".max_tasks_total = ${val}" ;;
+      with_backlog_lock state_update ".max_tasks_total = ${val}" ;;
     max-tasks) [ "${val}" -ge 1 ] || die "max-tasks must be >= 1"
-      state_update ".max_tasks_per_run = ${val}" ;;
+      with_backlog_lock state_update ".max_tasks_per_run = ${val}" ;;
     timeout) [ "${val}" -ge 60 ] || die "timeout must be >= 60"
-      state_update ".run_timeout_sec = ${val}" ;;
+      with_backlog_lock state_update ".run_timeout_sec = ${val}" ;;
     *) die "set: unknown key '${key}' (max-total, max-tasks, timeout)" ;;
   esac || die "could not update ${STATE_FILE}"
   good "${key} = ${val}"
@@ -693,18 +705,27 @@ cmd_take() {
   printf '\n--- end ---\n\n'
 }
 
+# Closing a task by hand is two mutations, the marker and the note, and they go
+# in together: a run reading the ledger between them would see a completion with
+# nothing saying what changed. `backlog_set_state`'s status 3 - no such id - is
+# passed through, because that is what tells the caller it typed a wrong id.
+done_with_note() { # backlog id note
+  backlog_set_state "$1" "$2" x "done:$(iso_at) by:human" || return $?
+  [ -n "$3" ] && backlog_add_note "$1" "$2" "$3"
+  return 0
+}
+
 cmd_done() {
   require_not_root
   local b id=${1:-} note=${2:-}
   [ -n "${id}" ] || die "usage: hzl done <id> [note]"
   b=$(need_backlog) || exit 1
-  backlog_set_state "${b}" "${id}" x "done:$(iso_at) by:human"
+  with_backlog_lock done_with_note "${b}" "${id}" "${note}"
   case $? in
     0) ;;
     3) err "no such id: ${id}"; exit 3 ;;
     *) die "could not update ${b}" ;;
   esac
-  [ -n "${note}" ] && backlog_add_note "${b}" "${id}" "${note}"
   good "${id} done."
 }
 
@@ -714,7 +735,7 @@ cmd_block() {
   [ -n "${id}" ] || die "usage: hzl block <id> <reason>"
   [ -n "${reason}" ] || die "a reason is required - it is what tells you what to do later"
   b=$(need_backlog) || exit 1
-  backlog_set_state "${b}" "${id}" "!" "blocked:$(iso_at) reason:${reason}"
+  with_backlog_lock backlog_set_state "${b}" "${id}" "!" "blocked:$(iso_at) reason:${reason}"
   case $? in
     0) ;;
     3) err "no such id: ${id}"; exit 3 ;;
@@ -728,7 +749,7 @@ cmd_unblock() {
   local b id=${1:-}
   [ -n "${id}" ] || die "usage: hzl unblock <id>"
   b=$(need_backlog) || exit 1
-  backlog_set_state "${b}" "${id}" " " ""
+  with_backlog_lock backlog_set_state "${b}" "${id}" " " ""
   case $? in
     0) ;;
     3) err "no such id: ${id}"; exit 3 ;;

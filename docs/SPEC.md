@@ -871,6 +871,26 @@ because a run will outlive the process that started it
 > lock. The two are different facts: a run that stopped, and a run that cannot
 > be reached (`docs/RUNTIME-BACKENDS.md` §5, invariant 10).
 
+> **Normative: every ledger and session mutation goes through
+> `with_backlog_lock`.** One spelling in `bin/hzl-run` and in `bin/hzl`, so that
+> "is this mutation guarded" is a question about one name rather than about
+> whether a caller remembered the right lock and the right timeout. Session
+> state is under the same lock as the ledger and not a second one: a completion
+> counted in `state.json` but not in the ledger is the same bug either way
+> round. A caller that needs several mutations to be one transaction passes a
+> function — the claim loop, the cleanup rollback, `hzl done`'s marker and note,
+> the post-merge reset and id allocation are each one transaction, not one per
+> line. Nothing is reentrant, so `finalize_commit` and `finalize_recover`, which
+> take the lock themselves, are called without it. A refusal after
+> `LOCK_WAIT_SEC` is reported and the mutation does **not** happen: ten seconds
+> is far longer than a ledger write, so a refusal means the holder is not one.
+
+> **Normative: the runner releases its own backlog lock before it rolls back.**
+> The `EXIT` trap's first act is `lock_release "${LOCK_BACKLOG}"`, which drops
+> the lock only when this process is the holder. A run killed inside a ledger
+> mutation is otherwise holding the lock against itself, and the rollback that
+> returns its `[~]` markers would wait out the timeout and then not happen.
+
 > **Normative: the writer lease outlives the process that took it.** That is the
 > point of it. A controller that was killed still owns its checkout until
 > something confirms it stopped, so ownership is released last and only after

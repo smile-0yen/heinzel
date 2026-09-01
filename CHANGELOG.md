@@ -6,6 +6,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-09-02
+
+### Changed
+- **Every ledger and session mutation goes under the short backlog lock**
+  (`docs/RUNTIME-BACKENDS.md` §14.3, `docs/SPEC.md` §11.3). `lib/finalize.sh`
+  took the lock for the ledger commit and nothing else did: the claim loop, the
+  rollbacks, the id allocation, the review's reverts, the follow-up task, every
+  `state_update` in the runner, and every one of `hzl on`, `off`, `resume`,
+  `set`, `done`, `block` and `unblock` wrote with nothing held at all. A human
+  typing `hzl done` while a run merged its worksheet were two writers of one
+  file, each reading it, filtering it and renaming the result over the top.
+- `with_backlog_lock <cmd…>` is the one spelling, so that "is this mutation
+  guarded" is a question about one name rather than about whether a caller
+  remembered the right lock and the right timeout. Session state goes under the
+  same lock as the ledger and not a second one: a completion counted in
+  `state.json` but not in the ledger is the same bug either way round.
+- Several mutations that belong together became one transaction rather than one
+  lock per line — the claim loop, the cleanup rollback, `hzl done`'s marker and
+  its note, the post-merge reset and id allocation, and the review's revert of
+  what this run closed. A ledger read between the halves of any of those shows
+  something that was never true.
+- A refusal is loud and the mutation does not happen. Ten seconds is far longer
+  than a ledger write, so a caller that cannot take the lock is not waiting for
+  one; a mutation that silently did not happen is how a completion goes missing.
+- The runner's `EXIT` trap releases its own backlog lock first. A run killed
+  inside a mutation is otherwise holding the lock against itself, and the
+  rollback that returns its `[~]` markers would wait out the timeout and then
+  not happen.
+
+### Not in this change
+- **The global `run.lock` at gate 1 stays**, and the task's remainder is back on
+  the backlog. Retiring it is a separate change with a prerequisite this one
+  did not touch: `run.pid` is written at gate 2, before the writer lease is
+  taken, so a second runner would overwrite it and its own EXIT trap would then
+  delete the live run's pid file — the file `hzl off` kills by. The lease
+  already refuses a second run on the same checkout, and `state.json` holds one
+  workdir, so the ordering is the whole of what is left.
+
 ## [0.2.7] - 2026-09-02
 
 ### Added
