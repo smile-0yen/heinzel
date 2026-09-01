@@ -43,6 +43,12 @@ export PATH="${PATH}:/usr/local/bin:/opt/homebrew/bin:${HOME}/.local/bin"
 . "${HEINZEL_ROOT}/lib/common.sh"
 # shellcheck source=lib/posture.sh
 . "${HEINZEL_ROOT}/lib/posture.sh"
+# The registry, for one reason only: `hzl on` records the session's runtime
+# backend in state.json, and a name the registry does not know has to be refused
+# here rather than at 03:00, when the run that reads it aborts and nobody is
+# awake to see why (DESIGN principle 6).
+# shellcheck source=lib/runtimes.sh
+. "${HEINZEL_ROOT}/lib/runtimes.sh"
 
 RUNNER="${HEINZEL_ROOT}/bin/hzl-run"
 PLIST_DIR="${HOME}/Library/LaunchAgents"
@@ -124,8 +130,16 @@ cmd_status() {
   if [ "${mode}" = heinzel ]; then rc=10; else rc=0; fi
 
   if [ "${json}" = 1 ]; then
+    # Reported, never repaired: a v1 file reads as v1 here and stays a v1 file.
+    # `status` is the command a script runs in a loop, and the one command that
+    # must be safe to run against a state file written by another build.
+    local schema backend=""
+    schema=$(state_schema_json)
+    [ -r "${STATE_FILE}" ] && backend=$(state_runtime_backend)
     jq -n \
       --arg mode "${mode}" \
+      --argjson schema_version "${schema}" \
+      --arg runtime_backend "${backend}" \
       --arg reason "${HZ_REASON}" \
       --arg posture "$(posture_now)" \
       --arg sleep_disabled "$(sleep_disabled)" \
@@ -136,6 +150,8 @@ cmd_status() {
       --arg expires_at "$(state_get .expires_at "")" \
       --arg halt "$(state_get .halt_reason "")" \
       '{mode: $mode, reason: $reason, posture: $posture,
+        schema_version: $schema_version,
+        runtime_backend: (if $runtime_backend == "" then null else $runtime_backend end),
         sleep_disabled: $sleep_disabled, backlog: $backlog,
         tasks_done_total: $tasks_done, max_tasks_total: $max_total,
         expires_at: $expires_at, halt_reason: (if $halt == "" then null else $halt end),
@@ -257,6 +273,13 @@ cmd_on() {
     warn "a run that uses its whole budget will cost the next slot"
   fi
 
+  # The session's runtime backend is recorded, so a run reads it from the
+  # session that promised it rather than from whatever the environment happens
+  # to say at 03:00. A key the registry does not know stops the session here.
+  local runtime_backend=${HEINZEL_RUNTIME:-local}
+  runtime_known "${runtime_backend}" ||
+    die "HEINZEL_RUNTIME names no runtime backend this build has: '${runtime_backend}' (have: $(runtime_backends | tr '\n' ' ' | sed 's/ *$//'))"
+
   # 2. Posture. The refused cell of the matrix, and the one refusal with no
   # --force: this is about where the machine is, and a flag cannot move it.
   if [ "$(posture_now)" = travel ]; then
@@ -354,6 +377,8 @@ cmd_on() {
   # 9. State. Written last, so anything above failing leaves no session behind.
   local state
   state=$(jq -n \
+    --argjson schema_version "${HEINZEL_STATE_SCHEMA}" \
+    --arg runtime_backend "${runtime_backend}" \
     --arg activated_at "$(iso_at "${now}")" \
     --argjson activated_at_epoch "${now}" \
     --arg expires_at "$(iso_at "${expires}")" \
@@ -370,7 +395,8 @@ cmd_on() {
     --arg prior_disablesleep "${prior_disablesleep}" \
     --argjson sudo_used "$([ "${use_sudo}" = 1 ] && echo true || echo false)" \
     --argjson ticket_suspended "${ticket_suspended}" \
-    '{mode: "heinzel",
+    '{schema_version: $schema_version, runtime_backend: $runtime_backend,
+      mode: "heinzel",
       activated_at: $activated_at, activated_at_epoch: $activated_at_epoch,
       expires_at: $expires_at, expires_at_epoch: $expires_at_epoch,
       duration: $duration, boot_id: $boot_id,
@@ -861,7 +887,9 @@ cmd_doctor() {
   mode=${HZ_MODE}
   if [ -f "${STATE_FILE}" ]; then
     if jq -e . "${STATE_FILE}" >/dev/null 2>&1; then
-      doc_ok "state.json is valid"
+      # A file older than the schema field says v1 here and is left as one:
+      # doctor diagnoses, it does not migrate.
+      doc_ok "state.json is valid (schema v$(state_schema_version), runtime backend $(state_runtime_backend))"
     else
       doc_bad "state.json is corrupt - 'hzl on' will rebuild it"
     fi

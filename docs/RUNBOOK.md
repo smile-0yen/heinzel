@@ -83,6 +83,13 @@ classification, and it is the thing to look at:
 to graph. `~/.heinzel/logs/<date>/notes.md` is the handover: read that first in
 the morning, it is written for a human.
 
+Those records carry a `schema_version`, and so do `state.json` and each run's
+`result.json`. A file without the field is version 1 and is read as one — by
+this build and by anything you wrote against it. Nothing rewrites a record it
+only read, so a state file you carried back from a newer build still opens, and
+graphs written against the old fields keep working: every version so far only
+adds. `hzl doctor` prints the version it found.
+
 ## The backlog
 
 The ledger lives wherever `DEFAULT_BACKLOG` points, and it is the only place

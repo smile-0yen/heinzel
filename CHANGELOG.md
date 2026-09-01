@@ -6,6 +6,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-02
+
+Phase 1 of `docs/RUNTIME-BACKENDS.md` is complete: the characterization tests,
+the Agent Driver, the LocalRuntime behind a registry, and now the schema
+versions that let a second backend write records these ones can still read.
+
+### Added
+- **`schema_version` on the three records that outlive a run** — `state.json`,
+  each attempt's `result.json`, and every row of `runs.jsonl` (§13.7, §14.1).
+  All three are at 2, and every version so far only adds fields: a reader that
+  knows only version 1 finds every field it knew, in the same place, meaning
+  the same thing.
+- **A file with no version field is version 1, and is read where it lies.** The
+  half of "additive" that fails silently is the reading half, so it is the half
+  with assertions on it: a v1 `state.json` and a v1 `result.json` are read as
+  fixtures and compared byte for byte afterwards. Nothing migrates a record it
+  only read. `hzl status` and `hzl doctor` report the version they found and
+  leave the file alone — a status command that repaired what it printed would
+  make a rollback to the previous build unreadable, and nothing would say so
+  until the rollback.
+- `state.json` gains `runtime_backend`, recorded by `hzl on` from
+  `HEINZEL_RUNTIME`. A key the registry does not know now fails `hzl on`
+  outright, rather than being written into a session whose every run then
+  aborts at 03:00 with nobody awake to read it. Absent means `local`.
+- `result.json` gains `backend`, `runtime_state`, `native_exit_code` and
+  `attempt_outcome`. `native_exit_code` is null when the watchdog ended the run:
+  124, 137 and 125 are Heinzel's numbers, not the command's, and a record that
+  reported one as the engine's own status — or invented a 0 — would be a
+  fabrication (§13.7). A dry run says `NOT_STARTED` and reports no process.
+- **`attempt_outcome`, which cannot be read as a claim about the work.**
+  `verdict: ok` has always meant "the attempt ran and its output was collected",
+  but at a glance it reads like a statement that the task was done, which no
+  runtime is in a position to make — the observation vocabulary has no
+  `success` in it for the same reason (§8.3). The same judgement is now also
+  written down as `COLLECTED` / `TIMED_OUT` / `AUTH_FAILED` / `FAILED` /
+  `UNKNOWN`, none of which mean the work was right. `workflow_outcome`, the
+  field that does judge that, is Phase 4's and is a separate field.
+- `engine_result_schema_version`, `engine_result_backend` and
+  `engine_result_attempt_outcome`: readers that accept a `result.json` of
+  either schema, so a v1 record in the log tree stays readable. An old record
+  with no outcome field has its outcome derived from the verdict it does have.
+- Thirty-two assertions on all of it, including that a version field which is
+  not a number reads as 1 rather than reaching shell arithmetic, and that a
+  version *higher* than this build's is read for the fields this build knows
+  rather than refused.
+
+### Changed
+- `engine_normalize_result` takes the backend as an optional fourth argument.
+  It is the one fact that cannot be read back out of the launch or the collected
+  record — it is the caller's choice of where to run — and it defaults to
+  `local` for the three-argument form.
+- `HEINZEL_VERSION` is 0.2.0: the minor bump marks the completed phase, not the
+  size of this change. The 113 assertions from 0.1.6 pass unmodified, which is
+  the claim that v2 is additive stated as a test result rather than as a
+  sentence.
+
+### Not in this change
+- `work_session_id` (§14.1) and `workflow_outcome` (§9.3, §13.7) are named in
+  the design and are deliberately absent here. Both are Phase 2 and Phase 4
+  fields with no consumer yet, and a field nothing reads is a field nothing
+  keeps true.
+
 ## [0.1.6] - 2026-09-02
 
 ### Added

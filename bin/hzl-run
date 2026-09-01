@@ -299,10 +299,21 @@ ENDED=$(now_epoch)
 RESULT="${EXEC_DIR}/result.json"
 if [ -r "${RESULT}" ]; then
   VERDICT=$(jq -r '.verdict' "${RESULT}" 2>/dev/null)
+  # Read through the schema-aware readers, so a result.json of either version
+  # answers. Every gate below still branches on the verdict and only on the
+  # verdict: the outcome is recorded, not yet acted on (§13.7).
+  ATTEMPT_OUTCOME=$(engine_result_attempt_outcome "${RESULT}")
+  ATTEMPT_BACKEND=$(engine_result_backend "${RESULT}")
 else
+  # No result at all is a failed run for the verdict, which is the compatibility
+  # field, and an unknown outcome for the one that means what it says: nothing
+  # was collected, so nothing is known about the attempt.
   VERDICT=error
+  ATTEMPT_OUTCOME=UNKNOWN
+  ATTEMPT_BACKEND=${HEINZEL_RUNTIME:-local}
 fi
 [ -n "${VERDICT}" ] || VERDICT=error
+[ -n "${ATTEMPT_OUTCOME}" ] || ATTEMPT_OUTCOME=UNKNOWN
 
 # --- the merge -------------------------------------------------------------
 # Where the run's work becomes visible, and the only place the ledger is
@@ -509,7 +520,15 @@ fi
   fi
 } >>"${NOTES}"
 
+# The run record, v2: every v1 field where it was, plus the schema, the backend
+# the attempt ran on and its attempt outcome. `result` keeps its old meaning —
+# legacy runner completion — and a new consumer reads the outcome fields
+# instead. `workflow_outcome` is not here because there is no workflow to have
+# one yet; it arrives with Phase 4 (§13.7).
 jq -n -c \
+  --argjson schema_version "${HEINZEL_RUN_RECORD_SCHEMA}" \
+  --arg backend "${ATTEMPT_BACKEND}" \
+  --arg attempt_outcome "${ATTEMPT_OUTCOME}" \
   --arg run_id "${RUN_ID}" --arg trigger "${TRIGGER}" \
   --arg started_at "$(iso_at "${STARTED}")" --argjson started_at_epoch "${STARTED}" \
   --arg ended_at "$(iso_at "${ENDED}")" --argjson duration_sec "$((ENDED - STARTED))" \
@@ -534,7 +553,8 @@ jq -n -c \
   --argjson review_fixed "${REVIEW_FIXED}" \
   --argjson review_truncated "${REVIEW_TRUNCATED}" \
   --arg log "${RUN_LOG}" \
-  '{run_id: $run_id, trigger: $trigger,
+  '{schema_version: $schema_version,
+    run_id: $run_id, trigger: $trigger,
     started_at: $started_at, started_at_epoch: $started_at_epoch,
     ended_at: $ended_at, duration_sec: $duration_sec,
     result: $result, exit_code: $exit_code,
@@ -543,6 +563,7 @@ jq -n -c \
     todo_before: $todo_before, todo_after: $todo_after,
     worksheet: {size: $ws_size, done: $ws_done, blocked: $ws_blocked,
                 new: $ws_new, ignored: $ws_ignored},
+    backend: $backend, attempt_outcome: $attempt_outcome,
     engine: ($engine_result[0].engine // null),
     model: ($engine_result[0].model // null),
     effort: ($engine_result[0].effort // null),

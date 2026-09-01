@@ -956,6 +956,217 @@ runtime_run_batch local "${RT_DIR}/env-launch.json" "${RT_RUN}" \
 t_fails "a launch environment it cannot carry is refused, not dropped" "$?"
 fake_reset
 
+# --- record schemas --------------------------------------------------------
+#
+# Three records outlive a run and are read by something other than the code that
+# wrote them, and all three are versioned additively
+# (docs/RUNTIME-BACKENDS.md §13.7, §14.1). Both halves of "additive" are
+# asserted, because only one of them is obvious:
+#
+#   * a v2 writer keeps every v1 field — which the 113 assertions above already
+#     say, since none of them were changed to accommodate v2;
+#   * a v1 file is accepted, and is not repaired on the way past. That is the
+#     half that fails silently: a reader that migrated what it read would make a
+#     rollback to the previous build unreadable, and nothing would say so until
+#     the rollback.
+
+group 'schema constants'
+
+# Each of the three is handed straight to `jq --argjson`, where an unset or
+# non-numeric value is not a wrong version but a jq error — and the run record
+# is appended with stderr discarded, so the row would simply not be written.
+for _sc_name in HEINZEL_STATE_SCHEMA HEINZEL_RESULT_SCHEMA \
+                HEINZEL_RUN_RECORD_SCHEMA; do
+  eval "_sc=\${${_sc_name}:-}"
+  case ${_sc} in
+    ""|*[!0-9]*) _sc_ok=1 ;;
+    *) _sc_ok=0 ;;
+  esac
+  t_eq "${_sc_name} is a number jq can take as JSON" 0 "${_sc_ok}"
+done
+
+group 'state.json schema'
+
+# The file exactly as 0.1.6 wrote it: no schema_version, no runtime_backend.
+# Expired on purpose, so hzl_eval_mode can be exercised without reaching the
+# posture gate — this suite does not source lib/posture.sh.
+V1_STATE=${TMPROOT}/v1-state.json
+cat >"${V1_STATE}" <<'V1STATE'
+{
+  "mode": "heinzel",
+  "activated_at": "2026-08-31T20:00:00+09:00",
+  "activated_at_epoch": 1,
+  "expires_at": "2026-09-01T06:00:00+09:00",
+  "expires_at_epoch": 2,
+  "duration": "10h",
+  "boot_id": "old-boot",
+  "workdir": "/tmp/work",
+  "backlog": "/tmp/backlog.md",
+  "max_tasks_per_run": 3,
+  "max_tasks_total": 3,
+  "tasks_done_total": 1,
+  "run_timeout_sec": 3600,
+  "hours": "1 2 3 4 5",
+  "caffeinate_pid": 1,
+  "pmset_restore": {"disablesleep": "0"},
+  "sudo_used": true,
+  "ticket_suspended": false,
+  "halt_reason": null,
+  "consecutive_failures": 0,
+  "runs_completed": 2
+}
+V1STATE
+cp "${V1_STATE}" "${STATE_FILE}"
+V1_DIGEST=$(cksum <"${STATE_FILE}")
+
+t_eq "a state file with no schema field is v1" 1 "$(state_schema_version)"
+t_eq "and ran on local, the only backend there was when it was written" \
+  local "$(state_runtime_backend)"
+
+# Everything a status-shaped read touches, in one go.
+state_get .mode normal >/dev/null
+state_get .tasks_done_total 0 >/dev/null
+state_get .halt_reason "" >/dev/null
+state_schema_version >/dev/null
+state_runtime_backend >/dev/null
+state_schema_json >/dev/null
+hzl_eval_mode
+t_eq "reading a v1 file does not migrate it" "${V1_DIGEST}" "$(cksum <"${STATE_FILE}")"
+t_eq "and it is still read as a real session state, not refused for its age" \
+  "expired" "$(printf '%s' "${HZ_REASON}" | cut -d' ' -f1)"
+
+# The same file with the fields `hzl on` now writes.
+jq '. + {schema_version: 2, runtime_backend: "local"}' "${V1_STATE}" \
+  >"${STATE_FILE}.next" && mv "${STATE_FILE}.next" "${STATE_FILE}"
+t_eq "a file that carries the field is read at that version" \
+  2 "$(state_schema_version)"
+V2_DIGEST=$(cksum <"${STATE_FILE}")
+state_schema_version >/dev/null
+state_runtime_backend >/dev/null
+t_eq "and reading it does not rewrite it either" \
+  "${V2_DIGEST}" "$(cksum <"${STATE_FILE}")"
+
+# A hand-edited or truncated version field must not become a shell arithmetic
+# error three functions away.
+jq '.schema_version = "banana"' "${V1_STATE}" >"${STATE_FILE}.next" &&
+  mv "${STATE_FILE}.next" "${STATE_FILE}"
+t_eq "a version that is not a number reads as v1 rather than as itself" \
+  1 "$(state_schema_version)"
+
+# A backend key from a build that had more of them: reported, not corrected.
+jq '. + {schema_version: 3, runtime_backend: "herdr"}' "${V1_STATE}" \
+  >"${STATE_FILE}.next" && mv "${STATE_FILE}.next" "${STATE_FILE}"
+t_eq "a newer schema is read for the fields this build knows, not refused" \
+  3 "$(state_schema_version)"
+t_eq "and its backend is reported as it stands" herdr "$(state_runtime_backend)"
+
+# What `hzl status --json` puts in the record. A machine that never ran
+# `hzl on` has no state schema, and reporting 1 would be a claim about a file
+# that does not exist.
+t_eq "a state file has its schema reported as a number" 3 "$(state_schema_json)"
+t_eq "and jq takes that value as a JSON scalar" \
+  '{"schema_version":3}' \
+  "$(jq -c -n --argjson schema_version "$(state_schema_json)" \
+      '{schema_version: $schema_version}')"
+rm -f "${STATE_FILE}"
+t_eq "with no state file at all there is no schema to report" \
+  null "$(state_schema_json)"
+t_eq "which is also a JSON scalar, so the record is still valid JSON" \
+  '{"schema_version":null}' \
+  "$(jq -c -n --argjson schema_version "$(state_schema_json)" \
+      '{schema_version: $schema_version}')"
+
+group 'result.json schema'
+
+# The record exactly as 0.1.6 wrote it, field for field.
+V1_RESULT=${TMPROOT}/v1-result.json
+cat >"${V1_RESULT}" <<'V1RESULT'
+{
+  "engine": "claude",
+  "role": "executor",
+  "model": "claude-opus-5",
+  "effort": "xhigh",
+  "models_used": ["claude-opus-5"],
+  "exit_code": 0,
+  "verdict": "ok",
+  "duration_sec": 34,
+  "session_id": "sess-old",
+  "cost_usd": 0.25,
+  "tokens_in": 11,
+  "tokens_out": 22,
+  "turns": 4,
+  "text": "done"
+}
+V1RESULT
+V1R_DIGEST=$(cksum <"${V1_RESULT}")
+
+t_eq "a result with no schema field is v1" \
+  1 "$(engine_result_schema_version "${V1_RESULT}")"
+t_eq "it ran on local, because nothing else existed to run it" \
+  local "$(engine_result_backend "${V1_RESULT}")"
+t_eq "and its attempt outcome is derived from the verdict it does have" \
+  COLLECTED "$(engine_result_attempt_outcome "${V1_RESULT}")"
+t_eq "reading a v1 result does not rewrite it" \
+  "${V1R_DIGEST}" "$(cksum <"${V1_RESULT}")"
+
+printf '{"verdict":"timeout"}\n' >"${TMPROOT}/v1-timeout.json"
+t_eq "a v1 timeout is read as one" \
+  TIMED_OUT "$(engine_result_attempt_outcome "${TMPROOT}/v1-timeout.json")"
+printf '{"verdict":"auth"}\n' >"${TMPROOT}/v1-auth.json"
+t_eq "so is a v1 auth failure" \
+  AUTH_FAILED "$(engine_result_attempt_outcome "${TMPROOT}/v1-auth.json")"
+printf '{}\n' >"${TMPROOT}/v1-empty.json"
+t_eq "a record with no verdict at all is unknown, not ok" \
+  UNKNOWN "$(engine_result_attempt_outcome "${TMPROOT}/v1-empty.json")"
+
+# The outcome exists so that "the attempt was collected" cannot be read as
+# "the work was right". Nothing in the vocabulary says the latter.
+t_eq "no verdict maps to a value that means the task was done" \
+  "COLLECTED TIMED_OUT AUTH_FAILED FAILED UNKNOWN" \
+  "$(engine_attempt_outcome ok; printf ' '; engine_attempt_outcome timeout
+     printf ' '; engine_attempt_outcome auth; printf ' '
+     engine_attempt_outcome error; printf ' '; engine_attempt_outcome nonsense)"
+
+# What the writer produces now, from the runs already made above.
+t_eq "a v2 result names its schema, its backend and its outcome" \
+  '{"schema_version":2,"backend":"local","runtime_state":"EXITED","attempt_outcome":"COLLECTED","native_exit_code":0}' \
+  "$(jq -c '{schema_version, backend, runtime_state, attempt_outcome,
+             native_exit_code}' "${RUN_CE}/result.json")"
+t_eq "and every v1 field is still exactly where it was" \
+  '{"engine":"claude","role":"executor","model":"test-model","effort":"test-effort","exit_code":0,"verdict":"ok","session_id":"sess-1","cost_usd":0.25,"tokens_in":11,"tokens_out":22,"turns":4}' \
+  "$(jq -c '{engine, role, model, effort, exit_code, verdict, session_id,
+             cost_usd, tokens_in, tokens_out, turns}' "${RUN_CE}/result.json")"
+
+# 124 is the watchdog's number, not the engine's. Reporting it as the process's
+# own status would be a fabrication, and 0 would be a worse one (§13.7).
+t_eq "a run the watchdog ended has no native exit code to report" \
+  '{"exit_code":124,"native_exit_code":null,"attempt_outcome":"TIMED_OUT"}' \
+  "$(jq -c '{exit_code, native_exit_code, attempt_outcome}' \
+      "${RUN_CT}/result.json")"
+t_eq "an engine that failed on its own keeps its own status" \
+  '{"exit_code":3,"native_exit_code":3,"attempt_outcome":"FAILED"}' \
+  "$(jq -c '{exit_code, native_exit_code, attempt_outcome}' \
+      "${RUN_CF}/result.json")"
+t_eq "an auth failure is named as one in the outcome too" \
+  AUTH_FAILED "$(engine_result_attempt_outcome "${RUN_CA}/result.json")"
+
+# A dry run started nothing, and the v2 fields say so rather than reporting a
+# process that never existed.
+t_eq "a dry run reports that nothing was started" \
+  '{"schema_version":2,"backend":"local","runtime_state":"UNKNOWN","native_exit_code":null,"attempt_outcome":"NOT_STARTED","dry_run":true}' \
+  "$(jq -c '{schema_version, backend, runtime_state, native_exit_code,
+             attempt_outcome, dry_run}' "${AR_CE}/result.json")"
+
+# The backend in the record is the one the run was sent to, not a constant.
+engine_normalize_result "${RT_DIR}/launch.json" "${RT_DIR}/collected.json" \
+  "${TMPROOT}/backend-named.json" herdr
+t_eq "the backend written down is the one the caller named" \
+  herdr "$(jq -r '.backend' "${TMPROOT}/backend-named.json")"
+engine_normalize_result "${RT_DIR}/launch.json" "${RT_DIR}/collected.json" \
+  "${TMPROOT}/backend-default.json"
+t_eq "and a caller that names none gets local, as every v1 caller meant" \
+  local "$(jq -r '.backend' "${TMPROOT}/backend-default.json")"
+
 # --- verdict ---------------------------------------------------------------
 
 printf '\n%s passed, %s failed\n' "${PASS}" "${FAIL}"

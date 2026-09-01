@@ -24,8 +24,16 @@
 #   engine_is_auth_error <engine> <rc> <errfile>      -> 0/1
 #   engine_build_launch <engine> <role> <io-mode> <workdir> <promptfile>
 #                       <outdir> <spec.json>
-#   engine_normalize_result <spec.json> <collected.json> <result.json>
+#   engine_attempt_outcome        <verdict>              -> the outcome name
+#   engine_normalize_result <spec.json> <collected.json> <result.json> [backend]
 #   engine_run <engine> <role> <workdir> <promptfile> <outdir> [timeout_sec]
+#
+# and three readers, which accept a result.json from any schema this project
+# has written:
+#
+#   engine_result_schema_version  <result.json>
+#   engine_result_backend         <result.json>
+#   engine_result_attempt_outcome <result.json>
 #
 # engine_run leaves in <outdir>:
 #   raw            the engine's own output (claude: JSON, codex: JSONL)
@@ -233,6 +241,63 @@ engine_verdict() {
   printf ok
 }
 
+# The attempt-level outcome, derived from the same evidence as the verdict and
+# named so that it cannot be mistaken for one.
+#
+# `verdict: ok` has always meant "the attempt ran and its output was collected",
+# and it will keep meaning that — but read at a glance it looks like a statement
+# that the work was right, which no runtime is in a position to make (§8.3: the
+# observation vocabulary deliberately has no `success` in it). So the same
+# judgement is also written down under a name with no such reading, ready for
+# the `workflow_outcome` that Phase 4 puts beside it (§9.3, §13.7). There is no
+# value here that means the task was done.
+#
+# The vocabulary is COLLECTED, TIMED_OUT, AUTH_FAILED, FAILED and UNKNOWN, plus
+# NOT_STARTED for a dry run — which this mapping never produces, because a dry
+# run has no verdict to map from and engine_run writes that one itself.
+engine_attempt_outcome() {
+  case $1 in
+    ok) printf COLLECTED ;;
+    timeout) printf TIMED_OUT ;;
+    auth) printf AUTH_FAILED ;;
+    error) printf FAILED ;;
+    *) printf UNKNOWN ;;
+  esac
+}
+
+# --- reading a result, of either schema ------------------------------------
+#
+# A result.json written before v2 has none of the three new fields. It is read
+# as v1, as having run on `local` — the only backend that existed when it was
+# written — and as an outcome derived from the verdict it does have. None of
+# these open the file for writing: an old record is read where it lies (§13.7).
+
+engine_result_schema_version() {
+  local v
+  v=$(jq -r '.schema_version // 1' "$1" 2>/dev/null)
+  case ${v} in
+    ""|*[!0-9]*) printf 1 ;;
+    *) printf '%s' "${v}" ;;
+  esac
+}
+
+engine_result_backend() {
+  local v
+  v=$(jq -r '.backend // "local"' "$1" 2>/dev/null)
+  [ -n "${v}" ] && [ "${v}" != null ] || v=local
+  printf '%s' "${v}"
+}
+
+engine_result_attempt_outcome() {
+  local v
+  v=$(jq -r '.attempt_outcome // ""' "$1" 2>/dev/null)
+  if [ -n "${v}" ] && [ "${v}" != null ]; then
+    printf '%s' "${v}"
+    return 0
+  fi
+  engine_attempt_outcome "$(jq -r '.verdict // ""' "$1" 2>/dev/null)"
+}
+
 _engine_result_claude() {
   local raw=$1
   # `model` and `effort` are what we asked for; models_used is what actually
@@ -265,11 +330,14 @@ _engine_result_codex() {
 
 # Turn what the runtime collected into the engine-independent result. The
 # engine is read from the launch spec rather than passed again, so the two
-# cannot disagree about which engine produced the output being read.
+# cannot disagree about which engine produced the output being read. The
+# backend is the one argument that cannot be read back out of either file: it
+# is the caller's choice of where this ran, and it defaults to `local` for the
+# three-argument callers that predate the field.
 engine_normalize_result() {
-  local spec=$1 collected=$2 result=$3
+  local spec=$1 collected=$2 result=$3 backend=${4:-local}
   local engine role model effort rc duration rawfile errfile lastfile
-  local parsed="" verdict
+  local parsed="" verdict outcome native
 
   engine=$(jq -r '.engine' "${spec}" 2>/dev/null) || return 1
   role=$(jq -r '.role' "${spec}")
@@ -295,21 +363,50 @@ engine_normalize_result() {
   [ -n "${parsed}" ] || parsed='{}'
 
   verdict=$(engine_verdict "${engine}" "${rc}" "${errfile}" "${rawfile}")
+  outcome=$(engine_attempt_outcome "${verdict}")
 
+  # 124, 137 and 125 are Heinzel's own codes, not the command's (SPEC §9.3):
+  # the watchdog ended it, or refused to start it. `exit_code` keeps carrying
+  # them because a decade of readers expect a number there, and
+  # `native_exit_code` says plainly that the process's own status is not known.
+  # The same field is null for a backend whose agent settles without a process
+  # exit at all, which is the case it exists for (§13.7).
+  case ${rc} in
+    124|137|125) native=null ;;
+    *) native=${rc} ;;
+  esac
+
+  # v2. Every v1 field is still here, in the same place, with the same meaning:
+  # the four additions are additions, and a reader that knows only v1 cannot
+  # tell the difference (§13.7).
+  #
+  # `runtime_state` is `EXITED` for every batch run, whatever the backend: the
+  # batch contract is run-to-completion, so a collected record existing at all
+  # is the observation that the process terminated. The states that are not
+  # `EXITED` — `SETTLED`, `LOST`, `UNREACHABLE` (§9.1) — belong to an agent that
+  # outlives the call that started it, and arrive with the backend that has one.
   jq -n \
+    --argjson schema_version "${HEINZEL_RESULT_SCHEMA}" \
+    --arg backend "${backend}" \
     --arg engine "${engine}" --arg role "${role}" \
     --arg model "${model}" --arg effort "${effort}" \
     --argjson exit_code "${rc}" --arg verdict "${verdict}" \
+    --argjson native_exit_code "${native}" \
+    --arg attempt_outcome "${outcome}" \
     --argjson duration_sec "${duration}" \
     --argjson parsed "${parsed}" \
     --rawfile text "${lastfile}" \
-    '{engine: $engine, role: $role, model: $model, effort: $effort,
+    '{schema_version: $schema_version,
+      engine: $engine, role: $role, model: $model, effort: $effort,
       models_used: ($parsed.models_used // []),
       exit_code: $exit_code, verdict: $verdict, duration_sec: $duration_sec,
       session_id: ($parsed.session_id // null),
       cost_usd: ($parsed.cost_usd // null),
       tokens_in: ($parsed.tokens_in // 0), tokens_out: ($parsed.tokens_out // 0),
-      turns: ($parsed.turns // 0), text: $text}' >"${result}.tmp" || return 1
+      turns: ($parsed.turns // 0), text: $text,
+      backend: $backend, runtime_state: "EXITED",
+      native_exit_code: $native_exit_code,
+      attempt_outcome: $attempt_outcome}' >"${result}.tmp" || return 1
   mv "${result}.tmp" "${result}"
 }
 
@@ -339,9 +436,19 @@ engine_run() {
 
   if [ "${HEINZEL_DRY_RUN:-0}" = 1 ]; then
     engine_render_launch "${spec}" >"${outdir}/dry-run.cmd" || return 1
+    # A dry run is a result.json of the same schema saying that nothing ran.
+    # The v1 fields keep the shape a reader expects — `verdict: ok`, exit 0 —
+    # and the v2 ones refuse to pretend: no process, so no native status, no
+    # runtime state anyone observed, and nothing collected.
     jq -n --arg engine "${engine}" --arg role "${role}" \
-       '{engine: $engine, role: $role, verdict: "ok", exit_code: 0,
-         dry_run: true, duration_sec: 0, text: ""}' >"${outdir}/result.json"
+       --argjson schema_version "${HEINZEL_RESULT_SCHEMA}" \
+       --arg backend "${backend}" \
+       '{schema_version: $schema_version,
+         engine: $engine, role: $role, verdict: "ok", exit_code: 0,
+         dry_run: true, duration_sec: 0, text: "",
+         backend: $backend, runtime_state: "UNKNOWN",
+         native_exit_code: null, attempt_outcome: "NOT_STARTED"}' \
+       >"${outdir}/result.json"
     return 0
   fi
 
@@ -367,8 +474,8 @@ engine_run() {
   # there is nothing to normalise, and its failure is the caller's answer.
   [ -r "${collected}" ] || return 1
 
-  engine_normalize_result "${spec}" "${collected}" "${outdir}/result.json" ||
-    return 1
+  engine_normalize_result "${spec}" "${collected}" "${outdir}/result.json" \
+    "${backend}" || return 1
 
   return "${rc}"
 }

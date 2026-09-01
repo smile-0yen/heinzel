@@ -146,6 +146,8 @@ Mode 0600. Written by validating with `jq` and replacing with `mv`. Writers are
 
 | Field | Type | Meaning | Written by |
 |---|---|---|---|
+| `schema_version` | number | `2`. **Absent means 1**: the file predates the field | on |
+| `runtime_backend` | string | The backend this session's runs go to. **Absent means `local`** | on |
 | `mode` | string | `"heinzel"` / `"normal"`. **Alone this does not mean a session is live** (§5) | on / off |
 | `activated_at`, `activated_at_epoch` | string, number | Start time, both forms | on |
 | `expires_at`, `expires_at_epoch` | string, number | TTL. `now >= expires_at_epoch` ⇒ normal | on |
@@ -168,6 +170,23 @@ Mode 0600. Written by validating with `jq` and replacing with `mv`. Writers are
 > **Normative: `state_get` must not use jq's `//` operator.** `false // $default`
 > yields the default, so every boolean field would read as its default. The
 > implementation uses `.k as $v | if $v == null then $d else $v end`.
+
+> **Normative: reading the state file never writes it.** A file with no
+> `schema_version` is v1 and is read as v1, in place. `status` and `doctor`
+> report the version they found; neither repairs it, and neither does anything
+> else that only reads. A read that migrated would make a rollback to the
+> previous build unreadable, for a field it did no more than print. The schema
+> is rewritten only by an explicit `hzl on`, which writes the whole file anyway
+> (`docs/RUNTIME-BACKENDS.md` §14.1).
+>
+> A `schema_version` higher than this build's is read for the fields this build
+> knows rather than refused: the versioning is additive, so an unknown version
+> is not an unreadable file. Resuming an *active durable run* across a rollback
+> is a different question, and is not supported.
+
+`HEINZEL_RUNTIME` names the session's backend at `hzl on` time and is recorded
+there. A key the registry does not know fails `hzl on`, rather than being
+written into a session whose every run then aborts at 03:00.
 
 > **Normative: `workdir` and `backlog` are read from `state.json` only while a
 > session is live.** With no session the configuration file is authoritative.
@@ -406,8 +425,17 @@ engine_auth_ok       <engine>                      -> 0/1
 engine_is_auth_error <engine> <rc> <errfile>       -> 0/1
 engine_build_launch  <engine> <role> <io-mode> <workdir> <promptfile>
                      <outdir> <spec.json>
-engine_normalize_result <spec.json> <collected.json> <result.json>
+engine_attempt_outcome        <verdict>            -> the outcome name
+engine_normalize_result <spec.json> <collected.json> <result.json> [backend]
 engine_run <engine> <role> <workdir> <promptfile> <outdir> [timeout_sec]
+```
+
+and three readers that accept a `result.json` of either schema:
+
+```
+engine_result_schema_version  <result.json>        -> 1 when absent
+engine_result_backend         <result.json>        -> local when absent
+engine_result_attempt_outcome <result.json>        -> derived from the verdict
 ```
 
 `engine_run` is the compatibility facade the runner calls; inside, it is the
@@ -448,13 +476,17 @@ those same paths. The runner reads none of the three.
 
 ```json
 {
+  "schema_version": 2,
   "engine": "claude", "role": "executor",
   "model": "claude-opus-5", "effort": "xhigh",
   "models_used": [],
   "exit_code": 0, "verdict": "ok|timeout|error|auth",
   "duration_sec": 34, "session_id": "…",
   "cost_usd": null, "tokens_in": 0, "tokens_out": 0, "turns": 0,
-  "text": "…"
+  "text": "…",
+  "backend": "local", "runtime_state": "EXITED",
+  "native_exit_code": 0,
+  "attempt_outcome": "COLLECTED|TIMED_OUT|AUTH_FAILED|FAILED|UNKNOWN|NOT_STARTED"
 }
 ```
 
@@ -465,6 +497,37 @@ for codex, which has no USD telemetry.
 
 Verdict order: `rc ∈ {124,137}` → `timeout`; auth pattern matches → `auth`;
 `rc ≠ 0` → `error`; `is_error == true` → `error`; otherwise `ok`.
+
+Everything from `engine` to `text` is v1 and is unchanged in v2, in place and
+in meaning. The five below it are the additions (`docs/RUNTIME-BACKENDS.md`
+§13.7):
+
+| Field | Meaning |
+|---|---|
+| `schema_version` | `2`. **Absent means 1** |
+| `backend` | Where it ran. **Absent means `local`**, the only backend that existed when a v1 record was written |
+| `runtime_state` | `EXITED` for every batch run, whatever the backend: a collected record existing at all *is* the observation that the process terminated. `SETTLED`, `LOST` and `UNREACHABLE` (§9.1 of the design) belong to an agent that outlives the call that started it |
+| `native_exit_code` | The process's own status, or `null` when there is none to report: `124`, `137` and `125` are Heinzel's numbers, not the command's |
+| `attempt_outcome` | The same judgement as `verdict`, under a name that cannot be read as a claim about the work |
+
+> **Normative: no `attempt_outcome` value means the task was done.** A runtime
+> can say that an attempt was collected; it cannot say the work was right —
+> which is why the observation vocabulary has no `success` in it either. The
+> verdict `ok` has always meant the narrower thing, but reads like the wider
+> one, so the narrower thing is also written down under a name with no such
+> reading. `workflow_outcome`, the field that *does* judge the work, arrives in
+> Phase 4 and is a separate field. Mapping: `ok` → `COLLECTED`, `timeout` →
+> `TIMED_OUT`, `auth` → `AUTH_FAILED`, `error` → `FAILED`, anything else →
+> `UNKNOWN`. A dry run writes `NOT_STARTED`, `runtime_state: UNKNOWN` and a
+> null `native_exit_code`: nothing ran, and the record does not pretend one did.
+
+> **Normative: reading a `result.json` never rewrites it.** A v1 record is read
+> as v1 — schema 1, backend `local`, outcome derived from the verdict it does
+> have — through `engine_result_*`. Old runs stay readable in the log tree.
+
+The run record in `runs.jsonl` gains the same three facts additively:
+`schema_version: 2`, `backend`, `attempt_outcome`. Its `result` field keeps its
+old meaning — legacy runner completion — and rows stay append-only.
 
 ### 9.2 Authentication failure detection is per engine (normative)
 
@@ -536,6 +599,7 @@ JSON is `failed`, never a guess parsed from prose.
 
 ```json
 {
+  "schema_version": 2,
   "run_id": "20260829-211419", "trigger": "launchd|manual",
   "started_at": "…", "started_at_epoch": 0, "ended_at": "…", "duration_sec": 0,
   "result": "ok|timeout|error|auth", "exit_code": 0,
@@ -543,6 +607,7 @@ JSON is `failed`, never a guess parsed from prose.
   "tasks_done_total": 0, "max_tasks_total": 3,
   "todo_before": 0, "todo_after": 0,
   "worksheet": {"size": 0, "done": 0, "blocked": 0, "new": 0, "ignored": 0},
+  "backend": "local", "attempt_outcome": "COLLECTED",
   "engine": "claude", "model": "…", "effort": "…", "models_used": [],
   "session_id": "…", "cost_usd": 0.0, "turns": 0,
   "tokens_in": 0, "tokens_out": 0,
@@ -556,7 +621,11 @@ JSON is `failed`, never a guess parsed from prose.
 }
 ```
 
-Trimmed to the last 2000 lines after each run.
+Trimmed to the last 2000 lines after each run. Rows are append-only and grow
+additively: `schema_version`, `backend` and `attempt_outcome` are v2 and a row
+without them is v1. `result` keeps its old meaning — legacy runner completion —
+and `workflow_outcome`, which a new consumer must read instead, arrives with
+Phase 4 (`docs/RUNTIME-BACKENDS.md` §13.7).
 
 > A consumer reading the last line must validate it before use: a line torn by
 > a concurrent append, passed to `jq --argjson`, makes jq print a parse error to

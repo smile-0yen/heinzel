@@ -11,11 +11,28 @@
 # Multibyte truncation is locale-dependent (DESIGN 6.3). Fix it once, here.
 export LC_CTYPE=UTF-8
 
-HEINZEL_VERSION="0.1.6"
+HEINZEL_VERSION="0.2.0"
 
 # The TTL ceiling is deliberately not configurable. A session that can be
 # created with an unbounded lifetime is not a session, it is a mode.
 MAX_DURATION_SEC=86400
+
+# --- record schemas --------------------------------------------------------
+#
+# The three records that outlive a run and are read by something other than the
+# code that wrote them (docs/RUNTIME-BACKENDS.md §13.7, §14.1). Versioning them
+# is additive in both directions, and the two halves of that are what make it
+# worth anything:
+#
+#   * a v2 writer keeps every v1 field, so a reader that never heard of the
+#     version keeps working;
+#   * a reader that finds no version field at all is looking at v1, and reads it
+#     where it lies. Nothing migrates a file on the way past. `hzl status` is
+#     read-only, and a status command that rewrote the state file would make a
+#     rollback to the previous build unreadable — for a field it only printed.
+HEINZEL_STATE_SCHEMA=2
+HEINZEL_RESULT_SCHEMA=2
+HEINZEL_RUN_RECORD_SCHEMA=2
 
 # --- paths -----------------------------------------------------------------
 
@@ -404,6 +421,42 @@ state_update() {
   fi
   rm -f "${tmp}"
   return 1
+}
+
+# Which schema wrote the state file. There was no field before v2, so a file
+# that has none is v1 — and one written by a later build than this one is read
+# for the fields this build knows rather than refused: the fields are additive,
+# so an unknown version is not an unreadable file (§14.1).
+state_schema_version() {
+  local v
+  v=$(state_get .schema_version 1)
+  case ${v} in
+    ""|*[!0-9]*) printf 1 ;;
+    *) printf '%s' "${v}" ;;
+  esac
+}
+
+# The same value as a JSON scalar, for the records that report it: a number
+# when there is a file to have a schema, and null when there is none. A machine
+# that never ran `hzl on` has no state schema, and saying `1` there would be a
+# claim about a file that does not exist.
+state_schema_json() {
+  if [ -r "${STATE_FILE}" ]; then
+    state_schema_version
+  else
+    printf null
+  fi
+}
+
+# The runtime backend this session's runs go to. Everything written before the
+# field existed ran on `local`, which is exactly what an absent value means.
+state_runtime_backend() {
+  local v
+  v=$(state_get .runtime_backend "")
+  case ${v} in
+    ""|null) printf local ;;
+    *) printf '%s' "${v}" ;;
+  esac
 }
 
 state_write() {
