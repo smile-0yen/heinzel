@@ -54,6 +54,8 @@ mkdir -p "${HEINZEL_HOME}"
 . "${TEST_ROOT}/lib/runstore.sh"
 # shellcheck source=../lib/claims.sh
 . "${TEST_ROOT}/lib/claims.sh"
+# shellcheck source=../lib/locks.sh
+. "${TEST_ROOT}/lib/locks.sh"
 
 # Read back what common.sh actually resolved, through `:-` so that a state path
 # it failed to define reads as empty and is refused rather than skipped. If
@@ -1444,6 +1446,152 @@ t_eq "the legacy blanket reset still returns every marker it finds" \
   1 "$(backlog_reset_inprogress "${CL_LEDGER}")"
 t_eq "including the one no rollback would have scoped to a run" \
   " " "$(backlog_marker_of_id "${CL_LEDGER}" h-0012)"
+
+# --- locks and the workspace writer lease -----------------------------------
+#
+# The one global `run.lock` said three things at once: another runner is
+# running, the ledger is being written, and this checkout has a writer. Here
+# they are three (§14.3). Everything below is about who may take what, and what
+# happens to what a dead process was holding.
+
+group 'lock names and paths'
+
+t_eq "a lock file is under HEINZEL_HOME, where the agent cannot write it" \
+  "${HEINZEL_HOME}/locks/backlog.lock" "$(lock_file backlog)"
+lock_file "../../escape" 2>/dev/null
+t_fails "a lock name that is not a name is refused, not turned into a path" "$?"
+
+group 'the short backlog lock'
+
+lock_acquire "${LOCK_BACKLOG}" 0
+t_ok "the lock is taken" "$?"
+t_eq "and names the process holding it" "$$" "$(lock_holder "${LOCK_BACKLOG}")"
+
+lock_release "${LOCK_BACKLOG}"
+t_ok "the holder can release it" "$?"
+t_eq "and then nobody holds it" "" "$(lock_holder "${LOCK_BACKLOG}")"
+
+# A command run under the lock, and the lock gone afterwards: the point of the
+# short lock is that it is short. `lock_with` runs the command in this shell, so
+# a shell function can be the critical section - which is the reason this is not
+# `lockf`, which can only wrap a command it execs.
+LK_TOUCHED=${TMPROOT}/lock-witness
+touched_under_lock() { printf '%s' "$(lock_holder "${LOCK_BACKLOG}")" >"${LK_TOUCHED}"; }
+lock_with "${LOCK_BACKLOG}" 0 touched_under_lock
+t_ok "lock_with runs its command" "$?"
+t_eq "which ran while the lock was held" "$$" "$(cat "${LK_TOUCHED}")"
+t_eq "and the lock is released when it returns" "" "$(lock_holder "${LOCK_BACKLOG}")"
+
+lock_with "${LOCK_BACKLOG}" 0 false
+t_status "lock_with returns its command's status, not its own" 1 "$?"
+
+# A live holder that is not us. A real second process, because a pid that is
+# merely a number would not answer the only question that matters here.
+sleep 30 &
+LK_LIVE=$!
+LK_FILE=$(lock_file "${LOCK_BACKLOG}")
+_lock_take "${LK_FILE}" "$(jq -c -n --argjson pid "${LK_LIVE}" \
+  --arg acquired_at "$(iso_at)" \
+  '{schema_version: 1, name: "backlog", pid: $pid, acquired_at: $acquired_at}')"
+t_ok "another process takes the lock" "$?"
+
+lock_acquire "${LOCK_BACKLOG}" 0
+t_fails "a lock that is held is not taken" "$?"
+lock_release "${LOCK_BACKLOG}"
+t_fails "and cannot be released by anyone but its holder" "$?"
+lock_reclaim "${LOCK_BACKLOG}" >/dev/null
+t_fails "a live holder is never reclaimed, however long it has been holding" "$?"
+t_eq "so it is still holding it" "${LK_LIVE}" "$(lock_holder "${LOCK_BACKLOG}")"
+
+lock_with "${LOCK_BACKLOG}" 0 touched_under_lock
+t_status "lock_with reports EX_TEMPFAIL, the same 75 lockf reports" 75 "$?"
+
+# The holder dies without releasing. `wait` reaps it: a zombie still answers
+# `kill -0`, so a test that skipped this would be asserting against a pid that
+# reads as alive.
+kill "${LK_LIVE}" 2>/dev/null
+wait "${LK_LIVE}" 2>/dev/null
+t_eq "the dead holder's lock is reclaimed, and names whose it was" \
+  "${LK_LIVE}" "$(lock_reclaim "${LOCK_BACKLOG}")"
+t_eq "so nobody holds it" "" "$(lock_holder "${LOCK_BACKLOG}")"
+lock_acquire "${LOCK_BACKLOG}" 0
+t_ok "and it can be taken again" "$?"
+lock_release "${LOCK_BACKLOG}"
+
+group 'the workspace writer lease'
+
+# One writer per checkout (§14.3, invariant 13). Two runs on one working tree
+# are two writers in it, whatever else is different about them.
+LS_ID=${CL_ID}
+LS_ID2=${CL_ID2}
+LS_A=r-20260902T010000-aaaaaa
+LS_B=r-20260902T011000-bbbbbb
+
+sleep 30 &
+LS_LIVE=$!
+
+t_eq "a lease lives under HEINZEL_HOME too" \
+  "${HEINZEL_HOME}/workspace-leases/$(claims_workspace_hash "${LS_ID}").json" \
+  "$(lease_file "${LS_ID}")"
+
+lease_acquire "${LS_ID}" "${LS_A}" "${LS_LIVE}"
+t_ok "the first run takes the writer lease" "$?"
+t_eq "and is recorded as holding it" "${LS_A}" "$(lease_holder "${LS_ID}")"
+t_eq "with the process that holds it" "${LS_LIVE}" "$(lease_pid "${LS_ID}")"
+t_eq "at generation 1" 1 "$(lease_generation "${LS_ID}")"
+t_eq "in a file only its owner can read" \
+  600 "$(stat -f '%Lp' "$(lease_file "${LS_ID}")" 2>/dev/null)"
+
+# The acceptance test: two runs, one working directory, one lease.
+lease_acquire "${LS_ID}" "${LS_B}" "$$"
+t_fails "a second run on the same workdir is refused the lease" "$?"
+t_eq "and the first run still holds it" "${LS_A}" "$(lease_holder "${LS_ID}")"
+lease_release "${LS_ID}" "${LS_B}"
+t_fails "a run cannot release a lease it does not hold" "$?"
+lease_renew "${LS_ID}" "${LS_B}"
+t_fails "nor renew one" "$?"
+
+lease_acquire "${LS_ID2}" "${LS_B}" "$$"
+t_ok "another checkout is another lease, and free" "$?"
+t_eq "which leaves the first exactly where it was" \
+  "${LS_A}" "$(lease_holder "${LS_ID}")"
+
+lease_acquire "${LS_ID}" "${LS_A}" "${LS_LIVE}"
+t_ok "the holder retaking its own lease is not a conflict" "$?"
+t_eq "and the fencing generation moves on" 2 "$(lease_generation "${LS_ID}")"
+
+lease_renew "${LS_ID}" "${LS_A}"
+t_ok "the holder renews it" "$?"
+t_eq "which is a heartbeat, so the generation does not move" \
+  2 "$(lease_generation "${LS_ID}")"
+
+lease_reclaim "${LS_ID}" >/dev/null
+t_fails "a lease whose holder is alive is not reclaimed" "$?"
+t_eq "so the checkout still has its writer" "${LS_A}" "$(lease_holder "${LS_ID}")"
+
+# The killed run: the lease outlives the process on purpose, because a
+# controller that died still owns the checkout until something confirms it
+# stopped. Recovering it is a deliberate act, and it names the run it took it
+# from.
+kill "${LS_LIVE}" 2>/dev/null
+wait "${LS_LIVE}" 2>/dev/null
+t_eq "a lease left by a dead run is recoverable, and says whose it was" \
+  "${LS_A}" "$(lease_reclaim "${LS_ID}")"
+t_eq "so the checkout has no writer" "" "$(lease_holder "${LS_ID}")"
+
+lease_acquire "${LS_ID}" "${LS_B}" "$$"
+t_ok "and the next run can take it" "$?"
+t_eq "at a generation past the one that was fenced out" \
+  3 "$(lease_generation "${LS_ID}")"
+lease_release "${LS_ID}" "${LS_B}"
+t_ok "the holder releases it" "$?"
+t_eq "leaving nobody holding it" "" "$(lease_holder "${LS_ID}")"
+# The counter is the workspace's, not the lease's: a counter that reset when the
+# lease went would hand the next run a generation that had already been issued.
+lease_acquire "${LS_ID}" "${LS_A}" "$$"
+t_eq "the generation still only goes up, across a release" \
+  4 "$(lease_generation "${LS_ID}")"
+lease_release "${LS_ID}" "${LS_A}"
 
 # --- verdict ---------------------------------------------------------------
 

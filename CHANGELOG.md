@@ -6,6 +6,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-09-02
+
+### Added
+- **`lib/locks.sh`: the one global lock comes apart into three**
+  (`docs/RUNTIME-BACKENDS.md` §14.3). `run.lock` has been saying three things at
+  once — *another runner is running*, *the ledger is being written*, and *this
+  checkout has a writer*. That is fine while there is exactly one synchronous
+  run; it stops being fine as soon as a run outlives the process that started
+  it. So: a **backlog lock** held around one ledger mutation and released
+  immediately, a **per-run lock** so that one run has one advancer, and a
+  **writer lease** per `workspace_identity`, durable and carrying a fencing
+  generation.
+- **The writer lease, in the runner.** Taken between gates 7 and 8, before
+  anything is written; released by the EXIT trap, last and after the engine has
+  been signalled to stop — a lease released while its writer is still running
+  would let the next run into a working directory that has one. A workspace held
+  by a live run is a `skip` naming the run that holds it.
+- **A lease left by a dead run is recoverable, and a lease held by a live one is
+  not.** Recovery is by exactly one rule — the holding pid is not alive — and it
+  is a deliberate call that names the run it took the lease from, never a side
+  effect of somebody wanting the lease. The runner does it on the way in, the
+  way it already recovers stale claims. The test kills a real holding process
+  and reaps it first, because a zombie still answers `kill -0`.
+- **A fencing generation that only goes up**, per workspace rather than per
+  lease, so it survives the lease being released or broken. A counter that reset
+  would hand the run taking over a number that had already been issued, and the
+  two holders would be indistinguishable. Retaking your own lease moves it on; a
+  renewal is a heartbeat and does not, because a renewal that bumped it would
+  fence the holder out of its own lease.
+
+### Changed
+- Locks and leases are created by an atomic create — the record written whole
+  into a temp file beside the target, then `ln`, which fails if the target
+  exists — and never by an overwrite. There is no moment when a lock exists
+  without naming its holder. This is deliberately not `lockf(1)`: lockf holds
+  its lock for the lifetime of a command it *execs*, and every section being
+  guarded here is a shell function in the calling process. Gate 1 is still
+  lockf and is unchanged.
+
+### Not in this change
+- **Gate 1 stays.** The backlog lock has no callers yet: putting every ledger
+  and session mutation in `hzl-run` and `hzl` under it is what lets the global
+  `run.lock` go, and that is the next task. Until then nothing is less protected
+  than it was — the global lock still covers the whole run, and the lease and
+  the per-run lock are held underneath it.
+- The runner's own lease wiring is checked by `bash -n` and by the unit tests of
+  the primitives it calls. Running `bin/hzl-run` end to end against a temporary
+  `HEINZEL_HOME` was refused by the sandbox this run worked under, so the
+  ordering — reclaim, acquire, release from the trap — is read and not observed.
+
 ## [0.2.2] - 2026-09-02
 
 ### Added

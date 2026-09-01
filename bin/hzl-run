@@ -43,6 +43,8 @@ export HOME="${HOME:-$(cd ~ && pwd)}"
 . "${HEINZEL_ROOT}/lib/runstore.sh"
 # shellcheck source=lib/claims.sh
 . "${HEINZEL_ROOT}/lib/claims.sh"
+# shellcheck source=lib/locks.sh
+. "${HEINZEL_ROOT}/lib/locks.sh"
 # shellcheck source=lib/runtimes.sh
 . "${HEINZEL_ROOT}/lib/runtimes.sh"
 # shellcheck source=lib/engines.sh
@@ -148,6 +150,15 @@ cleanup() {
   fi
   if [ -n "${HEINZEL_ENGINE_PID:-}" ] && pid_alive "${HEINZEL_ENGINE_PID}"; then
     hzl_signal_tree TERM "${HEINZEL_ENGINE_PID}"
+  fi
+  # Ownership goes last, and after the engine has been told to stop: a lease
+  # released while the writer it stands for is still running would let the next
+  # run into a working directory that has one (§14.3, invariant 14).
+  if [ -n "${LEASE_HELD:-}" ]; then
+    lease_release "${WS_IDENTITY}" "${STORE_RUN_ID}" >/dev/null 2>&1
+  fi
+  if [ -n "${RUN_LOCK_HELD:-}" ]; then
+    lock_release "${RUN_LOCK_NAME}" >/dev/null 2>&1
   fi
   rm -f "${RUN_PID_FILE}"
   exit ${rc}
@@ -287,14 +298,50 @@ jq -e . "${SETTINGS}" >/dev/null 2>&1 ||
 grep -q '__[A-Z_]*__' "${SETTINGS}" &&
   abort "${SETTINGS} still contains placeholders - run 'hzl install'"
 
+# --- ownership: the writer lease and this run's own lock -------------------
+# The working directory takes one writer at a time (§14.3, invariant 13). The
+# global `run.lock` of gate 1 says that too, but only for two runners under one
+# `HEINZEL_HOME` and only for as long as this process lives; the lease says it
+# about the checkout, it names the run holding it, and it survives the process,
+# because a run that was killed still owns the working directory until something
+# confirms it stopped.
+#
+# A lease left by a run that is gone is recovered here, on the way in, the same
+# way stale claims are below: deliberately, and named in the log rather than
+# taken silently by whoever wanted it next.
+WS_IDENTITY=$(claims_workspace_identity "${WORKDIR}")
+LEASE_HELD=""
+if [ -n "${WS_IDENTITY}" ]; then
+  RECOVERED=$(lease_reclaim "${WS_IDENTITY}")
+  [ -n "${RECOVERED}" ] &&
+    log_event skip "recovered the writer lease left by run ${RECOVERED}"
+  if lease_acquire "${WS_IDENTITY}" "${STORE_RUN_ID}"; then
+    LEASE_HELD=1
+  else
+    skip "another run holds the writer lease on ${WORKDIR} (run $(lease_holder "${WS_IDENTITY}"))"
+  fi
+fi
+
+# One run, one advancer. A run id is new every time, so nothing can be holding
+# this one and the lock cannot be refused by another run — it is refused by a
+# filesystem that will not take the file, and a run that could not take the lock
+# on itself does not advance. It becomes contended when something other than
+# this process can move a run forward.
+RUN_LOCK_NAME="run-${STORE_RUN_ID}"
+RUN_LOCK_HELD=""
+if lock_acquire "${RUN_LOCK_NAME}" 0; then
+  RUN_LOCK_HELD=1
+else
+  skip "could not take the lock for run ${STORE_RUN_ID}"
+fi
+
 # --- claims left behind ----------------------------------------------------
 # A run that was killed left its claims in `HEINZEL_HOME`, where nothing it ran
-# could have tidied them. Gate 1 means no other runner is running while this one
-# holds the lock, so every claim standing here belongs to a run that has
+# could have tidied them. The writer lease above means no other run is working
+# this checkout, so every claim standing here belongs to a run that has
 # stopped — but each is still released under its own run id, one run at a time.
 # That is what makes a release attributable, and what stays correct when the
 # lock stops covering the whole run (§13.4, §14.3).
-WS_IDENTITY=$(claims_workspace_identity "${WORKDIR}")
 CLAIMS_READY=""
 if [ -n "${WS_IDENTITY}" ]; then
   CLAIMS_READY=1

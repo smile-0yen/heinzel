@@ -597,6 +597,7 @@ heinzel/
 ├── lib/runtimes/local.sh  starts a process on this machine, under the watchdog
 ├── lib/runstore.sh      one durable directory per run, where the agent cannot reach
 ├── lib/claims.sh        run-scoped task claims; the ledger's [~] is their display
+├── lib/locks.sh         backlog lock, per-run lock, one writer lease per checkout
 ├── lib/watchdog.sh      hzl_timeout (§6.1)
 ├── etc/heinzel.conf              the tuning surface
 ├── etc/heinzel-settings.json     deny/allow for the unattended agent
@@ -610,6 +611,8 @@ heinzel/
 ~/.heinzel/              mutable state — outside the agent's reach, denied twice
 ├── state.json           session state, 0600
 ├── run.lock / run.pid / caffeinate.pid
+├── locks/{backlog.lock, run-<run-id>.lock}
+├── workspace-leases/<workspace-hash>.{json,generation}
 └── logs/{runner.log, runs.jsonl, launchd.{out,err}, <YYYY-MM-DD>/…}
 ```
 
