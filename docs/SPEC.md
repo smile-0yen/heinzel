@@ -757,6 +757,22 @@ provenance and `runs.jsonl` are written in. The store records it as
 > runner log. Nothing reads the store to decide anything yet — recovery,
 > claims and the workflow state machine are later tasks in Phase 2.
 
+> **Normative: only a run that ended is swept.** `runstore_prune [days]` keeps
+> a store for `LOG_RETENTION_DAYS` after it was last touched, the same window
+> the log tree keeps, and runs at the end of a run beside the log prune. Three
+> separate things stop a directory being removed, and each is checked on its
+> own: the **shape** — only `r-<stamp>-<suffix>`, so a directory a human left
+> under `runs/` is not housekeeping's to delete; the **state** — only `ended`,
+> because everything from `queued` to `merging` is a run that is still working
+> and `interrupted` is a run that stopped without settling, both of which
+> `docs/RUNTIME-BACKENDS.md` §14.7 counts as active; and the **commit** — a run
+> holding a `finalize.intent.json` with no receipt beside it stays whatever its
+> snapshot says, because that intent is the only record that a ledger transition
+> may not have happened. A store with no readable snapshot is kept too: a run
+> that cannot be shown to have ended has not been shown to have ended. The path
+> handed to `rm -rf` is rebuilt from the validated id rather than taken from
+> `find`.
+
 Events carry `{schema_version, at, kind, message}`. Kinds so far: `run.queued`,
 `engine.started`, `engine.ended`, `worksheet.merged`, `run.ended`, and
 `run.interrupted` — written by the EXIT trap when the runner stopped before the
@@ -953,7 +969,7 @@ the review and model keys, which are environment > conf > default so that
 | `HEINZEL_REVIEW_MAX_PATCH_BYTES` | `200000` | ≥ 1 |
 | `HEINZEL_POSTURE` | `0` | `0\|1` |
 | `HEINZEL_LABEL` | `local.heinzel` | launchd label |
-| `LOG_RETENTION_DAYS` | `14` | ≥ 1 |
+| `LOG_RETENTION_DAYS` | `14` | ≥ 1. The day directories under `logs/` **and** the per-run stores under `runs/` (§11.1) — one window, because the two are halves of one record |
 
 Environment-only: `HEINZEL_HOME` (relocate state), `HEINZEL_DEBUG=1` (log
 no-ops), `HEINZEL_DRY_RUN=1` (record the command, do not run it),

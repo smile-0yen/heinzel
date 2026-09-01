@@ -20,12 +20,14 @@
 #
 #   runstore_new_id                             -> a sortable run id
 #   runstore_dir      <run-id>                  -> the path, or a refusal
+#   runstore_is_run_id <name>                   -> is this a store, or something else
 #   runstore_init     <run-id>                  -> creates it
 #   runstore_snapshot <run-id> <json>           -> replaces workflow.json
 #   runstore_read     <run-id>                  -> the snapshot on stdout
 #   runstore_runner_state <run-id>              -> what is true, not what it says
 #   runstore_event    <run-id> <kind> [message] -> appends one line
 #   runstore_runs                               -> the run ids, oldest first
+#   runstore_prune    [days]                    -> sweeps ended runs, prints them
 #
 # The store is additive to everything that was already written: the day log,
 # `runs.jsonl`, the notes and the exec directory are untouched and still hold
@@ -78,6 +80,18 @@ runstore_dir() {
       ;;
   esac
   printf '%s/runs/%s' "${HEINZEL_HOME}" "${id}"
+}
+
+# Is this name a run store, or something else that happens to be under `runs/`?
+# The shape is the one `runstore_new_id` writes and nothing else, checked
+# literally rather than by prefix: `runs/*` is a wildcard, and a wildcard is how
+# a directory a human put there gets deleted by housekeeping.
+runstore_is_run_id() { # name
+  case $1 in
+    r-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]-[a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9])
+      return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 runstore_init() {
@@ -175,4 +189,63 @@ runstore_runs() {
     d=${d%/}
     printf '%s\n' "${d##*/}"
   done | sort
+}
+
+# --- retention --------------------------------------------------------------
+#
+# One directory per run, and a run every night, is a directory that grows for as
+# long as Heinzel is installed. The log tree has had a prune since the beginning
+# and this store had no counterpart to it (§14.7).
+
+# A run whose ledger commit is unrecorded: an intent saved, and no receipt
+# saying it was applied. `lib/finalize.sh` writes those two files and is where
+# they are explained; the names are known here as well, on purpose, so that the
+# question "is it safe to delete this" can be answered without the finalize
+# layer being loaded. An intent with no receipt is the only record that a ledger
+# transition may not have happened, and the next run reads it.
+_runstore_commit_pending() { # run-id
+  local dir
+  dir=$(runstore_dir "$1" 2>/dev/null) || return 1
+  [ -e "${dir}/finalize.intent.json" ] || return 1
+  [ -e "${dir}/finalize.receipt.json" ] && return 1
+  return 0
+}
+
+# Sweep the stores of runs that have ended and have not been touched for `days`
+# days — by default the same window the log tree keeps, because the two are
+# halves of one record and a reader holding one without the other is worse off
+# than a reader with neither. Prints the ids it removed, one per line.
+#
+# Three separate things stop a directory being swept:
+#
+#   the shape   only `r-<stamp>-<suffix>` is eligible. A directory a human left
+#               under `runs/` is not housekeeping's to delete
+#   the state   only `ended`. Everything from queued to merging is a run that is
+#               still working, and `interrupted` is a run that stopped without
+#               settling — §14.7 counts both as active and neither is GC'd. A
+#               store with no readable snapshot is left alone too: a run that
+#               cannot be shown to have ended has not been shown to have ended
+#   the commit  a run holding a finalize intent with no receipt stays, whatever
+#               its snapshot says
+#
+# The path removed is rebuilt from the validated id rather than taken from
+# `find`, so what `rm -rf` is given is a name this file could have written.
+runstore_prune() { # [days]
+  local days=${1:-${LOG_RETENTION_DAYS:-14}} base d id state
+  case ${days} in ""|*[!0-9]*) return 1 ;; esac
+  [ "${days}" -ge 1 ] || return 1
+  base="${HEINZEL_HOME}/runs"
+  [ -d "${base}" ] || return 0
+  while IFS= read -r d; do
+    [ -n "${d}" ] || continue
+    id=${d##*/}
+    runstore_is_run_id "${id}" || continue
+    state=$(runstore_runner_state "${id}" 2>/dev/null)
+    [ "${state}" = ended ] || continue
+    _runstore_commit_pending "${id}" && continue
+    rm -rf "${base:?}/${id}" 2>/dev/null && printf '%s\n' "${id}"
+  done <<EOF
+$(find "${base}" -maxdepth 1 -type d -name 'r-*' -mtime "+${days}" 2>/dev/null)
+EOF
+  return 0
 }

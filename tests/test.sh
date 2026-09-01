@@ -1856,6 +1856,103 @@ runstore_snapshot "${RS_RUN}" "$(rs_snap running)"
 t_eq "a snapshot with no pid to check reads as interrupted, not as running" \
   interrupted "$(runstore_runner_state "${RS_RUN}")"
 
+# --- runstore_prune --------------------------------------------------------
+#
+# One directory per run, one run a night. The log tree has had a prune since the
+# beginning; this store had none (docs/RUNTIME-BACKENDS.md §14.7). What must
+# never be swept is the interesting half: a run that is still active, a run that
+# stopped without settling, and a run whose ledger commit is unrecorded.
+
+group 'runstore_prune'
+
+RP_HOME=${TMPROOT}/prune-home
+RP_SAVED_HOME=${HEINZEL_HOME}
+HEINZEL_HOME=${RP_HOME}
+mkdir -p "${RP_HOME}/runs"
+
+# `find -mtime` measures the directory, so every fixture is aged after it is
+# written. An old date rather than an offset: the suite must not depend on being
+# run at a particular time of day.
+rp_age() { touch -t 200001010000 "${RP_HOME}/runs/$1"; }
+rp_make() { # id runner-state [pid]
+  runstore_init "$1"
+  if [ -n "${3:-}" ]; then
+    runstore_snapshot "$1" "$(jq -n --arg r "$1" --arg s "$2" --argjson p "$3" \
+      '{schema_version: 1, run_id: $r, runner_state: $s, pid: $p}')"
+  else
+    runstore_snapshot "$1" "$(jq -n --arg r "$1" --arg s "$2" \
+      '{schema_version: 1, run_id: $r, runner_state: $s}')"
+  fi
+}
+
+RP_OLD=r-20260101T010101-aaaaaa
+RP_FRESH=r-20260101T010102-bbbbbb
+RP_KILLED=r-20260101T010103-cccccc
+RP_PENDING=r-20260101T010104-dddddd
+RP_NOSNAP=r-20260101T010105-eeeeee
+RP_STRAY=not-a-run-id
+
+sleep 30 &
+RP_LIVE=$!
+
+rp_make "${RP_OLD}" ended 1
+rp_make "${RP_FRESH}" ended 1
+rp_make "${RP_KILLED}" running "${RP_LIVE}"
+rp_make "${RP_PENDING}" ended 1
+printf '{"run_id":"%s"}\n' "${RP_PENDING}" >"${RP_HOME}/runs/${RP_PENDING}/finalize.intent.json"
+runstore_init "${RP_NOSNAP}"
+mkdir -p "${RP_HOME}/runs/${RP_STRAY}"
+printf 'a human left this here\n' >"${RP_HOME}/runs/${RP_STRAY}/notes.txt"
+
+for rp in "${RP_OLD}" "${RP_KILLED}" "${RP_PENDING}" "${RP_NOSNAP}" "${RP_STRAY}"; do
+  rp_age "${rp}"
+done
+
+t_eq "an id of the shape runstore_new_id writes is a run store" \
+  0 "$(runstore_is_run_id "${RP_OLD}"; printf '%s' $?)"
+t_eq "a directory a human named is not" \
+  1 "$(runstore_is_run_id "${RP_STRAY}"; printf '%s' $?)"
+t_eq "and neither is a task id" 1 "$(runstore_is_run_id h-0007; printf '%s' $?)"
+
+RP_SWEPT=$(runstore_prune 14 | tr '\n' ' ' | sed 's/ *$//')
+t_eq "an ended run past the window is swept, and named" "${RP_OLD}" "${RP_SWEPT}"
+t_ok "and its directory is gone" \
+  "$([ ! -d "${RP_HOME}/runs/${RP_OLD}" ] && printf 0 || printf 1)"
+t_ok "a run killed with its process still alive is kept" \
+  "$([ -d "${RP_HOME}/runs/${RP_KILLED}" ] && printf 0 || printf 1)"
+t_ok "a run holding an intent with no receipt is kept" \
+  "$([ -d "${RP_HOME}/runs/${RP_PENDING}" ] && printf 0 || printf 1)"
+t_ok "a store with no snapshot to read is kept" \
+  "$([ -d "${RP_HOME}/runs/${RP_NOSNAP}" ] && printf 0 || printf 1)"
+t_ok "a directory that is not a run store is never touched" \
+  "$([ -f "${RP_HOME}/runs/${RP_STRAY}/notes.txt" ] && printf 0 || printf 1)"
+t_ok "a run inside the window is kept, ended or not" \
+  "$([ -d "${RP_HOME}/runs/${RP_FRESH}" ] && printf 0 || printf 1)"
+
+# The killed run's process ends: its state becomes `interrupted`, which §14.7
+# calls active. A run that stopped without settling is not swept by age.
+kill "${RP_LIVE}" 2>/dev/null
+wait "${RP_LIVE}" 2>/dev/null
+t_eq "the killed run now reads as interrupted" \
+  interrupted "$(runstore_runner_state "${RP_KILLED}")"
+RP_SWEPT=$(runstore_prune 14 | tr '\n' ' ' | sed 's/ *$//')
+t_eq "a second pass finds nothing left to sweep" "" "${RP_SWEPT}"
+t_ok "and an interrupted run is still there" \
+  "$([ -d "${RP_HOME}/runs/${RP_KILLED}" ] && printf 0 || printf 1)"
+
+# The receipt arrives: the commit is recorded, and the run becomes sweepable.
+printf '{"run_id":"%s"}\n' "${RP_PENDING}" >"${RP_HOME}/runs/${RP_PENDING}/finalize.receipt.json"
+rp_age "${RP_PENDING}"
+RP_SWEPT=$(runstore_prune 14 | tr '\n' ' ' | sed 's/ *$//')
+t_eq "a recorded commit no longer holds its store open" "${RP_PENDING}" "${RP_SWEPT}"
+
+runstore_prune 0 2>/dev/null
+t_fails "a retention of zero days is refused rather than sweeping everything" "$?"
+runstore_prune abc 2>/dev/null
+t_fails "and so is a window that is not a number" "$?"
+
+HEINZEL_HOME=${RP_SAVED_HOME}
+
 # --- verdict ---------------------------------------------------------------
 
 printf '\n%s passed, %s failed\n' "${PASS}" "${FAIL}"

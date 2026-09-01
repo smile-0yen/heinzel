@@ -6,6 +6,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-09-02
+
+### Added
+- **Retention for the per-run store** (`docs/RUNTIME-BACKENDS.md` §14.7,
+  `docs/SPEC.md` §11.1). `~/.heinzel/runs/` gained a directory per run in 0.2.1
+  and no prune to go with it: one run a night, growing for as long as Heinzel is
+  installed. `runstore_prune [days]` now runs at the end of a run, beside the log
+  prune it was missing a counterpart to, and keeps a store for the same
+  `LOG_RETENTION_DAYS` window — the two are halves of one record, and a reader
+  holding one without the other is worse off than a reader with neither.
+- Three separate things stop a store being swept, each checked on its own. The
+  **shape**: only `r-<stamp>-<suffix>`, so a directory a human left under
+  `runs/` is not housekeeping's to delete. The **state**: only `ended` — every
+  state from `queued` to `merging` is a run that is still working, and
+  `interrupted` is a run that stopped without settling, both of which §14.7
+  counts as active. The **commit**: a run holding a `finalize.intent.json` with
+  no receipt beside it stays whatever its snapshot says, because that intent is
+  the only record that a ledger transition may not have happened.
+- A store with no readable snapshot is kept as well. A run that cannot be shown
+  to have ended has not been shown to have ended — the same rule
+  `runstore_runner_state` already applies in the other direction.
+- `runstore_is_run_id` — the id shape as a predicate rather than as a comment.
+  The path handed to `rm -rf` is rebuilt from the validated id and never taken
+  from `find`'s output.
+
+### Not in this change
+- An interrupted run's store is now kept indefinitely, which is what §14.7 asks
+  for and is also a leak with no upper bound if runs are killed often. Closing
+  it needs somewhere for such a run to *go* — the reconcile that reads a stale
+  store, decides the run is over and settles it — and that is the recovery work
+  later in Phase 2, not a retention policy.
+- `etc/heinzel.conf.example` still describes `LOG_RETENTION_DAYS` as the log
+  window only. The file is outside this run's write permissions; `docs/SPEC.md`
+  §13 carries the corrected description.
+
 ## [0.2.6] - 2026-09-02
 
 ### Changed

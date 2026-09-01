@@ -875,6 +875,15 @@ log_event ok "${RUN_ID} ${VERDICT} review=${REVIEW_VERDICT} ${TASKS_DONE} done, 
 # in the log tree is never deleted by a wildcard.
 find "${LOG_DIR}" -maxdepth 1 -type d -name '20[0-9][0-9]-[0-1][0-9]-[0-3][0-9]' \
   -mtime "+${LOG_RETENTION_DAYS}" -exec rm -rf {} + 2>/dev/null
+# And the same window for the run store, which had no prune at all: one
+# directory per run, one run a night, growing for as long as Heinzel is
+# installed. Only runs that ended are swept, and never this one — it ended a
+# second ago and the age check is what says so (§14.7).
+PRUNED=$(runstore_prune "${LOG_RETENTION_DAYS}" | wc -l | tr -d ' ')
+case ${PRUNED} in
+  ""|0) ;;
+  *) log_event ok "pruned ${PRUNED} run store(s) older than ${LOG_RETENTION_DAYS} day(s)" ;;
+esac
 if [ -f "${RUNS_JSONL}" ]; then
   tail -2000 "${RUNS_JSONL}" >"${RUNS_JSONL}.tmp" 2>/dev/null &&
     mv -f "${RUNS_JSONL}.tmp" "${RUNS_JSONL}"
