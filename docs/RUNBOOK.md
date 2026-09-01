@@ -91,6 +91,12 @@ snapshot naming the tasks it was holding — which is how you tell a run that wa
 stopped from one that finished quietly. Nothing reads these to decide anything
 yet; they are there to be read by you.
 
+`~/.heinzel/claims/` is who is holding which task, and for which run. The `[~]`
+you see in the ledger is a display of it, not the record — the record is here,
+where the agent cannot write. If a run is killed, its claims stay until the next
+run releases them, and that release names the dead run and touches nothing else.
+Nothing in the ledger tells you which run holds a `[~]`; the claim does.
+
 Those records carry a `schema_version`, and so do `state.json` and each run's
 `result.json`. A file without the field is version 1 and is read as one — by
 this build and by anything you wrote against it. Nothing rewrites a record it

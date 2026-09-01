@@ -596,6 +596,7 @@ heinzel/
 ├── lib/runtimes.sh      backend registry — a backend is a key, not a case arm
 ├── lib/runtimes/local.sh  starts a process on this machine, under the watchdog
 ├── lib/runstore.sh      one durable directory per run, where the agent cannot reach
+├── lib/claims.sh        run-scoped task claims; the ledger's [~] is their display
 ├── lib/watchdog.sh      hzl_timeout (§6.1)
 ├── etc/heinzel.conf              the tuning surface
 ├── etc/heinzel-settings.json     deny/allow for the unattended agent

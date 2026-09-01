@@ -6,6 +6,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-09-02
+
+### Added
+- **`lib/claims.sh`: the record of who is working on what moves out of the
+  ledger** (`docs/RUNTIME-BACKENDS.md` §13.4). The `[~]` marker had been doing
+  two jobs — telling a human what is being worked on, and *being the record of
+  it* — and it cannot do the second: it lives inside the agent's write radius,
+  it carries no run id anything checks, and rolling it back was all-or-nothing.
+  A claim now lives in `~/.heinzel/claims/<workspace-hash>/<task-id>.json`,
+  which the agent is denied, and names the workspace, the task, the run holding
+  it and a fencing generation. The marker stays, as its display.
+- **Every operation is scoped to one run id.** Acquiring refuses a task another
+  run holds; releasing refuses a claim this run does not hold; reconciling
+  releases *exactly* the run it was given and reports how many. This is the
+  difference the blanket `[~]` pass could not express, and the reason a release
+  is now attributable to a run.
+- **The kill case, with assertions.** A run killed mid-run leaves its claims
+  standing — nothing it ran could have tidied them — and the next run releases
+  them one run id at a time. The test holds three runs' claims in two
+  workspaces, reconciles one dead run, and checks that its two claims went and
+  that the other run's claim and the other workspace are exactly where they
+  were.
+- A workspace identity is `<short hostname>:<canonical absolute path>`, so two
+  spellings of one directory are one workspace — a workdir reached through a
+  symlink would otherwise get its own claims directory and the two would never
+  see each other's claims.
+
+### Changed
+- The runner claims each worksheet id before the engine starts, and its
+  rollbacks are run-scoped: on the way in it releases the claims of runs that
+  have stopped, one at a time; after the merge and in the EXIT trap it releases
+  its own and nobody else's. A rollback returns only `[~]` to `[ ]` — a task the
+  merge marked `[x]` or `[!]` keeps that marker, because the work happened and
+  releasing a claim is not a reason to undo it.
+- `backlog_reset_inprogress`, the blanket pass, is unchanged and still called.
+  It is the legacy path, and it is what puts back a `[~]` that no claim ever
+  covered — one written by hand, or by a build older than the claims directory.
+
+### Not in this change
+- A task whose claim is refused keeps its place on the worksheet. It gets no
+  `[~]`, because displaying a claim this run does not hold would be a false
+  statement about the ledger, and the refusal is logged — but the id is still in
+  front of the agent. Removing it means rebuilding the worksheet after the
+  claims are taken, which belongs with the workflow state machine. Under the
+  global run lock, and after the reconcile that runs before it, there is no
+  path that reaches it today.
+
 ## [0.2.1] - 2026-09-02
 
 ### Added

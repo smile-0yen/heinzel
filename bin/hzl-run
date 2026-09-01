@@ -41,6 +41,8 @@ export HOME="${HOME:-$(cd ~ && pwd)}"
 . "${HEINZEL_ROOT}/lib/watchdog.sh"
 # shellcheck source=lib/runstore.sh
 . "${HEINZEL_ROOT}/lib/runstore.sh"
+# shellcheck source=lib/claims.sh
+. "${HEINZEL_ROOT}/lib/claims.sh"
 # shellcheck source=lib/runtimes.sh
 . "${HEINZEL_ROOT}/lib/runtimes.sh"
 # shellcheck source=lib/engines.sh
@@ -127,6 +129,13 @@ cleanup() {
   if [ -n "${STORE_READY:-}" ] && [ -z "${STORE_ENDED:-}" ]; then
     runstore_event "${STORE_RUN_ID}" run.interrupted \
       "the runner stopped before the run ended (status ${rc})" 2>/dev/null
+  fi
+  # This run's claims first, and only this run's: the tasks it was holding go
+  # back to `[ ]` and the claims go with them. Then the blanket pass, which is
+  # the legacy path and catches a `[~]` no claim ever covered.
+  if [ -n "${CLAIMS_READY:-}" ]; then
+    claims_rollback_run "${WS_IDENTITY}" "${BACKLOG}" "${STORE_RUN_ID}" \
+      >/dev/null 2>&1
   fi
   if [ -n "${BACKLOG}" ] && [ -w "${BACKLOG}" ]; then
     backlog_reset_inprogress "${BACKLOG}" >/dev/null 2>&1
@@ -278,8 +287,31 @@ jq -e . "${SETTINGS}" >/dev/null 2>&1 ||
 grep -q '__[A-Z_]*__' "${SETTINGS}" &&
   abort "${SETTINGS} still contains placeholders - run 'hzl install'"
 
+# --- claims left behind ----------------------------------------------------
+# A run that was killed left its claims in `HEINZEL_HOME`, where nothing it ran
+# could have tidied them. Gate 1 means no other runner is running while this one
+# holds the lock, so every claim standing here belongs to a run that has
+# stopped — but each is still released under its own run id, one run at a time.
+# That is what makes a release attributable, and what stays correct when the
+# lock stops covering the whole run (§13.4, §14.3).
+WS_IDENTITY=$(claims_workspace_identity "${WORKDIR}")
+CLAIMS_READY=""
+if [ -n "${WS_IDENTITY}" ]; then
+  CLAIMS_READY=1
+  while IFS= read -r stale_run; do
+    [ -n "${stale_run}" ] || continue
+    [ "${stale_run}" = "${STORE_RUN_ID}" ] && continue
+    log_event skip "released the claims left by run ${stale_run} ($(claims_rollback_run "${WS_IDENTITY}" "${BACKLOG}" "${stale_run}") marker(s) reset)"
+  done <<EOF
+$(claims_runs "${WS_IDENTITY}")
+EOF
+fi
+
 # --- gate 8: is there anything to do? -------------------------------------
 # Last, and immediately before the only expensive thing in this file.
+# The blanket reset stays: it is the legacy path, and it is what puts back a
+# `[~]` that no claim ever covered — one written by hand, or by a build older
+# than the claims directory.
 backlog_reset_inprogress "${BACKLOG}" >/dev/null
 TODO_BEFORE=$(backlog_count "${BACKLOG}" " ")
 [ "${TODO_BEFORE}" -gt 0 ] || skip "nothing to do (0 todo)"
@@ -326,11 +358,22 @@ worksheet_write "${BACKLOG}" "${MAX_TASKS}" "${WORKSHEET}" >"${WORKSHEET_IDS}" |
 [ -s "${WORKSHEET_IDS}" ] ||
   abort "the worksheet came out empty with ${TODO_BEFORE} todo(s) waiting"
 
-# Claim them in the ledger before the engine starts, so that a human reading it
-# mid-run sees what is being worked on, and an interrupted run is recognisable
-# as one. The merge, or failing that the EXIT trap, puts them back.
+# Claim them before the engine starts. The claim in HEINZEL_HOME is the record
+# — it names this run and the agent cannot reach it — and the ledger's `[~]` is
+# the projection of it, so that a human reading the ledger mid-run sees what is
+# being worked on. The merge, or failing that the EXIT trap, releases both.
+#
+# A task already claimed by another run does not get a marker: displaying a
+# claim this run does not hold would be a false statement about the ledger, and
+# a quiet one. It stays on the worksheet, which is the gap the workflow state
+# machine closes; here it is logged rather than papered over.
 while IFS= read -r wid; do
   [ -n "${wid}" ] || continue
+  if [ -n "${CLAIMS_READY}" ] &&
+     ! claims_acquire "${WS_IDENTITY}" "${wid}" "${STORE_RUN_ID}"; then
+    log_event skip "task ${wid} is claimed by run $(claims_holder "${WS_IDENTITY}" "${wid}") - leaving its marker alone"
+    continue
+  fi
   backlog_set_state "${BACKLOG}" "${wid}" "~" "run:${RUN_ID}"
 done <"${WORKSHEET_IDS}"
 
@@ -449,7 +492,17 @@ printf 'merge    %s done, %s blocked, %s new, %s ignored\n' \
 store_event worksheet.merged \
   "${MERGED_DONE} done, ${MERGED_BLOCKED} blocked, ${MERGED_NEW} new, ${MERGED_IGNORED} ignored"
 
-# Belt and braces: an id the merge never saw is still marked in progress.
+# The run is done with its tasks, so it gives them back: whatever the merge left
+# at `[~]` returns to `[ ]` and this run's claims go. Scoped to this run id, so
+# a claim held by anything else survives — which is the whole difference between
+# this and the blanket pass below it.
+if [ -n "${CLAIMS_READY}" ]; then
+  printf 'claims   %s marker(s) returned to todo, this run only\n' \
+    "$(claims_rollback_run "${WS_IDENTITY}" "${BACKLOG}" "${STORE_RUN_ID}")" \
+    >>"${RUN_LOG}"
+fi
+# Belt and braces, and the legacy path: an id the merge never saw, or a `[~]`
+# that no claim ever covered, is still marked in progress.
 backlog_reset_inprogress "${BACKLOG}" >/dev/null
 # New tasks arrive without ids, and the ledger is not left in a state where a
 # human could add one by hand before the next run allocates it.

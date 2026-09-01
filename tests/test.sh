@@ -52,6 +52,8 @@ mkdir -p "${HEINZEL_HOME}"
 . "${TEST_ROOT}/lib/common.sh"
 # shellcheck source=../lib/runstore.sh
 . "${TEST_ROOT}/lib/runstore.sh"
+# shellcheck source=../lib/claims.sh
+. "${TEST_ROOT}/lib/claims.sh"
 
 # Read back what common.sh actually resolved, through `:-` so that a state path
 # it failed to define reads as empty and is refused rather than skipped. If
@@ -1308,6 +1310,140 @@ runstore_init r-20251231T235959-bbbbbb
 t_eq "the runs with a store are listed oldest first" \
   "r-20251231T235959-bbbbbb r-20260101T000000-aaaaaa ${RS_ID}" \
   "$(runstore_runs | tr '\n' ' ' | sed 's/ *$//')"
+
+# --- run-scoped task claims -------------------------------------------------
+#
+# The record of who is working on what moves out of the ledger, where the agent
+# can reach it and where rolling back was all-or-nothing, and into
+# HEINZEL_HOME, where it names a run (§13.4). Everything below is about scope:
+# one run's claims, and nobody else's.
+
+group 'claims identity'
+
+CL_WORK=${TMPROOT}/claim-workspace
+CL_OTHER=${TMPROOT}/claim-workspace-two
+mkdir -p "${CL_WORK}" "${CL_OTHER}"
+CL_ID=$(claims_workspace_identity "${CL_WORK}")
+CL_ID2=$(claims_workspace_identity "${CL_OTHER}")
+
+t_eq "an identity is a host and an absolute path" \
+  "$(abspath "${CL_WORK}")" "$(printf '%s' "${CL_ID}" | sed 's/^[^:]*://')"
+# Two spellings of one directory are one workspace. Without this, a workdir
+# reached through a symlink would get its own claims directory and the two
+# would not see each other's claims at all.
+t_eq "and it is canonical, so one directory has one identity" \
+  "${CL_ID}" "$(claims_workspace_identity "${CL_WORK}/.")"
+t_eq "the same workspace hashes the same way twice" \
+  "$(claims_workspace_hash "${CL_ID}")" \
+  "$(claims_workspace_hash "$(claims_workspace_identity "${CL_WORK}")")"
+t_eq "two workspaces do not share a directory" \
+  different \
+  "$([ "$(claims_dir "${CL_ID}")" != "$(claims_dir "${CL_ID2}")" ] &&
+     echo different || echo same)"
+t_eq "which is under HEINZEL_HOME, where the agent cannot write it" \
+  "${HEINZEL_HOME}/claims/$(claims_workspace_hash "${CL_ID}")" \
+  "$(claims_dir "${CL_ID}")"
+
+claims_acquire "${CL_ID}" "../../escape" r-20260902T000000-aaaaaa 2>/dev/null
+t_fails "a task id that is not a task id is refused, not turned into a path" "$?"
+
+group 'claims scope'
+
+CL_A=r-20260902T000000-aaaaaa
+CL_B=r-20260902T001000-bbbbbb
+CL_C=r-20260902T002000-cccccc
+
+claims_acquire "${CL_ID}" h-0001 "${CL_A}"
+t_ok "a run takes a claim" "$?"
+t_eq "and is recorded as holding it" \
+  "${CL_A}" "$(claims_holder "${CL_ID}" h-0001)"
+t_eq "at generation 1" 1 "$(claims_generation "${CL_ID}" h-0001)"
+
+claims_acquire "${CL_ID}" h-0001 "${CL_A}"
+t_ok "the same run retaking its own claim is not a conflict" "$?"
+t_eq "and the fencing generation moves on" \
+  2 "$(claims_generation "${CL_ID}" h-0001)"
+
+claims_acquire "${CL_ID}" h-0001 "${CL_B}"
+t_fails "another run cannot take a claim that is held" "$?"
+t_eq "and the holder is unchanged by the attempt" \
+  "${CL_A}" "$(claims_holder "${CL_ID}" h-0001)"
+
+claims_release "${CL_ID}" h-0001 "${CL_B}"
+t_fails "a run cannot release a claim it does not hold" "$?"
+t_eq "so the claim is still there" \
+  "${CL_A}" "$(claims_holder "${CL_ID}" h-0001)"
+
+# The same task id in a different workspace is a different task.
+claims_acquire "${CL_ID2}" h-0001 "${CL_B}"
+t_ok "the same id in another workspace is free to claim" "$?"
+t_eq "and the first workspace is untouched" \
+  "${CL_A}" "$(claims_holder "${CL_ID}" h-0001)"
+
+group 'claims reconcile: the kill case'
+
+# Run A is holding two tasks when it is killed: nothing it ran could tidy up,
+# so its claims are still standing. Run C holds one of its own.
+claims_acquire "${CL_ID}" h-0002 "${CL_A}"
+claims_acquire "${CL_ID}" h-0003 "${CL_C}"
+t_eq "the runs holding claims here are all listed" \
+  "${CL_A} ${CL_C}" \
+  "$(claims_runs "${CL_ID}" | tr '\n' ' ' | sed 's/ *$//')"
+t_eq "and each one's own tasks can be named" \
+  "h-0001 h-0002" \
+  "$(claims_of_run "${CL_ID}" "${CL_A}" | tr '\n' ' ' | sed 's/ *$//')"
+
+t_eq "reconciling the dead run releases exactly its claims" \
+  2 "$(claims_reconcile "${CL_ID}" "${CL_A}")"
+t_eq "so it holds none" \
+  "" "$(claims_of_run "${CL_ID}" "${CL_A}" | tr '\n' ' ' | sed 's/ *$//')"
+t_eq "and the other run's claim is exactly where it was" \
+  "${CL_C}" "$(claims_holder "${CL_ID}" h-0003)"
+t_eq "which is also true of the other workspace" \
+  "${CL_B}" "$(claims_holder "${CL_ID2}" h-0001)"
+
+t_eq "reconciling a run that holds nothing is a no-op, not a failure" \
+  0 "$(claims_reconcile "${CL_ID}" "${CL_A}")"
+
+group 'claims rollback is a projection'
+
+# The ledger marker is display. The rollback moves both, and only for the run
+# it was given: another run's `[~]` is not its business, and a task the merge
+# has already closed is not rolled back to todo by a claim being released.
+CL_LEDGER=${TMPROOT}/claim-ledger.md
+cat >"${CL_LEDGER}" <<'CLFIX'
+# Backlog
+
+## P1
+- [~] (id:h-0010) held by the run being rolled back
+- [x] (id:h-0011) closed by the merge, same run
+- [~] (id:h-0012) held by a different run
+- [ ] (id:h-0013) nobody's
+CLFIX
+
+claims_acquire "${CL_ID}" h-0010 "${CL_B}"
+claims_acquire "${CL_ID}" h-0011 "${CL_B}"
+claims_acquire "${CL_ID}" h-0012 "${CL_C}"
+
+t_eq "the rollback resets one marker: the one still in progress" \
+  1 "$(claims_rollback_run "${CL_ID}" "${CL_LEDGER}" "${CL_B}")"
+t_eq "the in-progress task is back in the queue" \
+  " " "$(backlog_marker_of_id "${CL_LEDGER}" h-0010)"
+t_eq "the task the merge closed keeps its marker" \
+  x "$(backlog_marker_of_id "${CL_LEDGER}" h-0011)"
+t_eq "another run's in-progress marker is not touched" \
+  "~" "$(backlog_marker_of_id "${CL_LEDGER}" h-0012)"
+t_eq "and its claim is not released either" \
+  "${CL_C}" "$(claims_holder "${CL_ID}" h-0012)"
+t_eq "while the rolled-back run holds nothing" \
+  "" "$(claims_of_run "${CL_ID}" "${CL_B}" | tr '\n' ' ' | sed 's/ *$//')"
+
+# The blanket reset is still there and still works: it is what puts back a
+# `[~]` that no claim ever covered.
+t_eq "the legacy blanket reset still returns every marker it finds" \
+  1 "$(backlog_reset_inprogress "${CL_LEDGER}")"
+t_eq "including the one no rollback would have scoped to a run" \
+  " " "$(backlog_marker_of_id "${CL_LEDGER}" h-0012)"
 
 # --- verdict ---------------------------------------------------------------
 
