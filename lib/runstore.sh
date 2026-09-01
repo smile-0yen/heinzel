@@ -23,6 +23,7 @@
 #   runstore_init     <run-id>                  -> creates it
 #   runstore_snapshot <run-id> <json>           -> replaces workflow.json
 #   runstore_read     <run-id>                  -> the snapshot on stdout
+#   runstore_runner_state <run-id>              -> what is true, not what it says
 #   runstore_event    <run-id> <kind> [message] -> appends one line
 #   runstore_runs                               -> the run ids, oldest first
 #
@@ -113,6 +114,38 @@ runstore_read() {
   dir=$(runstore_dir "${id}") || return 1
   [ -r "${dir}/workflow.json" ] || return 1
   cat "${dir}/workflow.json"
+}
+
+# What a reader may believe, which is not always what the snapshot says.
+#
+# A snapshot is written by the run it describes, so the last one a killed run
+# managed to write says it was working — and it was, right up until it was not.
+# A reader that took that at face value would find a run that has been `running`
+# since Tuesday, and a recovery that trusted it would wait for a process that is
+# not there (docs/RUNTIME-BACKENDS.md §9.2: a run interrupted during a task is
+# `INTERRUPTED`, and never settles by being killed).
+#
+# So a working state is checked against the process that claimed it. A terminal
+# state is returned as it stands: a run that finished is finished, and the
+# process being gone afterwards is what is supposed to happen.
+runstore_runner_state() {
+  local id=$1 snap state pid
+  snap=$(runstore_read "${id}") || return 1
+  state=$(printf '%s' "${snap}" | jq -r '.runner_state // ""' 2>/dev/null)
+  [ -n "${state}" ] || state=unknown
+  case ${state} in
+    queued|running|merging) ;;
+    *) printf '%s' "${state}"; return 0 ;;
+  esac
+  pid=$(printf '%s' "${snap}" | jq -r '.pid // empty' 2>/dev/null)
+  if [ -n "${pid}" ] && pid_alive "${pid}"; then
+    printf '%s' "${state}"
+  else
+    # A snapshot with no pid at all is one written before this field existed.
+    # It cannot be checked, and a run that cannot be shown to be working is not
+    # working — the answer that leaves a human looking is the safe one.
+    printf 'interrupted'
+  fi
 }
 
 # Append one event. The line is built whole before the file is opened for

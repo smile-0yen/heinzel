@@ -1742,6 +1742,63 @@ finalize_recover "${FN_RUN3}" "${FN_LED3}" >/dev/null
 t_fails "and a second recovery is refused here too" "$?"
 t_eq "leaving the total where it was" 1 "$(state_get .tasks_done_total 0)"
 
+# --- a run that was killed does not settle ----------------------------------
+#
+# The first of the fault transitions (§21.1): a run interrupted during a task is
+# `INTERRUPTED`, never `SETTLED`. The snapshot is written by the run it
+# describes, so the last one a killed run managed to write says it was working -
+# and it was, right until it was not. A reader that took that at face value
+# would find a run that has been running since Tuesday.
+
+group 'runstore: a killed run does not settle'
+
+RS_RUN=r-20260902T050000-int001
+runstore_init "${RS_RUN}"
+rs_snap() { # runner-state [pid]
+  if [ -n "${2:-}" ]; then
+    jq -n --arg s "$1" --argjson p "$2" \
+      '{schema_version: 1, run_id: "r-20260902T050000-int001",
+        runner_state: $s, pid: $p}'
+  else
+    jq -n --arg s "$1" \
+      '{schema_version: 1, run_id: "r-20260902T050000-int001",
+        runner_state: $s}'
+  fi
+}
+
+sleep 30 &
+RS_LIVE=$!
+runstore_snapshot "${RS_RUN}" "$(rs_snap running "${RS_LIVE}")"
+t_eq "a run whose process is there is working, and says so" \
+  running "$(runstore_runner_state "${RS_RUN}")"
+
+kill "${RS_LIVE}" 2>/dev/null
+wait "${RS_LIVE}" 2>/dev/null
+t_eq "the same snapshot, written by a process that is gone, is interrupted" \
+  interrupted "$(runstore_runner_state "${RS_RUN}")"
+t_eq "and the snapshot itself is untouched by being read" \
+  running "$(runstore_read "${RS_RUN}" | jq -r .runner_state)"
+
+runstore_snapshot "${RS_RUN}" "$(rs_snap merging "${RS_LIVE}")"
+t_eq "a run killed in the middle of its merge is interrupted too" \
+  interrupted "$(runstore_runner_state "${RS_RUN}")"
+
+# A terminal state is returned as it stands. A run that finished is finished,
+# and its process being gone afterwards is what is supposed to happen.
+runstore_snapshot "${RS_RUN}" "$(rs_snap ended "${RS_LIVE}")"
+t_eq "a run that ended stays ended, dead process and all" \
+  ended "$(runstore_runner_state "${RS_RUN}")"
+runstore_snapshot "${RS_RUN}" "$(rs_snap interrupted "${RS_LIVE}")"
+t_eq "and one the trap already marked interrupted is left alone" \
+  interrupted "$(runstore_runner_state "${RS_RUN}")"
+
+# A snapshot from a build before the pid was recorded cannot be checked, and a
+# run that cannot be shown to be working is not working: the answer that leaves
+# a human looking is the safe one.
+runstore_snapshot "${RS_RUN}" "$(rs_snap running)"
+t_eq "a snapshot with no pid to check reads as interrupted, not as running" \
+  interrupted "$(runstore_runner_state "${RS_RUN}")"
+
 # --- verdict ---------------------------------------------------------------
 
 printf '\n%s passed, %s failed\n' "${PASS}" "${FAIL}"

@@ -6,6 +6,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-09-02
+
+### Added
+- **A run does not settle by being killed** (`docs/RUNTIME-BACKENDS.md` §9.2,
+  §21.1). The snapshot is written by the run it describes, so the last one a
+  killed run managed to write says it was working — and it was, right until it
+  was not. A reader that took that at face value would find a run that has been
+  `running` since Tuesday, and a recovery that trusted it would wait for a
+  process that is not there. The snapshot now carries the `pid` that wrote it,
+  and `runstore_runner_state` checks a working state against that process:
+  gone, or no pid to check at all, reads `interrupted`. A run that cannot be
+  shown to be working is not working.
+- A terminal state is returned as it stands. A run that finished is finished,
+  and its process being gone afterwards is what is supposed to happen — the
+  check is only ever applied to `queued`, `running` and `merging`.
+- The runner's EXIT trap writes an `interrupted` snapshot as well as the
+  `run.interrupted` event, so `workflow.json` — which is what recovery reads —
+  says what happened rather than what was happening.
+
+### Not in this change
+- This is the first of the four fault transitions the task names. The **cancel
+  barrier** (`hzl off` confirming the process is gone before it releases claims),
+  **`ORPHANED`** (a stop that cannot be confirmed keeps ownership rather than
+  releasing it) and **stale evidence** (verification not reused after the
+  workspace digest moved under it) are still to write, and they are what
+  completes the Phase 2 slice on the local backend — so this is a patch release
+  and not the minor one. They need `hzl off` and the runner to gain a cancel
+  intent they do not have yet; asserting them today would be asserting about
+  behaviour that is not there.
+
 ## [0.2.4] - 2026-09-02
 
 ### Added

@@ -722,6 +722,17 @@ provenance and `runs.jsonl` are written in. The store records it as
 > one cannot tear a line that was already being written. A trail that could be
 > edited after the fact is not evidence of anything.
 
+> **Normative: a run does not settle by being killed.** The snapshot is written
+> by the run it describes, so the last one a killed run managed to write says it
+> was working. `runstore_runner_state` checks a working state (`queued`,
+> `running`, `merging`) against the `pid` the snapshot carries and reports
+> `interrupted` when that process is gone, or when there is no pid to check —
+> a run that cannot be shown to be working is not working
+> (`docs/RUNTIME-BACKENDS.md` §9.2). A terminal state is returned as it stands:
+> a run that finished is finished, and its process being gone afterwards is what
+> is supposed to happen. The runner's EXIT trap also writes an `interrupted`
+> snapshot, so the file and the derived answer agree.
+
 > **Normative: the store is not load-bearing.** A run whose store cannot be
 > written is a run that still happens; the failure is a `skip` line in the
 > runner log. Nothing reads the store to decide anything yet — recovery,

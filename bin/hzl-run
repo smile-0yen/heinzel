@@ -133,6 +133,10 @@ cleanup() {
   if [ -n "${STORE_READY:-}" ] && [ -z "${STORE_ENDED:-}" ]; then
     runstore_event "${STORE_RUN_ID}" run.interrupted \
       "the runner stopped before the run ended (status ${rc})" 2>/dev/null
+    # And in the snapshot, not only the trail: `workflow.json` is what recovery
+    # reads, and one left saying `running` by a run that is not is a lie a
+    # reader has no way to catch. A run does not settle by being killed.
+    store_snapshot interrupted
   fi
   # This run's claims first, and only this run's: the tasks it was holding go
   # back to `[ ]` and the claims go with them. Then the blanket pass, which is
@@ -225,6 +229,7 @@ store_snapshot() { # runner-state
     --arg workdir "${WORKDIR}" \
     --arg backlog "${BACKLOG}" \
     --arg runtime_backend "${HEINZEL_RUNTIME:-local}" \
+    --argjson pid "$$" \
     --arg started_at "$(iso_at "${STARTED:-}")" \
     --arg updated_at "$(iso_at)" \
     --arg exec_dir "${EXEC_DIR}" \
@@ -235,7 +240,7 @@ store_snapshot() { # runner-state
       legacy_run_id: $legacy_run_id, runner_state: $runner_state,
       workflow_state: null, workflow_outcome: null,
       trigger: $trigger, workdir: $workdir, backlog: $backlog,
-      runtime_backend: $runtime_backend,
+      runtime_backend: $runtime_backend, pid: $pid,
       started_at: $started_at, updated_at: $updated_at,
       task_ids: $task_ids, exec_dir: $exec_dir, log: $log,
       verdict: (if $verdict == "" then null else $verdict end)}' 2>/dev/null) ||
