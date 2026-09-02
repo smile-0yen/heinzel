@@ -143,7 +143,7 @@ managed for you:
 
 | Command | Effect |
 |---|---|
-| `hzl next` | What would be picked up next, and why |
+| `hzl next` | What would be picked up next, and why. When nothing is free it lists what is in progress and which run holds it, rather than reading as an empty backlog |
 | `hzl take` | Everything blocked, with priorities |
 | `hzl take <id>` | A prompt to paste into an interactive session |
 | `hzl done <id> "note"` | Close it out by hand |

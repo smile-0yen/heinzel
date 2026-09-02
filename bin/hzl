@@ -194,8 +194,15 @@ cmd_status() {
   field "sleep suppressed" "$([ "$(sleep_disabled)" = 1 ] && echo "yes (disablesleep=1)" || echo no)"
   field "power" "$(on_ac_power && echo "AC" || echo "battery $(battery_pct)")"
 
+  # All four markers, always, even at zero. Three of them was not a shorter
+  # version of the same line: `[~]` is a state a task sits in for as long as a
+  # run holds it, so leaving it out meant a task the runner had just claimed
+  # left `todo` without arriving anywhere. `hzl on` prints this block and
+  # launchd starts the run a minute later, which is exactly long enough for
+  # "3 todo" and a `next` that finds nothing to look like a contradiction.
+  # The counts partition the ledger; that is the property worth reading.
   if [ -n "${backlog}" ] && [ -r "${backlog}" ]; then
-    field "backlog" "$(backlog_count "${backlog}" " ") todo / $(backlog_count "${backlog}" "!") blocked / $(backlog_count "${backlog}" x) done"
+    field "backlog" "$(backlog_count "${backlog}" " ") todo / $(backlog_count "${backlog}" "~") in progress / $(backlog_count "${backlog}" "!") blocked / $(backlog_count "${backlog}" x) done"
   else
     field "backlog" "not readable (${backlog:-unset})"
   fi
@@ -646,11 +653,59 @@ need_backlog() {
   printf '%s' "${b}"
 }
 
+# What `[~]` means when there is nothing left to hand out: a run is holding
+# these, or one died holding them. Claims are the authority and the marker is
+# display (§13.4), so the run id is read from the claim rather than from the
+# trailing comment the marker carries; a `[~]` with no claim behind it is stale
+# and is listed saying so instead of being left out.
+next_in_progress() {
+  local b=$1 rows n ident id holders
+
+  rows=$(backlog_scan "${b}" 2>/dev/null | awk -F'\t' '$3 == "~"')
+  [ -n "${rows}" ] || { say "nothing to do - no todo items."; return 0; }
+  n=$(printf '%s\n' "${rows}" | awk 'END {print NR}')
+
+  # Who holds them, deduplicated: one run claiming all three is the ordinary
+  # case, and repeating its id on every row would say nothing per row.
+  ident=$(claims_workspace_identity "$(cur_workdir)" 2>/dev/null)
+  holders=""
+  if [ -n "${ident}" ]; then
+    for id in $(printf '%s\n' "${rows}" | cut -f4); do
+      holders="${holders}$(claims_holder "${ident}" "${id}" 2>/dev/null)
+"
+    done
+    holders=$(printf '%s' "${holders}" | sed '/^$/d' | sort -u | tr '\n' ' ' |
+      sed 's/ *$//')
+  fi
+
+  printf '\n'
+  say "no todo items - ${n} in progress:"
+  printf '\n'
+  printf '%s\n' "${rows}" | awk -F'\t' '{printf "  P%-3s %-8s %s\n", $2, $4, $5}'
+  printf '\n'
+  if [ -n "${holders}" ]; then
+    dim "  held by run ${holders} - nothing here is waiting on you"
+  else
+    # A marker with no claim behind it is the residue of a run that died
+    # holding one. Only a run releases those — `hzl-run`'s "claims left
+    # behind" pass, which runs once it holds the writer lease — so there is no
+    # command to offer here. Saying which way it resolves is the useful part;
+    # inventing a `hzl` subcommand for it would not be.
+    dim "  no claim holds these - a run that died left the markers; the next run releases them"
+  fi
+  printf '\n'
+}
+
 cmd_next() {
   local b row
   b=$(need_backlog) || exit 1
   row=$(backlog_next_row "${b}")
-  [ -n "${row}" ] || { say "nothing to do - no todo items."; return 0; }
+  # `backlog_next_row` only ever returns a `[ ]`, so "empty" here is both "the
+  # ledger is finished" and "a run has claimed everything that was left".
+  # Reporting the first when the second is true is how a `hzl on` that says
+  # 3 todo and a `hzl next` a minute later that says nothing to do end up
+  # looking like they disagree about the same file.
+  [ -n "${row}" ] || { next_in_progress "${b}"; return 0; }
   local nid
   nid=$(printf '%s' "${row}" | cut -f4)
   # Ids are allocated by the runner, so a task typed by hand has none yet.

@@ -179,6 +179,63 @@ t_eq "an id-less row keeps its text in field 5" \
   "a task the agent split off, with no id yet" \
   "$(printf '%s' "${SCAN_ROW}" | cut -f5)"
 
+# --- backlog_count ---------------------------------------------------------
+#
+# The four markers partition the ledger, which is why `hzl status` prints all
+# four. It printed todo, blocked and done: a task a run had just claimed left
+# `todo` and arrived nowhere, so three tasks vanished from a line whose numbers
+# a human is meant to be able to add up.
+
+group 'backlog_count'
+
+CNT_LEDGER=${TMPROOT}/count.md
+cat >"${CNT_LEDGER}" <<'FIXTURE'
+# Backlog
+
+The markers are documented in a fence, which is not work:
+
+```
+- [ ] an example that must not be counted as anything
+```
+
+## P1
+- [ ] (id:h-0001) waiting for a run to pick it up
+- [~] (id:h-0002) claimed by a run <!-- run:20260903-012502 -->
+- [!] (id:h-0003) blocked <!-- blocked:2026-09-02T02:08:20+09:00 -->
+- [x] (id:h-0004) finished <!-- done:2026-09-01T03:09:35+09:00 -->
+
+## P2
+- [~] (id:h-0005) claimed as well <!-- run:20260903-012502 -->
+FIXTURE
+
+t_eq "todo is counted" 1 "$(backlog_count "${CNT_LEDGER}" " ")"
+t_eq "in progress is counted, which the status line used to leave out" \
+  2 "$(backlog_count "${CNT_LEDGER}" "~")"
+t_eq "blocked is counted" 1 "$(backlog_count "${CNT_LEDGER}" "!")"
+t_eq "done is counted" 1 "$(backlog_count "${CNT_LEDGER}" x)"
+t_eq "and the four add up to every task in the ledger, the fenced one excluded" \
+  "$(backlog_scan "${CNT_LEDGER}" | awk 'END {print NR}')" \
+  "$(( $(backlog_count "${CNT_LEDGER}" " ") \
+     + $(backlog_count "${CNT_LEDGER}" "~") \
+     + $(backlog_count "${CNT_LEDGER}" "!") \
+     + $(backlog_count "${CNT_LEDGER}" x) ))"
+
+# `hzl next` hands out `[ ]` and nothing else, so nothing coming back from it
+# is not the same statement as an empty ledger. That is why it now reports what
+# is in progress rather than saying there is nothing to do.
+CNT_HELD=${TMPROOT}/count-held.md
+cat >"${CNT_HELD}" <<'FIXTURE'
+# Backlog
+
+## P1
+- [~] (id:h-0001) the last task, and a run is holding it <!-- run:20260903-012502 -->
+FIXTURE
+
+t_eq "a ledger whose remaining task is claimed offers nothing up" \
+  "" "$(backlog_next_row "${CNT_HELD}")"
+t_eq "and it is still one unfinished task, not an empty backlog" \
+  1 "$(backlog_count "${CNT_HELD}" "~")"
+
 # --- backlog_assign_ids ----------------------------------------------------
 
 group 'backlog_assign_ids'

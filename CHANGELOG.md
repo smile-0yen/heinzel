@@ -6,6 +6,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`hzl status` counts all four markers, not three.** The backlog line read
+  `todo / blocked / done` and left `[~]` out, so a task a run had just claimed
+  left `todo` and arrived nowhere: three tasks disappeared from a line whose
+  numbers a human is meant to be able to add up. `hzl on` prints that block and
+  launchd starts the run about a minute later, which is exactly long enough for
+  `3 todo` and a `hzl next` that finds nothing to look like the two commands
+  disagreeing about the same file. The counts now partition the ledger.
+- **`hzl next` says what is in progress instead of "nothing to do".**
+  `backlog_next_row` only ever returns a `[ ]`, so an empty answer meant both
+  "the ledger is finished" and "a run has claimed everything that was left",
+  and it reported the first either way. It now lists the `[~]` tasks with the
+  run holding them, read from the claim rather than from the marker's trailing
+  comment — claims are the authority and the marker is display
+  (`docs/RUNTIME-BACKENDS.md` §13.4). A `[~]` with no claim behind it is the
+  residue of a run that died holding one, and is named as such: only the next
+  run releases those.
+
 ## [0.2.8] - 2026-09-02
 
 ### Changed
