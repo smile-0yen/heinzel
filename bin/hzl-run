@@ -47,6 +47,8 @@ export HOME="${HOME:-$(cd ~ && pwd)}"
 . "${HEINZEL_ROOT}/lib/locks.sh"
 # shellcheck source=lib/finalize.sh
 . "${HEINZEL_ROOT}/lib/finalize.sh"
+# shellcheck source=lib/cancel.sh
+. "${HEINZEL_ROOT}/lib/cancel.sh"
 # shellcheck source=lib/runtimes.sh
 . "${HEINZEL_ROOT}/lib/runtimes.sh"
 # shellcheck source=lib/engines.sh
@@ -139,44 +141,81 @@ cleanup_ledger() {
 # Roll back an in-progress marker left by an interrupted run, and release the
 # lock, whatever happens from here on.
 cleanup() {
-  local rc=$?
+  local rc=$? stopped=1
   # First, and before anything below tries to take it: a run killed inside a
   # ledger mutation is still holding the backlog lock, and it is holding it
   # against itself. `lock_release` drops it only if this process is the holder,
   # so a lock somebody else has is left exactly where it is.
   lock_release "${LOCK_BACKLOG}" >/dev/null 2>&1
-  # A run that stops here stopped early: killed at the deadline, `hzl off`, a
-  # closed lid. The snapshot already says which tasks it was holding, and this
-  # is the line that says nobody finished. Recovery reads the two together.
-  if [ -n "${STORE_READY:-}" ] && [ -z "${STORE_ENDED:-}" ]; then
-    runstore_event "${STORE_RUN_ID}" run.interrupted \
-      "the runner stopped before the run ended (status ${rc})" 2>/dev/null
-    # And in the snapshot, not only the trail: `workflow.json` is what recovery
-    # reads, and one left saying `running` by a run that is not is a lie a
-    # reader has no way to catch. A run does not settle by being killed.
-    store_snapshot interrupted
-  fi
-  # This run's claims first, and only this run's: the tasks it was holding go
-  # back to `[ ]` and the claims go with them. Then the blanket pass, which is
-  # the legacy path and catches a `[~]` no claim ever covered. One transaction,
-  # because a reader who caught the ledger between the two would see a run that
-  # had given half its tasks back.
-  with_backlog_lock cleanup_ledger >/dev/null 2>&1
-  # An interrupted run leaves its worksheet in the working directory. It is
-  # scaffolding, and a stale one would be merged by nothing and read by nobody.
-  if [ -n "${WS_DIR:-}" ]; then
-    rm -f "${WS_DIR}/worksheet.md"
-    rmdir "${WS_DIR}" 2>/dev/null
-  fi
+
+  # The stop barrier, and it comes first because everything below it is a thing
+  # this run gives back (§14.5). A run ending here was killed — at the deadline,
+  # by `hzl off`, by a closed lid — and the engine underneath it did not stop
+  # just because the runner was told to: it is a live writer in the working
+  # directory. Soft interrupt, bounded grace, force stop, then look. The
+  # process group and not the process, because `hzl_timeout` starts every engine
+  # at the head of one so that its own children go with it.
   if [ -n "${HEINZEL_ENGINE_PID:-}" ] && pid_alive "${HEINZEL_ENGINE_PID}"; then
-    hzl_signal_tree TERM "${HEINZEL_ENGINE_PID}"
+    cancel_stop "${HEINZEL_ENGINE_PID}" "${CANCEL_GRACE_SEC}" "${CANCEL_KILL_SEC}" tree ||
+      stopped=0
   fi
-  # Ownership goes last, and after the engine has been told to stop: a lease
-  # released while the writer it stands for is still running would let the next
-  # run into a working directory that has one (§14.3, invariant 14).
-  if [ -n "${LEASE_HELD:-}" ]; then
-    lease_release "${WS_IDENTITY}" "${STORE_RUN_ID}" >/dev/null 2>&1
+  # A quiesce that already gave up says so, and is not asked again.
+  [ -n "${ORPHANED:-}" ] && stopped=0
+
+  # A run that stops here stopped early. The snapshot already says which tasks
+  # it was holding, and this is the line that says nobody finished; recovery
+  # reads the two together. `workflow.json` is what recovery reads, and one left
+  # saying `running` by a run that is not is a lie a reader has no way to catch.
+  if [ -n "${STORE_READY:-}" ] && [ -z "${STORE_ENDED:-}" ]; then
+    if [ "${stopped}" = 0 ]; then
+      runstore_event "${STORE_RUN_ID}" run.orphaned \
+        "the writer could not be confirmed stopped; ownership is kept" 2>/dev/null
+      store_snapshot orphaned
+    elif cancel_requested "${STORE_RUN_ID}"; then
+      # Somebody asked for this. The receipt is what makes the release below
+      # safe, and the record says cancelled rather than interrupted — a run that
+      # was told to stop and did is not the same event as one that fell over.
+      cancel_confirm "${STORE_RUN_ID}" "the engine is gone and the runner is exiting" \
+        >/dev/null 2>&1
+      runstore_event "${STORE_RUN_ID}" run.cancelled \
+        "stopped on a '$(cancel_reason "${STORE_RUN_ID}")' request (status ${rc})" 2>/dev/null
+      store_snapshot cancelled
+    else
+      runstore_event "${STORE_RUN_ID}" run.interrupted \
+        "the runner stopped before the run ended (status ${rc})" 2>/dev/null
+      store_snapshot interrupted
+    fi
   fi
+
+  if [ "${stopped}" = 1 ]; then
+    # This run's claims first, and only this run's: the tasks it was holding go
+    # back to `[ ]` and the claims go with them. Then the blanket pass, which is
+    # the legacy path and catches a `[~]` no claim ever covered. One
+    # transaction, because a reader who caught the ledger between the two would
+    # see a run that had given half its tasks back.
+    with_backlog_lock cleanup_ledger >/dev/null 2>&1
+    # An interrupted run leaves its worksheet in the working directory. It is
+    # scaffolding, and a stale one would be merged by nothing and read by
+    # nobody.
+    if [ -n "${WS_DIR:-}" ]; then
+      rm -f "${WS_DIR}/worksheet.md"
+      rmdir "${WS_DIR}" 2>/dev/null
+    fi
+    # Ownership goes last, and only after the writer has been confirmed gone: a
+    # lease released while the engine it stands for is still running would let
+    # the next run into a working directory that has one (§14.3, invariant 14).
+    if [ -n "${LEASE_HELD:-}" ]; then
+      lease_release "${WS_IDENTITY}" "${STORE_RUN_ID}" >/dev/null 2>&1
+    fi
+  else
+    # `ORPHANED`: not a failure and not a success, but a stop nothing could
+    # confirm. Everything stays where it is — the task claims, the worksheet and
+    # the writer lease — so that no new writer is started into a checkout that
+    # may still have one, and a human is told plainly (§9.2, §14.5).
+    log_event HALT "run ${STORE_RUN_ID:-?} is ORPHANED: its writer could not be confirmed stopped. Task claims and the writer lease are kept - look before starting another run."
+    [ "${rc}" -eq 0 ] && rc=1
+  fi
+
   if [ -n "${RUN_LOCK_HELD:-}" ]; then
     lock_release "${RUN_LOCK_NAME}" >/dev/null 2>&1
   fi
@@ -571,6 +610,40 @@ engine_run "${HEINZEL_EXECUTOR_ENGINE}" executor "${WORKDIR}" \
 ENGINE_RC=$?
 ENDED=$(now_epoch)
 
+# --- the quiesce: the write barrier between working and being read -----------
+# Between the engine ending and anything acting on what it wrote there is one
+# barrier (§9.2 `QUIESCING`). Two things have to be true on the far side of it:
+# the writer this run started is gone, and the state of the working directory it
+# left is frozen — because everything from here on is evidence *about* that
+# state, and evidence about a workspace that has since moved is not evidence
+# about this one (§13.2).
+#
+# `hzl_timeout` has already waited for the engine on every ordinary path, so
+# this is almost always an observation rather than a stop. The case it exists
+# for is the engine that outlived its own watchdog: a live writer, and a run
+# about to read the files it is still writing.
+ORPHANED=""
+if [ -n "${HEINZEL_ENGINE_PID:-}" ] && pid_alive "${HEINZEL_ENGINE_PID}"; then
+  store_event engine.quiescing "the engine outlived its own wait; stopping it"
+  if ! cancel_stop "${HEINZEL_ENGINE_PID}" "${CANCEL_GRACE_SEC}" "${CANCEL_KILL_SEC}" tree; then
+    # Not verified, not merged, nothing released. A stop that cannot be
+    # confirmed does not go on to write the ledger, and the EXIT trap below
+    # keeps the claims and the lease for the same reason (§9.2).
+    ORPHANED=1
+    store_event run.orphaned \
+      "the engine could not be confirmed stopped; the ledger was not written"
+    log_event HALT "run ${RUN_ID} is ORPHANED: its engine could not be stopped, so nothing it produced was verified or merged."
+    exit 1
+  fi
+fi
+QUIESCE_GEN=$(quiesce_freeze "${STORE_RUN_ID}" "${WS_IDENTITY}" "${WORKDIR}")
+if [ -n "${QUIESCE_GEN}" ]; then
+  store_event workspace.frozen \
+    "generation ${QUIESCE_GEN}, digest $(quiesce_digest "${STORE_RUN_ID}")"
+else
+  log_event skip "could not freeze the workspace digest for run ${STORE_RUN_ID}"
+fi
+
 RESULT="${EXEC_DIR}/result.json"
 if [ -r "${RESULT}" ]; then
   VERDICT=$(jq -r '.verdict' "${RESULT}" 2>/dev/null)
@@ -727,7 +800,30 @@ if [ "${HEINZEL_REVIEW}" = 1 ]; then
       REVIEW_ACTION="the review produced no verdict"
     fi
 
+    # Is the verdict about this working directory, or about one that has since
+    # gone? The reviewer read the tree that was frozen at the quiesce; if
+    # something moved it while the review was running — another process, a human
+    # editing the checkout, a build left running — then the verdict describes a
+    # state that no longer exists (§13.2).
+    #
+    # Stale evidence is not reused in either direction. Not the approval, which
+    # is not evidence that what is there now passes; and not the rejection,
+    # which would revert real work on the strength of a reading of something
+    # else. The work stands, the ledger is left as the executor left it, and the
+    # handover says the review did not conclude — which is the shape of
+    # `NEEDS_REVIEW` in a runner that does not have a workflow outcome yet.
+    if ! quiesce_unchanged "${STORE_RUN_ID}" "${WORKDIR}"; then
+      store_event verification.stale \
+        "the workspace moved under the review; verdict '${REVIEW_VERDICT}' not reused"
+      log_event skip "the working directory changed while run ${RUN_ID} was being reviewed; the verdict was not applied"
+      REVIEW_VERDICT=stale
+      REVIEW_ACTION="NOT REVIEWED: the working directory changed while the review was running, so its verdict is about a state that no longer exists"
+      REVIEW_RC=stale
+    fi
+
     case ${REVIEW_RC} in
+      # Nothing is applied. `REVIEW_ACTION` above is the whole of what happens.
+      stale) ;;
       0)
         REVIEW_ACTION="approved: ${REVIEW_ACTION}"
         ;;
@@ -759,6 +855,17 @@ if [ "${HEINZEL_REVIEW}" = 1 ]; then
               engine_run "${HEINZEL_EXECUTOR_ENGINE}" fixer "${WORKDIR}" \
                 "${FIX_DIR}/prompt.md" "${FIX_DIR}" "${LEFT_NOW}" >>"${RUN_LOG}" 2>&1
               REVIEW_FIXED=true
+              # The fixer is a writer, under the same lease, so the barrier runs
+              # again and the freeze is retaken. What it left behind is a new
+              # state of the working directory, and the re-review is evidence
+              # about that one — a new generation, not a second reading of the
+              # first (§9.2).
+              if [ -n "${HEINZEL_ENGINE_PID:-}" ] && pid_alive "${HEINZEL_ENGINE_PID}"; then
+                cancel_stop "${HEINZEL_ENGINE_PID}" "${CANCEL_GRACE_SEC}" \
+                  "${CANCEL_KILL_SEC}" tree
+              fi
+              store_event workspace.frozen \
+                "generation $(quiesce_freeze "${STORE_RUN_ID}" "${WS_IDENTITY}" "${WORKDIR}"), after the fix pass"
               REVIEW_DIR2="${RUN_DIR}/review2-$(date +%H%M%S)"
               "${HEINZEL_ROOT}/bin/hzl-review" "${WORKDIR}" "${SNAP_DIR}" "${RUN_ID}" \
                 "${REVIEW_DIR2}" "re-review after one fix pass" >>"${RUN_LOG}" 2>&1
@@ -767,7 +874,14 @@ if [ "${HEINZEL_REVIEW}" = 1 ]; then
                 REVIEW_VERDICT=$(jq -r '.verdict // "failed"' "${REVIEW_DIR2}/verdict.json")
                 REVIEW_FINDINGS=$(jq -r '(.findings // []) | length' "${REVIEW_DIR2}/verdict.json")
               fi
-              if [ "${RC2}" -eq 0 ]; then
+              if ! quiesce_unchanged "${STORE_RUN_ID}" "${WORKDIR}"; then
+                # The same rule as above, one step later: a second verdict about
+                # a workspace that moved under it is not reused either.
+                store_event verification.stale \
+                  "the workspace moved under the re-review; verdict '${REVIEW_VERDICT}' not reused"
+                REVIEW_VERDICT=stale
+                REVIEW_ACTION="revise, fixed in one pass; NOT REVIEWED: the working directory changed while the re-review was running"
+              elif [ "${RC2}" -eq 0 ]; then
                 REVIEW_ACTION="revise, fixed in one pass, then approved"
               else
                 # Still not right: the work stays done and a follow-up task is

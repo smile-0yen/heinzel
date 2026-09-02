@@ -6,6 +6,112 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-03
+
+The Phase 2 slice on the local backend, completed: the three fault transitions
+that were left over, and the durable cancel intent all three of them needed
+(`docs/RUNTIME-BACKENDS.md` §20 Phase 2).
+
+### Added
+- **A durable cancel intent, a stop barrier, and a workspace freeze**
+  (`lib/cancel.sh`; `docs/RUNTIME-BACKENDS.md` §9.2, §13.2, §14.4, §14.5;
+  `docs/SPEC.md` §3.2, §11.5). `hzl off` sent a signal, waited thirty seconds,
+  sent a stronger one, printed a summary and returned `0`. Nothing checked that
+  the process had gone, nothing recorded that a stop had been *asked for*, and
+  what the run was holding was given back by its own EXIT trap — which does not
+  run when the run is killed outright. One mechanism closes all three: an intent
+  written before anything is signalled, a bounded stop that ends in an
+  observation, and a receipt that is the only thing saying the stop happened.
+- `cancel.intent.json` / `cancel.receipt.json` in the run store, the same shape
+  as the finalize pair and for the same reason: an intent with no receipt beside
+  it is the only record that a thing was asked for and may not have happened. An
+  intent that already exists is left alone — the first cause is the true one, and
+  a later request that overwrote it would turn the record of *why* into the
+  record of what happened last.
+- `quiesce.json`: the working directory as it stood at the moment the writer was
+  confirmed gone. Content and not timestamps — `.git` answers with `HEAD` and its
+  porcelain status, everything else with `cksum`, and the build, cache and
+  `.heinzel` directories are never walked into. A digest that moved every time a
+  test wrote a `.pyc` would report every review as stale.
+- `runstore_set_state <run-id> <state>`, which moves the one field and leaves the
+  rest of the snapshot as the run wrote it. `hzl off` settles a run it has just
+  stopped and does not know that run's task ids or exec directory; a snapshot
+  rebuilt from outside would quietly drop what recovery reads.
+- `runner_state` gained `cancelling`, `cancelled` and `orphaned`. `cancelling` is
+  checked against its pid like the other working states, because a run asked to
+  stop is still running until something says otherwise. `runstore_prune` sweeps
+  `cancelled` with `ended` and keeps the other two: §14.7 counts a stop in
+  progress and a stop that could not be confirmed as active, and a store swept out
+  from under an orphan takes with it the only record of what is still holding the
+  checkout.
+
+### Changed
+- **`hzl off` confirms the process is gone before it releases anything.** A
+  durable cancel intent goes down for every active run, then the barrier, and
+  only on the strength of an observed stop are that run's task claims, its `[~]`
+  markers and its writer lease released. A run killed outright never ran its own
+  trap, so this is the only thing that will.
+- **A stop that cannot be confirmed is `ORPHANED`.** Not a failure and not a
+  success but an unanswered question: the claims, the worksheet and the writer
+  lease all stay where they are so no new writer is started into a checkout that
+  may still have one, a `HALT` line names the run, and `hzl off` exits non-zero.
+  Setting `mode = "normal"` is no longer reported as though it were a stop.
+- **`hzl travel` applies the posture whatever the barrier said, and then exits
+  with the barrier's status.** A machine going into a bag is closed up even when
+  a process will not die — a firewall left open is the worse of the two failures
+  — but an unconfirmed stop is not reported as a success either.
+- **The runner runs the same barrier against its own engine.** Its EXIT trap used
+  to send one `TERM` to the engine tree and release the writer lease in the next
+  breath, which is a lease given back while the writer it stands for is still
+  editing the checkout. The barrier now comes first and ownership is conditional
+  on it. On the ordinary path the engine has already been waited for, so nothing
+  about a normal run changes.
+- **Verification evidence is not reused after the workspace moved under it**
+  (§13.2). The review's verdict describes the tree that was frozen at the
+  quiesce; if something changed it while the review was running, the verdict is
+  about a state that no longer exists and is discarded in *both* directions —
+  not the approval, which is not evidence that what is there now passes, and not
+  the rejection, which would revert real work on the strength of a reading of
+  something else. The work stands, `review.verdict` is `stale`, and the handover
+  says the review did not conclude. A fix pass is a new writer, so the barrier
+  and the freeze run again and the re-review is evidence about a new generation.
+- An engine that outlives its own watchdog stops the run before the merge rather
+  than after it: verification and a ledger commit do not happen on the far side
+  of an unconfirmed stop.
+- `hzl off` reads the backlog path while the session is still live. Step 1 sets
+  the mode to `normal`, and `cur_backlog` answers with the compiled-in default
+  from that moment on — so the rollback would have moved no markers, and the
+  "blocked, needs you" line has been counting the wrong file, usually no file at
+  all.
+
+### Not in this change
+- The `FINALIZING` intent does not yet carry the frozen workspace digest. §9.2
+  asks it to, but the merge runs *before* the review in this runner, so the
+  digest is trivially fresh there and the field would be recorded and never read.
+  It belongs with the reordering in Phase 4, not ahead of it.
+- There is no automatic way out of `ORPHANED`. §9.2's `ORPHANED -> CANCEL_PENDING`
+  retry needs a reconcile loop that outlives the command that found the orphan,
+  and that is the controller, later in the phase. `docs/RUNBOOK.md` documents the
+  manual path.
+
+### Fixed
+- **`hzl status` counts all four markers, not three.** The backlog line read
+  `todo / blocked / done` and left `[~]` out, so a task a run had just claimed
+  left `todo` and arrived nowhere: three tasks disappeared from a line whose
+  numbers a human is meant to be able to add up. `hzl on` prints that block and
+  launchd starts the run about a minute later, which is exactly long enough for
+  `3 todo` and a `hzl next` that finds nothing to look like the two commands
+  disagreeing about the same file. The counts now partition the ledger.
+- **`hzl next` says what is in progress instead of "nothing to do".**
+  `backlog_next_row` only ever returns a `[ ]`, so an empty answer meant both
+  "the ledger is finished" and "a run has claimed everything that was left",
+  and it reported the first either way. It now lists the `[~]` tasks with the
+  run holding them, read from the claim rather than from the marker's trailing
+  comment — claims are the authority and the marker is display
+  (`docs/RUNTIME-BACKENDS.md` §13.4). A `[~]` with no claim behind it is the
+  residue of a run that died holding one, and is named as such: only the next
+  run releases those.
+
 ## [0.2.8] - 2026-09-02
 
 ### Changed

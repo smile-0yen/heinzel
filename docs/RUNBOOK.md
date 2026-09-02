@@ -86,16 +86,41 @@ the morning, it is written for a human.
 `~/.heinzel/runs/<run-id>/` is one directory per run that got as far as calling
 an engine: `workflow.json` says where that run had got to and which task ids it
 was holding, and `events.jsonl` says what happened, one line at a time. A run
-killed at the deadline or by `hzl off` leaves a `run.interrupted` line and a
-snapshot naming the tasks it was holding — which is how you tell a run that was
-stopped from one that finished quietly. Nothing reads these to decide anything
-yet; they are there to be read by you.
+killed at the deadline leaves a `run.interrupted` line and a snapshot naming the
+tasks it was holding — which is how you tell a run that was stopped from one
+that finished quietly. A run stopped by `hzl off` leaves more: a
+`cancel.intent.json` saying a stop was asked for and why, and, once something has
+watched the process go, a `cancel.receipt.json` saying it happened. Those two
+files are the difference between "we asked" and "it stopped".
 
 `~/.heinzel/claims/` is who is holding which task, and for which run. The `[~]`
 you see in the ledger is a display of it, not the record — the record is here,
 where the agent cannot write. If a run is killed, its claims stay until the next
 run releases them, and that release names the dead run and touches nothing else.
 Nothing in the ledger tells you which run holds a `[~]`; the claim does.
+
+### `ORPHANED`
+
+`hzl off` exits non-zero, `hzl travel` closes the machine up and then exits
+non-zero, and the runner log has a `HALT` line naming a run. It means a process
+was asked to stop and **nothing could confirm that it did**. It is not a failure
+and not a success: it is an unanswered question, and until it is answered that
+run's task claims and its writer lease are deliberately kept, so no new run will
+touch that checkout.
+
+What to do, in order:
+
+```sh
+hzl status                              # what the session thinks
+cat ~/.heinzel/runs/<run-id>/cancel.intent.json    # what was asked, and when
+ps -p $(jq -r .target_pid ~/.heinzel/runs/<run-id>/cancel.intent.json)
+```
+
+If the process really is gone, the barrier lost a race and the run is over;
+deleting `~/.heinzel/workspace-leases/` and the run's entries under
+`~/.heinzel/claims/` releases the checkout. If it is still there, it is still
+writing to your working directory — stop it yourself before anything else, and
+do not start a run until you have.
 
 Those records carry a `schema_version`, and so do `state.json` and each run's
 `result.json`. A file without the field is version 1 and is read as one — by
@@ -143,7 +168,7 @@ managed for you:
 
 | Command | Effect |
 |---|---|
-| `hzl next` | What would be picked up next, and why |
+| `hzl next` | What would be picked up next, and why. When nothing is free it lists what is in progress and which run holds it, rather than reading as an empty backlog |
 | `hzl take` | Everything blocked, with priorities |
 | `hzl take <id>` | A prompt to paste into an interactive session |
 | `hzl done <id> "note"` | Close it out by hand |

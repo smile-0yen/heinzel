@@ -23,6 +23,7 @@
 #   runstore_is_run_id <name>                   -> is this a store, or something else
 #   runstore_init     <run-id>                  -> creates it
 #   runstore_snapshot <run-id> <json>           -> replaces workflow.json
+#   runstore_set_state <run-id> <state>         -> moves the state, keeps the rest
 #   runstore_read     <run-id>                  -> the snapshot on stdout
 #   runstore_runner_state <run-id>              -> what is true, not what it says
 #   runstore_event    <run-id> <kind> [message] -> appends one line
@@ -130,6 +131,26 @@ runstore_read() {
   cat "${dir}/workflow.json"
 }
 
+# Move one run's state and leave the rest of its snapshot exactly as the run
+# wrote it.
+#
+# The caller here is not the run — it is `hzl off` settling a run it has just
+# confirmed stopped, or a recovery settling one that is over. Such a caller does
+# not know the run's task ids, its exec directory or when it started, so a
+# snapshot rebuilt from outside would quietly drop the fields recovery reads.
+# Read, set one field, write the whole thing back through the same atomic
+# replace, which is also what stops this from being a partial write.
+runstore_set_state() { # run-id runner-state
+  local id=$1 state=$2 snap out
+  [ -n "${state}" ] || return 1
+  snap=$(runstore_read "${id}") || return 1
+  out=$(printf '%s' "${snap}" |
+    jq -c --arg s "${state}" --arg at "$(iso_at)" \
+      '.runner_state = $s | .updated_at = $at' 2>/dev/null) || return 1
+  [ -n "${out}" ] || return 1
+  runstore_snapshot "${id}" "${out}"
+}
+
 # What a reader may believe, which is not always what the snapshot says.
 #
 # A snapshot is written by the run it describes, so the last one a killed run
@@ -148,7 +169,13 @@ runstore_runner_state() {
   state=$(printf '%s' "${snap}" | jq -r '.runner_state // ""' 2>/dev/null)
   [ -n "${state}" ] || state=unknown
   case ${state} in
-    queued|running|merging) ;;
+    # `cancelling` is here with the working states on purpose: a run that has
+    # been asked to stop is still running until something says otherwise, and
+    # the thing that says otherwise is the cancel receipt, not the passage of
+    # time. `orphaned` is not, because it is already the answer to this
+    # question — a stop that could not be confirmed stays unconfirmed however
+    # many times it is read (§9.2).
+    queued|running|merging|cancelling) ;;
     *) printf '%s' "${state}"; return 0 ;;
   esac
   pid=$(printf '%s' "${snap}" | jq -r '.pid // empty' 2>/dev/null)
@@ -220,11 +247,14 @@ _runstore_commit_pending() { # run-id
 #
 #   the shape   only `r-<stamp>-<suffix>` is eligible. A directory a human left
 #               under `runs/` is not housekeeping's to delete
-#   the state   only `ended`. Everything from queued to merging is a run that is
-#               still working, and `interrupted` is a run that stopped without
-#               settling — §14.7 counts both as active and neither is GC'd. A
-#               store with no readable snapshot is left alone too: a run that
-#               cannot be shown to have ended has not been shown to have ended
+#   the state   only `ended` and `cancelled`, the two states in which a run is
+#               over and something watched it end. Everything from queued to
+#               merging is still working; `interrupted` stopped without
+#               settling; `cancelling` was asked to stop and has not answered;
+#               `orphaned` could not be confirmed stopped at all — §14.7 counts
+#               all four as active and none is GC'd. A store with no readable
+#               snapshot is left alone too: a run that cannot be shown to have
+#               ended has not been shown to have ended
 #   the commit  a run holding a finalize intent with no receipt stays, whatever
 #               its snapshot says
 #
@@ -241,7 +271,10 @@ runstore_prune() { # [days]
     id=${d##*/}
     runstore_is_run_id "${id}" || continue
     state=$(runstore_runner_state "${id}" 2>/dev/null)
-    [ "${state}" = ended ] || continue
+    case ${state} in
+      ended|cancelled) ;;
+      *) continue ;;
+    esac
     _runstore_commit_pending "${id}" && continue
     rm -rf "${base:?}/${id}" 2>/dev/null && printf '%s\n' "${id}"
   done <<EOF

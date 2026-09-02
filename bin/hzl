@@ -57,6 +57,15 @@ export PATH="${PATH}:/usr/local/bin:/opt/homebrew/bin:${HOME}/.local/bin"
 . "${HEINZEL_ROOT}/lib/claims.sh"
 # shellcheck source=lib/locks.sh
 . "${HEINZEL_ROOT}/lib/locks.sh"
+# `hzl off` has to find the runs it owns, write a durable cancel intent for each
+# and settle their snapshots once they have stopped, so the interactive side
+# needs the store and the barrier that reads it (RUNTIME-BACKENDS §14.4).
+# shellcheck source=lib/watchdog.sh
+. "${HEINZEL_ROOT}/lib/watchdog.sh"
+# shellcheck source=lib/runstore.sh
+. "${HEINZEL_ROOT}/lib/runstore.sh"
+# shellcheck source=lib/cancel.sh
+. "${HEINZEL_ROOT}/lib/cancel.sh"
 
 RUNNER="${HEINZEL_ROOT}/bin/hzl-run"
 PLIST_DIR="${HOME}/Library/LaunchAgents"
@@ -194,8 +203,15 @@ cmd_status() {
   field "sleep suppressed" "$([ "$(sleep_disabled)" = 1 ] && echo "yes (disablesleep=1)" || echo no)"
   field "power" "$(on_ac_power && echo "AC" || echo "battery $(battery_pct)")"
 
+  # All four markers, always, even at zero. Three of them was not a shorter
+  # version of the same line: `[~]` is a state a task sits in for as long as a
+  # run holds it, so leaving it out meant a task the runner had just claimed
+  # left `todo` without arriving anywhere. `hzl on` prints this block and
+  # launchd starts the run a minute later, which is exactly long enough for
+  # "3 todo" and a `next` that finds nothing to look like a contradiction.
+  # The counts partition the ledger; that is the property worth reading.
   if [ -n "${backlog}" ] && [ -r "${backlog}" ]; then
-    field "backlog" "$(backlog_count "${backlog}" " ") todo / $(backlog_count "${backlog}" "!") blocked / $(backlog_count "${backlog}" x) done"
+    field "backlog" "$(backlog_count "${backlog}" " ") todo / $(backlog_count "${backlog}" "~") in progress / $(backlog_count "${backlog}" "!") blocked / $(backlog_count "${backlog}" x) done"
   else
     field "backlog" "not readable (${backlog:-unset})"
   fi
@@ -439,6 +455,65 @@ cmd_on() {
 
 # --- session: off ----------------------------------------------------------
 
+# Every run under this HEINZEL_HOME that has not ended: what `off` owns and has
+# to stop (§14.4). A run whose snapshot cannot be read is not listed — there is
+# nothing to stop it *by* — and `runstore_runner_state` is what is asked rather
+# than the snapshot's own word, so a run that says `running` and has no process
+# behind it is already settled and not signalled again.
+off_active_runs() {
+  local r s
+  while IFS= read -r r; do
+    [ -n "${r}" ] || continue
+    s=$(runstore_runner_state "${r}" 2>/dev/null)
+    case ${s} in
+      queued|running|merging|cancelling) printf '%s\n' "${r}" ;;
+    esac
+  done <<EOF
+$(runstore_runs)
+EOF
+}
+
+# Give back what a stopped run was holding. Only called once the process has
+# been observed gone: a run killed outright never ran its own EXIT trap, so this
+# is the only thing that will release its claims and its writer lease, and
+# calling it any earlier would hand the checkout to the next run while a writer
+# was still in it (§14.3, invariant 14).
+# The backlog is passed in rather than read here, and the workdir comes from the
+# run's own snapshot. `cur_backlog` and `cur_workdir` answer only while a session
+# is live, and step 1 of `off` has already set the mode to `normal` by the time
+# anything is released — so asking them here would return the compiled-in
+# default, and the rollback would quietly move no markers at all.
+off_release() { # run-id backlog
+  local r=$1 b=$2 wd ident n=0
+  wd=$(runstore_read "${r}" 2>/dev/null | jq -r '.workdir // empty' 2>/dev/null)
+  [ -n "${wd}" ] || wd=$(state_get .workdir "${DEFAULT_WORKDIR}")
+  ident=$(claims_workspace_identity "${wd}" 2>/dev/null)
+  if [ -n "${ident}" ]; then
+    n=$(with_backlog_lock claims_rollback_run "${ident}" "${b}" "${r}")
+    : "${n:=0}"
+    lease_release "${ident}" "${r}" >/dev/null 2>&1
+  fi
+  runstore_event "${r}" run.cancelled \
+    "stopped by 'hzl off'; ${n} marker(s) returned to todo" 2>/dev/null
+  runstore_set_state "${r}" cancelled >/dev/null 2>&1
+  [ "${n}" -gt 0 ] && say "  returned ${n} task(s) to todo"
+  return 0
+}
+
+# The other answer, and the one this whole barrier exists to be able to give.
+# `ORPHANED` is not a failure and not a success: it is a stop nothing could
+# confirm, so ownership is kept, no new writer is started, and a human is told
+# in words rather than by an exit code alone (§9.2, §14.4).
+off_orphan() { # run-id why
+  local r=$1 why=$2
+  runstore_event "${r}" run.orphaned "${why}; claims and the writer lease are kept" 2>/dev/null
+  runstore_set_state "${r}" orphaned >/dev/null 2>&1
+  bad "run ${r} could not be confirmed stopped (${why})."
+  err "it is ORPHANED: its task claims and its writer lease are kept, so no new"
+  err "run will touch that checkout until you have looked at it."
+  log_event HALT "run ${r} is ORPHANED after 'hzl off': ${why}"
+}
+
 cmd_off() {
   require_not_root
   local unload=0 use_sudo=1
@@ -451,11 +526,15 @@ cmd_off() {
     shift
   done
 
-  local was_on started done_n runs
+  local was_on started done_n runs backlog
   was_on=$(effective_mode)
   started=$(state_get .activated_at_epoch 0)
   done_n=$(state_get .tasks_done_total 0)
   runs=$(state_get .runs_completed 0)
+  # Read while the session is still live. Everything below runs after the mode
+  # has been set to `normal`, and `cur_backlog` answers with the compiled-in
+  # default from that moment on.
+  backlog=$(cur_backlog)
 
   # 1. First, so that any run starting from here on no-ops. Everything else is
   # cleanup and can fail without leaving a session that still fires.
@@ -464,16 +543,51 @@ cmd_off() {
       warn "could not update ${STATE_FILE}"
   fi
 
-  # 2. Stop a run in flight. Its EXIT trap rolls [~] back to [ ].
+  # 2. Stop the runs in flight, and do not report a stop that did not happen.
+  #
+  # The order is fixed by §14.4: new dispatch stops first (step 1 above), then a
+  # durable cancel intent goes down for every run this HEINZEL_HOME owns, then
+  # the barrier, and only after the barrier confirms the process is gone are the
+  # claims and the writer lease released. The intent is written before anything
+  # is signalled because `hzl off` can be interrupted too: without it, a stop
+  # requested and never completed is indistinguishable afterwards from a run
+  # that fell over for no reason.
+  local orphaned=0 r rp
+  while IFS= read -r r; do
+    [ -n "${r}" ] || continue
+    rp=$(runstore_read "${r}" 2>/dev/null | jq -r '.pid // empty' 2>/dev/null)
+    cancel_request "${r}" off "${rp:-0}" >/dev/null 2>&1 ||
+      warn "could not record the cancel intent for run ${r}"
+    runstore_set_state "${r}" cancelling >/dev/null 2>&1
+    if pid_alive "${rp}"; then
+      say "stopping run ${r} (pid ${rp})"
+      if ! cancel_stop "${rp}" "${CANCEL_RUNNER_GRACE_SEC}" "${CANCEL_KILL_SEC}"; then
+        off_orphan "${r}" "the runner did not stop"
+        orphaned=$((orphaned + 1))
+        continue
+      fi
+    fi
+    cancel_confirm "${r}" "the runner process is gone" >/dev/null 2>&1
+    off_release "${r}" "${backlog}"
+  done <<EOF
+$(off_active_runs)
+EOF
+
+  # The run with no store. Creating one is allowed to fail and the run happens
+  # anyway, so `run.pid` is still the only handle on such a run. Nothing durable
+  # can be recorded for it — there is no store to record it in — but it is
+  # stopped by the same barrier and confirmed the same way. A run that was
+  # handled above is already gone by now, so this is a no-op for it.
   if [ -r "${RUN_PID_FILE}" ]; then
-    local rp i
     rp=$(cat "${RUN_PID_FILE}" 2>/dev/null)
     if pid_alive "${rp}"; then
       say "stopping the run in progress (pid ${rp})"
-      kill -TERM "${rp}" 2>/dev/null
-      i=0
-      while [ ${i} -lt 30 ] && pid_alive "${rp}"; do sleep 1; i=$((i + 1)); done
-      pid_alive "${rp}" && kill -KILL "${rp}" 2>/dev/null
+      if ! cancel_stop "${rp}" "${CANCEL_RUNNER_GRACE_SEC}" "${CANCEL_KILL_SEC}"; then
+        bad "the run at pid ${rp} could not be confirmed stopped."
+        err "it is ORPHANED: whatever it was holding is still held."
+        log_event HALT "'hzl off' could not stop the run at pid ${rp}"
+        orphaned=$((orphaned + 1))
+      fi
     fi
   fi
 
@@ -513,8 +627,10 @@ cmd_off() {
   else
     say "no session was running; cleaned up anyway."
   fi
-  local backlog
-  backlog=$(cur_backlog)
+  # The one read at the top, not a fresh one: the session is `normal` by now and
+  # `cur_backlog` would answer with the compiled-in default, so this line has
+  # been counting the wrong file — usually no file at all — since the mode
+  # started being flipped first.
   if [ -n "${backlog}" ] && [ -r "${backlog}" ]; then
     field "blocked, needs you" "$(backlog_count "${backlog}" "!")"
   fi
@@ -523,7 +639,20 @@ cmd_off() {
   notes="${LOG_DIR}/${today}/notes.md"
   [ -r "${notes}" ] && field "handover notes" "${notes}"
   printf '\n'
+
+  # Setting the mode to `normal` is not the same statement as "it has stopped",
+  # and this is where the two stop being reported as one (§14.4). The session is
+  # off either way and no new run will start; what a non-zero exit says is that
+  # something is still holding a checkout and nobody watched it let go.
+  if [ "${orphaned}" -gt 0 ]; then
+    log_event HALT "session off, but ${orphaned} run(s) are ORPHANED"
+    bad "${orphaned} run(s) could not be confirmed stopped."
+    err "the session is off and no new run will start, but the work those runs"
+    err "were doing is still claimed and their checkouts are still leased."
+    return 1
+  fi
   log_event ok "session off after ${runs} run(s), ${done_n} task(s)"
+  return 0
 }
 
 cmd_resume() {
@@ -592,9 +721,10 @@ cmd_travel() {
 
   # A live session cannot survive travel, and leaving one running would keep
   # firing runs from a bag. Stop it first, and say so (DESIGN 2.2).
+  local stop_rc=0
   if [ "${dry}" = 0 ] && [ "$(effective_mode)" = heinzel ]; then
     say "a session is running; stopping it before closing the machine up."
-    cmd_off
+    cmd_off || stop_rc=$?
   fi
 
   if posture_apply travel; then
@@ -603,6 +733,18 @@ cmd_travel() {
     bad "travel posture applied with ${POSTURE_FAILED} problem(s) - see above."
   fi
   [ "${dry}" = 0 ] && cmd_status
+
+  # The posture change is never skipped and never rolled back: a machine going
+  # into a bag is closed up whatever the runner did, and a firewall left open
+  # because a process would not die is the worse of the two failures. But a stop
+  # that could not be confirmed is not reported as a success — travel exits
+  # non-zero with the posture applied and the run named (§14.4).
+  if [ "${stop_rc}" -ne 0 ]; then
+    printf '\n'
+    bad "the machine is closed up, but a run could not be confirmed stopped."
+    err "it is ORPHANED and still owns its checkout - see the message above."
+    return "${stop_rc}"
+  fi
   return 0
 }
 
@@ -646,11 +788,59 @@ need_backlog() {
   printf '%s' "${b}"
 }
 
+# What `[~]` means when there is nothing left to hand out: a run is holding
+# these, or one died holding them. Claims are the authority and the marker is
+# display (§13.4), so the run id is read from the claim rather than from the
+# trailing comment the marker carries; a `[~]` with no claim behind it is stale
+# and is listed saying so instead of being left out.
+next_in_progress() {
+  local b=$1 rows n ident id holders
+
+  rows=$(backlog_scan "${b}" 2>/dev/null | awk -F'\t' '$3 == "~"')
+  [ -n "${rows}" ] || { say "nothing to do - no todo items."; return 0; }
+  n=$(printf '%s\n' "${rows}" | awk 'END {print NR}')
+
+  # Who holds them, deduplicated: one run claiming all three is the ordinary
+  # case, and repeating its id on every row would say nothing per row.
+  ident=$(claims_workspace_identity "$(cur_workdir)" 2>/dev/null)
+  holders=""
+  if [ -n "${ident}" ]; then
+    for id in $(printf '%s\n' "${rows}" | cut -f4); do
+      holders="${holders}$(claims_holder "${ident}" "${id}" 2>/dev/null)
+"
+    done
+    holders=$(printf '%s' "${holders}" | sed '/^$/d' | sort -u | tr '\n' ' ' |
+      sed 's/ *$//')
+  fi
+
+  printf '\n'
+  say "no todo items - ${n} in progress:"
+  printf '\n'
+  printf '%s\n' "${rows}" | awk -F'\t' '{printf "  P%-3s %-8s %s\n", $2, $4, $5}'
+  printf '\n'
+  if [ -n "${holders}" ]; then
+    dim "  held by run ${holders} - nothing here is waiting on you"
+  else
+    # A marker with no claim behind it is the residue of a run that died
+    # holding one. Only a run releases those — `hzl-run`'s "claims left
+    # behind" pass, which runs once it holds the writer lease — so there is no
+    # command to offer here. Saying which way it resolves is the useful part;
+    # inventing a `hzl` subcommand for it would not be.
+    dim "  no claim holds these - a run that died left the markers; the next run releases them"
+  fi
+  printf '\n'
+}
+
 cmd_next() {
   local b row
   b=$(need_backlog) || exit 1
   row=$(backlog_next_row "${b}")
-  [ -n "${row}" ] || { say "nothing to do - no todo items."; return 0; }
+  # `backlog_next_row` only ever returns a `[ ]`, so "empty" here is both "the
+  # ledger is finished" and "a run has claimed everything that was left".
+  # Reporting the first when the second is true is how a `hzl on` that says
+  # 3 todo and a `hzl next` a minute later that says nothing to do end up
+  # looking like they disagree about the same file.
+  [ -n "${row}" ] || { next_in_progress "${b}"; return 0; }
   local nid
   nid=$(printf '%s' "${row}" | cut -f4)
   # Ids are allocated by the runner, so a task typed by hand has none yet.
@@ -1180,7 +1370,8 @@ session (unattended work)
                                --no-sudo          do not suppress sleep
                                --no-kick          do not run one immediately
                                --dry-run          say what would happen
-  hzl off [--unload]         stop it and restore what it changed
+  hzl off [--unload]         stop it and restore what it changed. Exits non-zero
+                             if a run could not be confirmed stopped
   hzl resume                 clear a halt
   hzl set [key N]            show or change limits mid-session
   hzl run-now [--dry-run]    run once now, ignoring the schedule window

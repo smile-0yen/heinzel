@@ -58,6 +58,10 @@ mkdir -p "${HEINZEL_HOME}"
 . "${TEST_ROOT}/lib/locks.sh"
 # shellcheck source=../lib/finalize.sh
 . "${TEST_ROOT}/lib/finalize.sh"
+# shellcheck source=../lib/watchdog.sh
+. "${TEST_ROOT}/lib/watchdog.sh"
+# shellcheck source=../lib/cancel.sh
+. "${TEST_ROOT}/lib/cancel.sh"
 
 # Read back what common.sh actually resolved, through `:-` so that a state path
 # it failed to define reads as empty and is refused rather than skipped. If
@@ -178,6 +182,63 @@ t_eq "an id-less row keeps an empty id field rather than shifting left" \
 t_eq "an id-less row keeps its text in field 5" \
   "a task the agent split off, with no id yet" \
   "$(printf '%s' "${SCAN_ROW}" | cut -f5)"
+
+# --- backlog_count ---------------------------------------------------------
+#
+# The four markers partition the ledger, which is why `hzl status` prints all
+# four. It printed todo, blocked and done: a task a run had just claimed left
+# `todo` and arrived nowhere, so three tasks vanished from a line whose numbers
+# a human is meant to be able to add up.
+
+group 'backlog_count'
+
+CNT_LEDGER=${TMPROOT}/count.md
+cat >"${CNT_LEDGER}" <<'FIXTURE'
+# Backlog
+
+The markers are documented in a fence, which is not work:
+
+```
+- [ ] an example that must not be counted as anything
+```
+
+## P1
+- [ ] (id:h-0001) waiting for a run to pick it up
+- [~] (id:h-0002) claimed by a run <!-- run:20260903-012502 -->
+- [!] (id:h-0003) blocked <!-- blocked:2026-09-02T02:08:20+09:00 -->
+- [x] (id:h-0004) finished <!-- done:2026-09-01T03:09:35+09:00 -->
+
+## P2
+- [~] (id:h-0005) claimed as well <!-- run:20260903-012502 -->
+FIXTURE
+
+t_eq "todo is counted" 1 "$(backlog_count "${CNT_LEDGER}" " ")"
+t_eq "in progress is counted, which the status line used to leave out" \
+  2 "$(backlog_count "${CNT_LEDGER}" "~")"
+t_eq "blocked is counted" 1 "$(backlog_count "${CNT_LEDGER}" "!")"
+t_eq "done is counted" 1 "$(backlog_count "${CNT_LEDGER}" x)"
+t_eq "and the four add up to every task in the ledger, the fenced one excluded" \
+  "$(backlog_scan "${CNT_LEDGER}" | awk 'END {print NR}')" \
+  "$(( $(backlog_count "${CNT_LEDGER}" " ") \
+     + $(backlog_count "${CNT_LEDGER}" "~") \
+     + $(backlog_count "${CNT_LEDGER}" "!") \
+     + $(backlog_count "${CNT_LEDGER}" x) ))"
+
+# `hzl next` hands out `[ ]` and nothing else, so nothing coming back from it
+# is not the same statement as an empty ledger. That is why it now reports what
+# is in progress rather than saying there is nothing to do.
+CNT_HELD=${TMPROOT}/count-held.md
+cat >"${CNT_HELD}" <<'FIXTURE'
+# Backlog
+
+## P1
+- [~] (id:h-0001) the last task, and a run is holding it <!-- run:20260903-012502 -->
+FIXTURE
+
+t_eq "a ledger whose remaining task is claimed offers nothing up" \
+  "" "$(backlog_next_row "${CNT_HELD}")"
+t_eq "and it is still one unfinished task, not an empty backlog" \
+  1 "$(backlog_count "${CNT_HELD}" "~")"
 
 # --- backlog_assign_ids ----------------------------------------------------
 
@@ -2003,7 +2064,258 @@ t_fails "a retention of zero days is refused rather than sweeping everything" "$
 runstore_prune abc 2>/dev/null
 t_fails "and so is a window that is not a number" "$?"
 
+# The stop states. `cancelled` is a run that was asked to stop and was watched
+# stopping, so it is over and sweepable. `cancelling` and `orphaned` are not:
+# §14.7 counts a stop in progress and a stop that could not be confirmed as
+# active, and a store swept out from under an orphan takes with it the only
+# record of what is still holding the checkout.
+RP_CANCELLED=r-20260801T000004-can001
+RP_CANCELLING=r-20260801T000005-can002
+RP_ORPHANED=r-20260801T000006-orp001
+for rp_id in "${RP_CANCELLED}" "${RP_CANCELLING}" "${RP_ORPHANED}"; do
+  mkdir -p "${RP_HOME}/runs/${rp_id}"
+done
+printf '{"run_id":"x","runner_state":"cancelled","pid":1}\n' >"${RP_HOME}/runs/${RP_CANCELLED}/workflow.json"
+printf '{"run_id":"x","runner_state":"cancelling","pid":1}\n' >"${RP_HOME}/runs/${RP_CANCELLING}/workflow.json"
+printf '{"run_id":"x","runner_state":"orphaned","pid":1}\n' >"${RP_HOME}/runs/${RP_ORPHANED}/workflow.json"
+rp_age "${RP_CANCELLED}"
+rp_age "${RP_CANCELLING}"
+rp_age "${RP_ORPHANED}"
+RP_SWEPT=$(runstore_prune 14 | tr '\n' ' ' | sed 's/ *$//')
+t_eq "a cancelled run is over, and is swept" "${RP_CANCELLED}" "${RP_SWEPT}"
+t_eq "a stop still in progress is not" \
+  1 "$([ -d "${RP_HOME}/runs/${RP_CANCELLING}" ] && printf 1 || printf 0)"
+t_eq "and an orphaned run is kept, whatever its age" \
+  1 "$([ -d "${RP_HOME}/runs/${RP_ORPHANED}" ] && printf 1 || printf 0)"
+
 HEINZEL_HOME=${RP_SAVED_HOME}
+
+# --- runstore_set_state -----------------------------------------------------
+#
+# Moving a run's state from outside the run. `hzl off` settles a run it has just
+# stopped, and it does not know that run's task ids, exec directory or start
+# time - so it must move the one field and leave the rest exactly as the run
+# wrote it. A snapshot rebuilt from outside would quietly drop what recovery
+# reads.
+
+group 'runstore_set_state'
+
+SS_RUN=r-20260902T060000-set001
+runstore_init "${SS_RUN}"
+runstore_snapshot "${SS_RUN}" '{"schema_version":1,"run_id":"r-20260902T060000-set001","runner_state":"running","pid":1,"task_ids":["h-0001","h-0002"],"exec_dir":"/tmp/exec","started_at":"2026-09-02T06:00:00+09:00"}'
+
+t_ok "a state moves" "$(runstore_set_state "${SS_RUN}" cancelled >/dev/null 2>&1; echo $?)"
+t_eq "and it is the new one" \
+  cancelled "$(runstore_read "${SS_RUN}" | jq -r .runner_state)"
+t_eq "the task ids the run recorded are still there" \
+  '["h-0001","h-0002"]' "$(runstore_read "${SS_RUN}" | jq -c .task_ids)"
+t_eq "and so is everything else recovery reads" \
+  "/tmp/exec 2026-09-02T06:00:00+09:00" \
+  "$(runstore_read "${SS_RUN}" | jq -r '"\(.exec_dir) \(.started_at)"')"
+t_eq "updated_at is stamped, because something did change" \
+  1 "$(runstore_read "${SS_RUN}" | jq -r 'if (.updated_at // "") == "" then 0 else 1 end')"
+runstore_set_state "${SS_RUN}" "" 2>/dev/null
+t_fails "an empty state is refused rather than written" "$?"
+runstore_set_state r-20260902T060000-nope1 ended 2>/dev/null
+t_fails "and a run with no snapshot to move has nothing to move" "$?"
+
+# --- the durable cancel intent ----------------------------------------------
+#
+# `hzl off` sent a signal, waited, sent a stronger one and returned 0. Nothing
+# recorded that a stop had been asked for, so a stop requested and never
+# completed was indistinguishable afterwards from a run that fell over for no
+# reason (docs/RUNTIME-BACKENDS.md §14.4, §14.5). The intent is written before
+# anything is signalled, and the receipt is the only thing that says it worked.
+
+group 'the durable cancel intent'
+
+CX_RUN=r-20260902T070000-cxl001
+runstore_init "${CX_RUN}"
+
+t_eq "a run nobody has asked to stop has no intent" none "$(cancel_state "${CX_RUN}")"
+cancel_requested "${CX_RUN}"
+t_fails "and does not read as cancelled" "$?"
+
+t_ok "a stop is requested" "$(cancel_request "${CX_RUN}" off 4242 >/dev/null 2>&1; echo $?)"
+t_eq "which is durable, and says so" requested "$(cancel_state "${CX_RUN}")"
+t_eq "the cause is recorded, not just the fact" off "$(cancel_reason "${CX_RUN}")"
+cancel_requested "${CX_RUN}"
+t_ok "a requested stop reads as cancelled from here on" "$?"
+t_eq "the target it was written about is in it" \
+  4242 "$(jq -r .target_pid "${HEINZEL_HOME}/runs/${CX_RUN}/cancel.intent.json")"
+
+# The first cause is the true one. A run cancelled by `off` and then hurried
+# along by a deadline was still cancelled by `off`, and a second request that
+# overwrote the first would turn the record of why into the record of what
+# happened last.
+cancel_request "${CX_RUN}" ttl 5150 >/dev/null 2>&1
+t_eq "a second request does not overwrite the first cause" off "$(cancel_reason "${CX_RUN}")"
+t_ok "and is not an error - an intent is there, which is what it wanted" "$?"
+
+t_eq "a run asked to stop and not confirmed is pending" \
+  "${CX_RUN}" "$(cancel_pending | grep -F "${CX_RUN}")"
+
+t_ok "the stop is confirmed" \
+  "$(cancel_confirm "${CX_RUN}" "the process is gone" >/dev/null 2>&1; echo $?)"
+t_eq "and the state moves with the receipt, not with the signal" \
+  confirmed "$(cancel_state "${CX_RUN}")"
+t_eq "the receipt carries the cause the intent named" \
+  off "$(jq -r .reason "${HEINZEL_HOME}/runs/${CX_RUN}/cancel.receipt.json")"
+t_eq "what observed the stop is recorded too" \
+  "the process is gone" \
+  "$(jq -r .confirmed_by "${HEINZEL_HOME}/runs/${CX_RUN}/cancel.receipt.json")"
+t_eq "and a confirmed run is no longer pending" "" "$(cancel_pending | grep -F "${CX_RUN}")"
+
+cancel_request r-20260902T070000-nostr7 off 2>/dev/null
+t_fails "a run with no store has nowhere to put an intent" "$?"
+cancel_request "${CX_RUN}" "" 2>/dev/null
+t_fails "and a stop with no stated cause is refused" "$?"
+
+# --- the stop barrier -------------------------------------------------------
+#
+# Soft interrupt, bounded grace, force stop, and then an observation. A signal
+# delivered is not a stop; the difference is the whole of what `ORPHANED` means.
+
+group 'the stop barrier'
+
+# The `Terminated: 15` lines below are bash reporting its own background jobs
+# going away, which is the thing these assertions are asking for. They are left
+# visible rather than redirected: silencing the shell for the length of a test
+# silences whatever else it had to say.
+
+cancel_stop 0
+t_ok "a target that is already gone is confirmed gone, without signalling" "$?"
+
+sleep 30 &
+CS_SOFT=$!
+cancel_stop "${CS_SOFT}" 5 2
+t_ok "a process that takes TERM is stopped inside the grace" "$?"
+wait "${CS_SOFT}" 2>/dev/null
+pid_alive "${CS_SOFT}"
+t_fails "and it really is gone afterwards" "$?"
+
+# A child that ignores TERM: the grace expires, the bounded force stop follows,
+# and the answer is still an observation of the process being gone.
+bash -c 'trap "" TERM; sleep 30' &
+CS_HARD=$!
+cancel_stop "${CS_HARD}" 2 5
+t_ok "a process that ignores TERM is force-stopped, and that is still confirmed" "$?"
+wait "${CS_HARD}" 2>/dev/null
+
+# The unconfirmed answer, which is the one that costs a checkout. Tested on the
+# primitive rather than by inventing an unkillable process: the barrier's whole
+# claim is that it answers what it observed within the window it was given.
+sleep 30 &
+CS_LIVE=$!
+_cancel_wait_gone "${CS_LIVE}" 1
+t_fails "a process that is still there when the window closes is not confirmed" "$?"
+_cancel_wait_gone "${CS_LIVE}" 0
+t_fails "and a window of zero is still an observation, not an assumption" "$?"
+kill "${CS_LIVE}" 2>/dev/null
+wait "${CS_LIVE}" 2>/dev/null
+_cancel_wait_gone "${CS_LIVE}" 0
+t_ok "the same call answers yes once the process has gone" "$?"
+
+# And the same answer from the barrier itself, which is what `ORPHANED` is keyed
+# on. There is no portable way to make a process outlive SIGKILL, so what is
+# replaced is the observation and not the process: the signals really go to a
+# child of this suite, and `cancel_stop` is asked about a target that never
+# reads as gone. It has to say so rather than assume.
+sleep 30 &
+CS_STUB=$!
+CS_SAVED_ALIVE=$(declare -f pid_alive)
+pid_alive() { return 0; }
+cancel_stop "${CS_STUB}" 1 1
+t_fails "a target that outlives both windows is not confirmed stopped" "$?"
+eval "${CS_SAVED_ALIVE}"
+wait "${CS_STUB}" 2>/dev/null
+pid_alive 0
+t_fails "and the observation the suite borrowed is given back" "$?"
+
+t_eq "the window off gives a runner outlasts the one the runner gives its engine" \
+  1 "$([ "${CANCEL_RUNNER_GRACE_SEC}" -gt "$((CANCEL_GRACE_SEC + CANCEL_KILL_SEC))" ] && printf 1 || printf 0)"
+
+# --- the workspace freeze ---------------------------------------------------
+#
+# A confirmed stop is the moment the working directory stops moving, so that is
+# when it is digested. Everything after it is evidence *about* that state, and
+# evidence about a workspace that has since moved is not evidence about this one
+# (§13.2, §9.2 `QUIESCING`).
+
+group 'the workspace freeze'
+
+QF_WORK=${TMPROOT}/quiesce-work
+mkdir -p "${QF_WORK}/src" "${QF_WORK}/.heinzel"
+printf 'one\n' >"${QF_WORK}/src/a.txt"
+printf 'two\n' >"${QF_WORK}/src/b.txt"
+
+# The parenthesised case patterns are not decoration: bash 3.2 ends a $( )
+# substitution at the first `)` of a pattern, so the leading paren is what makes
+# these run at all on the stock macOS shell.
+digest_shaped() { case $1 in (sha256:*|cksum:*) printf 1 ;; (*) printf 0 ;; esac; }
+
+QF_D1=$(workspace_digest "${QF_WORK}")
+t_eq "a digest is computed, and named by what computed it" \
+  1 "$(digest_shaped "${QF_D1}")"
+t_eq "reading the same tree twice gives the same answer" \
+  "${QF_D1}" "$(workspace_digest "${QF_WORK}")"
+
+printf 'one changed\n' >"${QF_WORK}/src/a.txt"
+t_eq "content that changed changes it" \
+  1 "$([ "${QF_D1}" = "$(workspace_digest "${QF_WORK}")" ] && printf 0 || printf 1)"
+printf 'one\n' >"${QF_WORK}/src/a.txt"
+t_eq "and content put back puts the digest back - it is content, not a clock" \
+  "${QF_D1}" "$(workspace_digest "${QF_WORK}")"
+
+printf 'scaffolding\n' >"${QF_WORK}/.heinzel/worksheet.md"
+t_eq "the run's own worksheet is not somebody else's edit" \
+  "${QF_D1}" "$(workspace_digest "${QF_WORK}")"
+
+workspace_digest "${TMPROOT}/not-a-workdir" 2>/dev/null
+t_fails "a workdir that is not there has no digest" "$?"
+
+QF_RUN=r-20260902T080000-qsc001
+runstore_init "${QF_RUN}"
+QF_IDENT=$(claims_workspace_identity "${QF_WORK}")
+
+t_eq "the first freeze is generation 1" \
+  1 "$(quiesce_freeze "${QF_RUN}" "${QF_IDENT}" "${QF_WORK}")"
+t_eq "and it froze what is actually there" "${QF_D1}" "$(quiesce_digest "${QF_RUN}")"
+quiesce_unchanged "${QF_RUN}" "${QF_WORK}"
+t_ok "evidence gathered now is about the frozen state" "$?"
+
+printf 'somebody else was here\n' >"${QF_WORK}/src/c.txt"
+quiesce_unchanged "${QF_RUN}" "${QF_WORK}"
+t_fails "a tree that moved underneath invalidates it" "$?"
+
+# A fix pass is a new writer under the same lease, so what it leaves is a new
+# state to be evidence about - a new generation, not a second reading of the
+# first one.
+t_eq "re-freezing is the next generation, not the same one again" \
+  2 "$(quiesce_freeze "${QF_RUN}" "${QF_IDENT}" "${QF_WORK}")"
+quiesce_unchanged "${QF_RUN}" "${QF_WORK}"
+t_ok "and evidence gathered after it is about the new state" "$?"
+t_eq "the generation is readable on its own" 2 "$(quiesce_generation "${QF_RUN}")"
+
+quiesce_unchanged "${QF_RUN}" "${TMPROOT}/gone-entirely"
+t_fails "a workdir that has gone away is the largest change available" "$?"
+
+# The store is allowed to fail and the run happens anyway, so a check that
+# failed closed on a missing freeze would refuse the work of every run whose
+# bookkeeping broke. This one fails open, deliberately and in one place.
+QF_NOFREEZE=r-20260902T080000-qsc002
+runstore_init "${QF_NOFREEZE}"
+quiesce_unchanged "${QF_NOFREEZE}" "${QF_WORK}"
+t_ok "a run with no frozen digest has no evidence to invalidate" "$?"
+t_eq "and no generation either" 0 "$(quiesce_generation "${QF_NOFREEZE}")"
+
+# The git half of the listing: a repository answers with HEAD and its status
+# rather than with the bytes of its object store, and the answer is stable.
+QF_REPO_D1=$(workspace_digest "${TEST_ROOT}")
+t_eq "a git checkout digests, and digests the same way twice" \
+  "${QF_REPO_D1}" "$(workspace_digest "${TEST_ROOT}")"
+t_eq "and .git itself is never walked into - the answer is a digest, not a hang" \
+  1 "$(digest_shaped "${QF_REPO_D1}")"
 
 # --- verdict ---------------------------------------------------------------
 
