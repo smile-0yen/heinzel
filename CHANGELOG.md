@@ -6,6 +6,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-03
+
+### Removed
+- **The global `run.lock`** (`docs/RUNTIME-BACKENDS.md` §14.3; `docs/SPEC.md`
+  §7, §11.3). `hzl-run` re-executed itself under `lockf -t 0 -k run.lock` and
+  held it from the first gate to the last line — the last thing left spelling
+  "another runner is running", and the thing that cannot survive a run
+  outliving the process that started it. Nothing replaces it, because three
+  narrower statements were already true and each is about the thing it actually
+  protects: every ledger and session mutation goes under the short backlog lock
+  (0.2.8), the workspace writer lease refuses a second run on the same checkout
+  (0.2.1), and `state.json` holds exactly one workdir. A second runner now walks
+  as far as the lease and `skip`s there, before it has claimed or spent
+  anything. Eight gates became seven.
+
+### Fixed
+- **`run.pid` is written after the writer lease, not before it.** It is the file
+  `hzl off` kills by. Written at the old gate 2 it was safe only because the
+  global lock meant no second runner ever reached it; without that lock a second
+  runner would put its own pid in the file and then delete it on the way out,
+  leaving the live run running and unreachable by the one command meant to stop
+  it. The EXIT trap now removes the file only if this process wrote it *and* it
+  still names this process.
+- **The blanket `[~]` reset needs the lease.** `backlog_reset_inprogress`
+  returns every in-progress marker in the ledger to `[ ]`, whoever set it. In the
+  EXIT trap that was unconditional, so a runner that skipped at the lease would
+  have released the live run's markers on its way out — the "blanket rollback
+  cannot coexist with two runs" of §14.3, reachable for the first time.
+- **A workspace with no identity is an abort.** It used to mean "no lease, carry
+  on", which was survivable only while the global lock was underneath it: a run
+  that cannot name its workspace cannot take the lease that stands for it, and
+  would be the second writer nothing had refused.
+
 ## [0.3.0] - 2026-09-03
 
 The Phase 2 slice on the local backend, completed: the three fault transitions

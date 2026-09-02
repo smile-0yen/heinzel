@@ -3,14 +3,15 @@
 #
 # lib/locks.sh — what a run holds while it works, and for how long.
 #
-# There has been one lock. `bin/hzl-run` re-executes itself under
-# `lockf -t 0 -k ~/.heinzel/run.lock` and holds it from the first gate to the
-# last line, so three different facts are spelled the same way: *another runner
+# There was one lock. `bin/hzl-run` re-executed itself under
+# `lockf -t 0 -k ~/.heinzel/run.lock` and held it from the first gate to the
+# last line, so three different facts were spelled the same way: *another runner
 # is running*, *the ledger is being written*, and *this checkout has a writer*.
 # One lock for three questions is fine while there is exactly one synchronous
 # run and nothing else touches the ledger. It stops being fine as soon as a run
 # outlives the process that started it, which is what Phase 2 is for
-# (docs/RUNTIME-BACKENDS.md §14.3). So the three come apart:
+# (docs/RUNTIME-BACKENDS.md §14.3). So the three came apart, and `run.lock`
+# itself is gone — what is here is the whole of what it was saying:
 #
 #   backlog lock    a short global lock, held around a ledger mutation and
 #                   released immediately. Never held across an engine call.

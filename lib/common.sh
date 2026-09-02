@@ -11,7 +11,7 @@
 # Multibyte truncation is locale-dependent (DESIGN 6.3). Fix it once, here.
 export LC_CTYPE=UTF-8
 
-HEINZEL_VERSION="0.3.0"
+HEINZEL_VERSION="0.3.1"
 
 # The TTL ceiling is deliberately not configurable. A session that can be
 # created with an unbounded lifetime is not a session, it is a mode.
@@ -56,7 +56,10 @@ STATE_FILE=${HEINZEL_HOME}/state.json
 LOG_DIR=${HEINZEL_HOME}/logs
 RUNNER_LOG=${LOG_DIR}/runner.log
 RUNS_JSONL=${LOG_DIR}/runs.jsonl
-RUN_LOCK=${HEINZEL_HOME}/run.lock
+# `run.pid` is the file `hzl off` kills by, and it is written by the run that
+# holds the workspace writer lease. There was a `run.lock` beside it, held by
+# `lockf` for the whole of a run; it is gone, and what says "one runner" now is
+# the lease and the short backlog lock (docs/RUNTIME-BACKENDS.md §14.3).
 RUN_PID_FILE=${HEINZEL_HOME}/run.pid
 CAFFEINATE_PID_FILE=${HEINZEL_HOME}/caffeinate.pid
 

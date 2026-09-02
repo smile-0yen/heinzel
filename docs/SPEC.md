@@ -50,7 +50,7 @@ Version: 0.1.0-dev. Target: macOS, `/bin/bash` 3.2.
 
 ~/.heinzel/            mutable state; the agent is denied write access here
   state.json           session state, mode 0600
-  run.lock  run.pid  caffeinate.pid
+  run.pid  caffeinate.pid
   runs/
     r-<YYYYMMDD>T<HHMMSS>-<suffix>/
       workflow.json      the recovery snapshot: what is true now
@@ -313,32 +313,57 @@ anchor instead), and `sysadminctl -screenLock` returns 0 on failure.
 
 ## §7 The runner (normative)
 
-Invoked as `hzl-run --from launchd` or `--from manual`. Eight gates precede any
+Invoked as `hzl-run --from launchd` or `--from manual`. Seven gates precede any
 engine call.
 
 | # | Gate | Outcome when closed |
 |---|---|---|
-| 1 | `lockf -t 0 -k run.lock` | `skip`, exit 75 |
-| 2 | `effective_mode() == heinzel` | silent exit 0, **no log line** |
-| 3 | `in_window()` | `skip` |
-| 4 | session budget remaining > 0 | `skip` |
-| 5 | on AC power **or** `--from manual` | `skip` |
-| 6 | time to expiry ≥ `run_timeout_sec` | `skip` |
-| 7 | workdir, backlog, engine, and **valid settings JSON** | `abort` |
-| 8 | at least one `[ ]` task | `skip` |
+| 1 | `effective_mode() == heinzel` | silent exit 0, **no log line** |
+| 2 | `in_window()` | `skip` |
+| 3 | session budget remaining > 0 | `skip` |
+| 4 | on AC power **or** `--from manual` | `skip` |
+| 5 | time to expiry ≥ `run_timeout_sec` | `skip` |
+| 6 | workdir, backlog, engine, and **valid settings JSON** | `abort` |
+| 7 | at least one `[ ]` task | `skip` |
 
-`--from manual` bypasses gates 3 and 5. The other six apply unchanged.
+`--from manual` bypasses gates 2 and 4. The other five apply unchanged.
 
-Gate 3 because the operator is present and the schedule exists to keep runs out
-of the working day, not to stop a human. Gate 5 for the same reason: it exists
+Gate 2 because the operator is present and the schedule exists to keep runs out
+of the working day, not to stop a human. Gate 4 for the same reason: it exists
 so that an unattended machine does not drain its battery overnight, which is not
 a decision a person standing at the machine needs protecting from. A manual run
 on battery warns rather than proceeding quietly, and the power state is recorded
 in the run log either way.
 
-Gate 2 writing nothing is deliberate: it is the common case, and a machine
+Gate 1 writing nothing is deliberate: it is the common case, and a machine
 without a session must be untouched by having Heinzel installed. `HEINZEL_DEBUG=1`
 logs it anyway.
+
+> **Normative: there is no global run lock.** A `lockf -t 0 -k run.lock` used to
+> stand in front of every gate and be held to the last line, spelling "another
+> runner is running". Three narrower statements replaced it, each about the thing
+> it is actually protecting: every ledger and session mutation goes under the
+> short backlog lock, the workspace writer lease refuses a second run on the same
+> checkout, and `state.json` holds exactly one workdir. A second runner walks as
+> far as the lease and `skip`s there, before it has claimed or spent anything.
+
+> **Normative: `run.pid` is written by the run that holds the writer lease**, and
+> after it holds it. It is the file `hzl off` kills by, so a second runner writing
+> its own pid there and then deleting it on the way out would leave the live run
+> running and unreachable by the one command meant to stop it. The EXIT trap
+> removes the file only if this process wrote it *and* it still names this
+> process.
+
+> **Normative: the blanket `[~]` reset needs the lease.** `backlog_reset_inprogress`
+> returns every in-progress marker in the ledger to `[ ]`, whoever set it, so it
+> may only run for the process holding the checkout. A runner that skipped at the
+> lease would otherwise release the live run's markers on its way out
+> (`docs/RUNTIME-BACKENDS.md` §14.3).
+
+> **Normative: a workspace with no identity is an abort.** It used to mean "no
+> lease, carry on", which was survivable only while the global lock was
+> underneath it: a run that cannot name its workspace cannot take the lease that
+> stands for it, and would be the second writer nothing had refused.
 
 **`--from manual` reports every closed gate on stderr**, gate 2 included. The
 silence is for launchd; a person who typed `hzl run-now` and got no output and
@@ -858,12 +883,12 @@ hand, or by a build older than the claims directory.
 
 ## §11.3 Locks and the workspace writer lease (`lib/locks.sh`)
 
-There was one lock. `hzl-run` re-executes itself under
-`lockf -t 0 -k run.lock` and holds it from the first gate to the last line, so
-three facts are spelled the same way: *another runner is running*, *the ledger
-is being written*, and *this checkout has a writer*. Phase 2 needs them apart,
+There was one lock. `hzl-run` re-executed itself under
+`lockf -t 0 -k run.lock` and held it from the first gate to the last line, so
+three facts were spelled the same way: *another runner is running*, *the ledger
+is being written*, and *this checkout has a writer*. Phase 2 needed them apart,
 because a run will outlive the process that started it
-(`docs/RUNTIME-BACKENDS.md` §14.3):
+(`docs/RUNTIME-BACKENDS.md` §14.3). They are apart, and `run.lock` is gone:
 
 | | Held | For |
 |---|---|---|

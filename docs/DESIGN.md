@@ -612,7 +612,7 @@ heinzel/
 
 ~/.heinzel/              mutable state — outside the agent's reach, denied twice
 ├── state.json           session state, 0600
-├── run.lock / run.pid / caffeinate.pid
+├── run.pid / caffeinate.pid
 ├── locks/{backlog.lock, run-<run-id>.lock}
 ├── workspace-leases/<workspace-hash>.{json,generation}
 └── logs/{runner.log, runs.jsonl, launchd.{out,err}, <YYYY-MM-DD>/…}

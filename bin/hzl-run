@@ -7,10 +7,19 @@
 # no path to sudo at all, and nothing here writes the session's mode: it reads
 # state.json and acts, or does nothing.
 #
-# Eight gates stand between being started and calling an engine, ordered
+# Seven gates stand between being started and calling an engine, ordered
 # cheapest first. If any of them closes, no API call is made and nothing is
 # billed. The `todo == 0` gate is deliberately last, immediately before the
 # call, so that an empty backlog costs a fraction of a second.
+#
+# There were eight. The first was a global `lockf` on `run.lock`, held from the
+# first gate to the last line, and it was the last thing left spelling "another
+# runner is running" (docs/RUNTIME-BACKENDS.md §14.3). What replaced it is not a
+# different lock but three narrower statements that were already true: every
+# ledger and session mutation goes under the short backlog lock, the workspace
+# writer lease refuses a second run on the same checkout, and `state.json` holds
+# exactly one workdir. A second runner now walks as far as the lease and skips
+# there, before it has claimed anything or spent anything.
 
 set -uo pipefail
 
@@ -68,23 +77,9 @@ done
 hzl_load_conf
 hzl_validate_conf || { log_event abort "invalid configuration"; exit 1; }
 
-# --- gate 1: one run at a time --------------------------------------------
-# launchd will not run the same job twice concurrently, but a run that used its
-# whole hour is still going when the next slot arrives, and `hzl run-now` can
-# be typed at any moment.
-if [ -z "${HZL_LOCKED:-}" ]; then
-  mkdir -p "${HEINZEL_HOME}" 2>/dev/null
-  if [ "${DRY_RUN}" = 1 ]; then
-    HZL_LOCKED=1 lockf -t 0 -k "${RUN_LOCK}" "$0" --from "${TRIGGER}" --dry-run
-  else
-    HZL_LOCKED=1 lockf -t 0 -k "${RUN_LOCK}" "$0" --from "${TRIGGER}"
-  fi
-  rc=$?
-  [ ${rc} -eq 75 ] && log_event skip "another run holds the lock"
-  exit ${rc}
-fi
+mkdir -p "${HEINZEL_HOME}" 2>/dev/null
 
-# --- gate 2: is a session actually live? ----------------------------------
+# --- gate 1: is a session actually live? ----------------------------------
 # The common case by far: four of five nightly slots, plus every slot on a day
 # with no session at all. It writes nothing and exits, so that a machine in
 # normal mode is untouched by having Heinzel installed.
@@ -132,7 +127,13 @@ cleanup_ledger() {
     claims_rollback_run "${WS_IDENTITY}" "${BACKLOG}" "${STORE_RUN_ID}" \
       >/dev/null 2>&1
   fi
-  if [ -n "${BACKLOG}" ] && [ -w "${BACKLOG}" ]; then
+  # The blanket pass returns *every* `[~]` in the ledger to `[ ]`, whoever set
+  # it, so it may only run for the one process that holds the checkout. While
+  # the global run lock existed, a second runner could not reach this line; now
+  # that it does not, a runner that skipped at the lease would otherwise release
+  # the live run's markers on its way out — which is precisely the "blanket
+  # rollback cannot coexist with two runs" of §14.3.
+  if [ -n "${LEASE_HELD:-}" ] && [ -n "${BACKLOG}" ] && [ -w "${BACKLOG}" ]; then
     backlog_reset_inprogress "${BACKLOG}" >/dev/null 2>&1
   fi
   return 0
@@ -219,11 +220,16 @@ cleanup() {
   if [ -n "${RUN_LOCK_HELD:-}" ]; then
     lock_release "${RUN_LOCK_NAME}" >/dev/null 2>&1
   fi
-  rm -f "${RUN_PID_FILE}"
+  # Only this process's own pid file, and only if it still says this process.
+  # `hzl off` kills by that file: a runner that removed one it did not write
+  # would leave the live run unstoppable by the command whose whole job is
+  # stopping it.
+  if [ -n "${RUN_PID_HELD:-}" ] && [ "$(cat "${RUN_PID_FILE}" 2>/dev/null)" = "$$" ]; then
+    rm -f "${RUN_PID_FILE}"
+  fi
   exit ${rc}
 }
 trap cleanup EXIT INT TERM
-printf '%s' "$$" >"${RUN_PID_FILE}"
 
 # A gate closing is a log line for launchd and a sentence for a person: the
 # operator asked for this run and is owed the reason it did not happen.
@@ -309,7 +315,7 @@ store_event() { # kind [message]
   return 0
 }
 
-# --- gate 3: the schedule window ------------------------------------------
+# --- gate 2: the schedule window ------------------------------------------
 # launchd replays calendar events it missed while the machine was asleep, all
 # at once on wake. Without this guard a laptop opened at lunchtime would fire
 # every slot it slept through, in the middle of the working day.
@@ -317,11 +323,11 @@ if [ "${TRIGGER}" != manual ] && ! in_window; then
   skip "outside the run window (hours: $(hours_normalised))"
 fi
 
-# --- gate 4: the session budget -------------------------------------------
+# --- gate 3: the session budget -------------------------------------------
 REMAINING=$((MAX_TOTAL - DONE_TOTAL))
 [ "${REMAINING}" -gt 0 ] || skip "session budget spent (${DONE_TOTAL}/${MAX_TOTAL})"
 
-# --- gate 5: power ---------------------------------------------------------
+# --- gate 4: power ---------------------------------------------------------
 # Scheduled runs never run on battery: the point of the gate is to stop an
 # unattended machine draining itself overnight. A human who typed `hzl run-now`
 # is standing there and has already made that call, so manual runs are exempt -
@@ -334,13 +340,13 @@ if ! on_ac_power; then
   fi
 fi
 
-# --- gate 6: do not start a run that cannot finish ------------------------
+# --- gate 5: do not start a run that cannot finish ------------------------
 EXPIRES=$(state_get .expires_at_epoch 0)
 LEFT=$((EXPIRES - $(now_epoch)))
 [ "${LEFT}" -ge "${RUN_TIMEOUT}" ] ||
   skip "too close to the deadline (${LEFT}s left, a run may need ${RUN_TIMEOUT}s)"
 
-# --- gate 7: the things that must be true before an agent starts ----------
+# --- gate 6: the things that must be true before an agent starts ----------
 [ -n "${WORKDIR}" ] && [ -d "${WORKDIR}" ] || abort "workdir is missing: ${WORKDIR}"
 [ -n "${BACKLOG}" ] && [ -w "${BACKLOG}" ] || abort "backlog is not writable: ${BACKLOG}"
 engine_available "${HEINZEL_EXECUTOR_ENGINE}" ||
@@ -359,17 +365,25 @@ grep -q '__[A-Z_]*__' "${SETTINGS}" &&
   abort "${SETTINGS} still contains placeholders - run 'hzl install'"
 
 # --- ownership: the writer lease and this run's own lock -------------------
-# The working directory takes one writer at a time (§14.3, invariant 13). The
-# global `run.lock` of gate 1 says that too, but only for two runners under one
-# `HEINZEL_HOME` and only for as long as this process lives; the lease says it
-# about the checkout, it names the run holding it, and it survives the process,
-# because a run that was killed still owns the working directory until something
-# confirms it stopped.
+# The working directory takes one writer at a time (§14.3, invariant 13), and
+# since the global `run.lock` went this is the *only* thing that says so. It says
+# more than that lock did, and about the right thing: the lock was about two
+# runners under one `HEINZEL_HOME` and lasted exactly as long as a process,
+# whereas the lease is about the checkout, names the run holding it, and survives
+# the process — because a run that was killed still owns the working directory
+# until something confirms it stopped.
 #
 # A lease left by a run that is gone is recovered here, on the way in, the same
 # way stale claims are below: deliberately, and named in the log rather than
 # taken silently by whoever wanted it next.
+#
+# A workspace with no identity is now an abort rather than a shrug. It used to
+# mean "no lease, carry on", which was survivable only because the global lock
+# was underneath it; a run that cannot name its workspace cannot take the lease
+# that stands for it, and would be the second writer nothing had refused.
 WS_IDENTITY=$(claims_workspace_identity "${WORKDIR}")
+[ -n "${WS_IDENTITY}" ] ||
+  abort "cannot identify the workspace at ${WORKDIR} - refusing to run without a writer lease"
 LEASE_HELD=""
 if [ -n "${WS_IDENTITY}" ]; then
   RECOVERED=$(lease_reclaim "${WS_IDENTITY}")
@@ -395,6 +409,15 @@ else
   skip "could not take the lock for run ${STORE_RUN_ID}"
 fi
 
+# The pid file, and here rather than at the top, because it is written by the
+# run that holds the checkout and by no other. It used to be written before any
+# of this — safe only while the global lock meant no second runner ever got
+# here, and a bug the moment that went: a second runner would put its own pid in
+# the file `hzl off` kills by, and then delete it on the way out, leaving the
+# live run running and unreachable by the one command meant to stop it.
+printf '%s' "$$" >"${RUN_PID_FILE}"
+RUN_PID_HELD=1
+
 # --- a ledger commit that was interrupted -----------------------------------
 # A run that stopped inside its commit left an intent and no receipt: the ledger
 # transition it was about to make, and nothing saying it made it. This run holds
@@ -402,7 +425,7 @@ fi
 # once, and before it writes the ledger itself (§13.4, §21.1).
 #
 # Recovery moves `tasks_done_total`, because a run that stopped there never
-# reached its own counter. So gate 4 is asked again afterwards: a completion
+# reached its own counter. So gate 3 is asked again afterwards: a completion
 # recovered here is spent budget, and a run that starts anyway would be spending
 # it twice.
 while IFS= read -r pending; do
@@ -435,7 +458,7 @@ $(claims_runs "${WS_IDENTITY}")
 EOF
 fi
 
-# --- gate 8: is there anything to do? -------------------------------------
+# --- gate 7: is there anything to do? -------------------------------------
 # Last, and immediately before the only expensive thing in this file.
 # The blanket reset stays: it is the legacy path, and it is what puts back a
 # `[~]` that no claim ever covered — one written by hand, or by a build older
