@@ -2317,6 +2317,142 @@ t_eq "a git checkout digests, and digests the same way twice" \
 t_eq "and .git itself is never walked into - the answer is a digest, not a hang" \
   1 "$(digest_shaped "${QF_REPO_D1}")"
 
+# --- the Herdr spike probe -------------------------------------------------
+#
+# tools/herdr-spike-probe.sh runs no probe: docs/HERDR-SPIKE.md is worked by a
+# person, and the script only holds the step list, the gate table and the
+# results. That split is the thing to protect. The operator follows the
+# document while the verdict is computed from the script, so a step that exists
+# in one and not the other is a gate nobody notices is missing - which for a
+# fail-closed checklist is the whole failure.
+
+group "herdr spike probe"
+
+SPIKE_SH="${TEST_ROOT}/tools/herdr-spike-probe.sh"
+SPIKE_DOC="${TEST_ROOT}/docs/HERDR-SPIKE.md"
+SPIKE_DIR="${TMPROOT}/spike"
+HZL_SPIKE_DIR=${SPIKE_DIR}
+export HZL_SPIKE_DIR
+mkdir -p "${SPIKE_DIR}"
+
+bash -n "${SPIKE_SH}"
+t_ok "the probe script parses under stock bash" "$?"
+
+bash "${SPIKE_SH}" list >"${TMPROOT}/spike-list.txt" 2>&1
+t_ok "list runs" "$?"
+bash "${SPIKE_SH}" gates >"${TMPROOT}/spike-gates-out.txt" 2>&1
+t_ok "gates runs" "$?"
+
+awk '$1 ~ /^[A-G][0-9]+$/ { print $1, $2 }' "${TMPROOT}/spike-list.txt" \
+  >"${TMPROOT}/spike-steps.txt"
+awk '$1 ~ /^G-/ { print $1 }' "${TMPROOT}/spike-gates-out.txt" \
+  >"${TMPROOT}/spike-gates.txt"
+
+t_eq "every step in the table is listed" \
+  "$(grep -c '^#### ' "${SPIKE_DOC}")" \
+  "$(wc -l <"${TMPROOT}/spike-steps.txt" | tr -d ' ')"
+
+SPIKE_NOSTEP=0
+SPIKE_NOGATE=0
+SPIKE_NOGATEDOC=0
+while read -r sp_id sp_gate; do
+  grep -qF "#### ${sp_id} " "${SPIKE_DOC}" || SPIKE_NOSTEP="${SPIKE_NOSTEP} ${sp_id}"
+  grep -qxF "${sp_gate}" "${TMPROOT}/spike-gates.txt" ||
+    SPIKE_NOGATE="${SPIKE_NOGATE} ${sp_id}"
+  grep -qF "\`${sp_gate}\`" "${SPIKE_DOC}" ||
+    SPIKE_NOGATEDOC="${SPIKE_NOGATEDOC} ${sp_gate}"
+done <"${TMPROOT}/spike-steps.txt"
+t_eq "every step the script knows has a procedure in the document" 0 "${SPIKE_NOSTEP}"
+t_eq "every gate a step names is a defined gate" 0 "${SPIKE_NOGATE}"
+t_eq "and every one of them is in the document's gate table" 0 "${SPIKE_NOGATEDOC}"
+
+# The other direction: a gate no step claims is a step that was deleted from
+# one list only, and it would sit in the verdict table reading `pass` forever
+# because nothing can ever fail it.
+SPIKE_ORPHAN=0
+while read -r sp_gate; do
+  [ -n "$(awk -v g="${sp_gate}" '$2 == g' "${TMPROOT}/spike-steps.txt")" ] ||
+    SPIKE_ORPHAN="${SPIKE_ORPHAN} ${sp_gate}"
+done <"${TMPROOT}/spike-gates.txt"
+t_eq "no gate is left without a step that can fail it" 0 "${SPIKE_ORPHAN}"
+
+# Bookkeeping refuses what it cannot record honestly.
+bash "${SPIKE_SH}" template >/dev/null 2>&1
+t_ok "template starts a results file" "$?"
+t_eq "with one todo row per step" \
+  "$(wc -l <"${TMPROOT}/spike-steps.txt" | tr -d ' ')" \
+  "$(grep -c 'todo' "${SPIKE_DIR}/results.tsv")"
+bash "${SPIKE_SH}" template >/dev/null 2>&1
+t_fails "and refuses to clobber one that already exists" "$?"
+bash "${SPIKE_SH}" record ZZ pass note >/dev/null 2>&1
+t_fails "a step nobody defined cannot be recorded" "$?"
+bash "${SPIKE_SH}" record D3 fail >/dev/null 2>&1
+t_fails "a fail with no observation is refused" "$?"
+bash "${SPIKE_SH}" record D3 maybe seen >/dev/null 2>&1
+t_fails "so is a result outside pass, fail, na and todo" "$?"
+bash "${SPIKE_SH}" record C7 pass 'blocked seen in 1.2s' >/dev/null 2>&1
+t_ok "a pass with an observation is recorded" "$?"
+
+# The verdict, which is the only part of the spike a machine decides. All three
+# branches, in the order they take precedence.
+bash "${SPIKE_SH}" render >"${TMPROOT}/spike-render.txt" 2>&1
+t_ok "render runs against a barely-started table" "$?"
+t_has "an unfinished table does not read as a pass" \
+  "${TMPROOT}/spike-render.txt" 'do not implement'
+
+: >"${SPIKE_DIR}/results.tsv"
+while read -r sp_id sp_gate; do
+  printf '%s\tpass\tseen\n' "${sp_id}" >>"${SPIKE_DIR}/results.tsv"
+done <"${TMPROOT}/spike-steps.txt"
+bash "${SPIKE_SH}" render >"${TMPROOT}/spike-render.txt" 2>&1
+t_has "everything looked at and nothing failed is the one way through" \
+  "${TMPROOT}/spike-render.txt" 'proceed to Phase 1'
+
+bash "${SPIKE_SH}" record F5 fail 'agent attach unsupported here' >/dev/null 2>&1
+bash "${SPIKE_SH}" render >"${TMPROOT}/spike-render.txt" 2>&1
+t_has "a capability failure only turns that capability off" \
+  "${TMPROOT}/spike-render.txt" 'reported false'
+
+bash "${SPIKE_SH}" record E4 fail 'writer reached the reviewer pane' >/dev/null 2>&1
+bash "${SPIKE_SH}" render >"${TMPROOT}/spike-render.txt" 2>&1
+t_has "a reviewer that shares the writer's trust domain forces hybrid review" \
+  "${TMPROOT}/spike-render.txt" 'hybrid required review'
+
+bash "${SPIKE_SH}" record D2 fail 'wrote outside the workspace' >/dev/null 2>&1
+bash "${SPIKE_SH}" render >"${TMPROOT}/spike-render.txt" 2>&1
+t_has "and a critical failure outranks both" \
+  "${TMPROOT}/spike-render.txt" 'do not implement'
+
+# `run` is a stub on purpose. A spike step that a machine can mark `pass`
+# without a human reading the screen produces a table that looks like evidence.
+bash "${SPIKE_SH}" run D2 >/dev/null 2>&1
+t_eq "run refers the step back to a human, and says so in its exit code" 3 "$?"
+
+# Inert by construction: nothing but a version query may reach the herdr
+# binary. The stand-in answers --version and writes down anything else it is
+# asked to do, so a subcommand that ever grew a live call fails here.
+mkdir -p "${TMPROOT}/spike-bin"
+HZL_TEST_HERDR_CALLS="${TMPROOT}/herdr-calls.txt"
+export HZL_TEST_HERDR_CALLS
+: >"${HZL_TEST_HERDR_CALLS}"
+cat >"${TMPROOT}/spike-bin/herdr" <<'FAKEHERDR'
+#!/bin/bash
+case ${1:-} in
+  --version) printf 'herdr 0.0.0-stand-in\n'; exit 0 ;;
+esac
+printf '%s\n' "$*" >>"${HZL_TEST_HERDR_CALLS}"
+exit 0
+FAKEHERDR
+chmod +x "${TMPROOT}/spike-bin/herdr"
+
+for sp_cmd in list gates preflight env config render "run D2" "record C7 pass x"; do
+  PATH="${TMPROOT}/spike-bin:${PATH}" bash "${SPIKE_SH}" ${sp_cmd} >/dev/null 2>&1
+done
+t_eq "no subcommand asks herdr to do anything but name its version" \
+  0 "$(wc -l <"${HZL_TEST_HERDR_CALLS}" | tr -d ' ')"
+
+unset HZL_SPIKE_DIR HZL_TEST_HERDR_CALLS
+
 # --- verdict ---------------------------------------------------------------
 
 printf '\n%s passed, %s failed\n' "${PASS}" "${FAIL}"

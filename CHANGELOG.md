@@ -6,6 +6,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-09-03
+
+### Added
+- **`docs/HERDR-SPIKE.md` — the Phase 0 spike, written down** (`docs/RUNTIME-
+  BACKENDS.md` §20). §20 gates the whole Herdr backend behind a live spike, and
+  §22 rates three risks **High** whose entire mitigation is that gate. What §20
+  actually gave the person who has to run it was thirteen bullet points. This
+  is the same spike as 41 steps in seven stages, each with the command to run,
+  what a pass looks like, and — the half that was missing — the fail-closed
+  consequence when it is not a pass. Every one of those consequences was
+  already a decision somewhere in §§8–19; the spike only finds out which branch
+  we are on.
+
+  Steps belong to gates, and gates decide, in three classes. A failed
+  **critical** gate (`G-SEC` launch parity, `G-ATTEST` resume attestation,
+  `G-VERIFY` verifier isolation) means the unattended backend is not built.
+  `G-INDEP` is its own class because §18.2's failure is narrower than "stop":
+  a Herdr reviewer sharing the writer's trust domain still runs, it just never
+  counts as a `required` review. The remaining thirteen turn a capability off
+  and report it `false` in the `CapabilityReport`, which is §8's rule that a
+  missing capability is an explicit refusal rather than a quiet change of
+  meaning.
+
+  A gate with a step still `todo` is **incomplete**, and incomplete is treated
+  as failed. That is the point of a fail-closed gate: not having looked and
+  having looked and seen nothing are the same answer.
+
+  Every `herdr` command in it is marked as a sketch. They come from §10 and the
+  public 0.8.2 documentation, nothing in this repository has ever run one, and
+  a runbook that hands an operator invented flags with a straight face is worse
+  than one that admits what it is. Correcting them is part of the spike's
+  output.
+
+- **`tools/herdr-spike-probe.sh`** — the bookkeeping half. It knows the step
+  list and the gate table, reports what is installed, keeps the results, and
+  renders the section that goes into `docs/VERIFICATION.md` with the verdict
+  already computed. Its `run` subcommand is a stub that exits 3 and will stay
+  one: a security gate a machine can mark `pass` without a human reading the
+  screen does not produce evidence, it produces a table that looks like
+  evidence. Nothing in it starts a server, launches an agent, or installs
+  anything — a test holds it to that with a stand-in `herdr` that answers
+  `--version` and writes down anything else it is asked to do.
+
+- **`docs/VERIFICATION.md` — the section the results land in.** §20 says record
+  the outcome there with the measured versions, so the destination exists now
+  rather than being created by whoever is holding the results at 1am. It also
+  says out loud that its own "Phase 0" and the Herdr one are different things
+  that share a number.
+
+- **22 assertions holding the document and the script together.** The operator
+  works the document while the verdict is computed from the script, so a step
+  in one list and not the other is a gate nobody notices is missing. The tests
+  check both directions — every step has a procedure, every gate has a step
+  that can fail it — and walk all three verdict branches in precedence order.
+
+`herdr` is not installed on this machine and installing it is not a step of the
+spike. This release prepares the gate; it does not walk through it.
+
 ## [0.3.1] - 2026-09-03
 
 ### Removed

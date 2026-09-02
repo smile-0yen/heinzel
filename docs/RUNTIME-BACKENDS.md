@@ -1078,6 +1078,12 @@ Heinzel は `ownership=heinzel` と記録した namespace/workspace/pane のみ 
 
 ### Phase 0 — live Herdr spike（実装開始ゲート）
 
+手順書は [`docs/HERDR-SPIKE.md`](HERDR-SPIKE.md) にある。以下の各項目は step
+と gate に分解済みで、step ごとに expected と fail-closed な帰結、結果表
+template を持つ。bookkeeping は `tools/herdr-spike-probe.sh` が担当し、probe
+自体は自動化しない（人が画面を読まずに `pass` を報告できる gate は gate では
+ないため）。
+
 disposable worktree、専用 `HEINZEL_HOME` / `HERDR_CONFIG_PATH` / named namespace で以下を確認する。
 
 - headless server provision と attach/detach

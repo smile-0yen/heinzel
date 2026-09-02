@@ -578,3 +578,33 @@ the most serious finding in this document. Stop and report it.
 > to say so.
 
 > **Evidence 3d** — both `.result` strings and both files' contents.
+
+---
+
+## Herdr Phase 0 — the live spike
+
+Not yet run. `docs/RUNTIME-BACKENDS.md` §20 puts a gate in front of the Herdr
+backend — a live spike that has to happen before any of that design is
+implemented — and the runbook for it is [HERDR-SPIKE.md](HERDR-SPIKE.md): 41
+steps across seventeen gates, each with what a pass looks like and what the
+design does when it is not a pass.
+
+It is a separate document rather than another phase here because it is a gate
+on unwritten code rather than a check on shipped behaviour, and because it is
+long enough to swamp this one. The results come back, though: the spike ends by
+pasting its versions block, results table and verdict into this section, which
+is what §20 means by "record the outcome in `docs/VERIFICATION.md` with the
+measured versions".
+
+Two things to know before starting it. `herdr` is not installed on this machine
+as of 0.3.1, and installing it is not a step of the spike. And the "Phase 0" in
+its name is `RUNTIME-BACKENDS.md`'s, not the Phase 0 at the top of this file —
+they are different things that happen to share a number.
+
+```sh
+tools/herdr-spike-probe.sh preflight
+```
+
+> **Evidence H0** — the rendered table from
+> `tools/herdr-spike-probe.sh render`, pasted here, plus the named evidence
+> files kept out of the repository. Redact first: pane history holds secrets.
