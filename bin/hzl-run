@@ -458,17 +458,31 @@ $(claims_runs "${WS_IDENTITY}")
 EOF
 fi
 
-# --- the completed archive -------------------------------------------------
-# Everything closed before this run leaves the backlog, so that what a human
-# opens is what is still waiting. Here and not at the end of a run, and not
-# inside the ledger transition: any commit left unrecorded has already been
-# recovered above, and the intent and receipt of §13.4 digest one file at the
-# moment they are written. What this run closes is swept by the next one, which
-# is also what keeps the review gate able to find its own completions.
+# --- the sweep -------------------------------------------------------------
+# Everything closed, and everything waiting on a person, leaves the backlog
+# before this run reads it, so that what a human opens is the queue and what the
+# runner attacks is only what it can attack. Here and not at the end of a run,
+# and not inside the ledger transition: any commit left unrecorded has already
+# been recovered above, and the intent and receipt of §13.4 digest one file at
+# the moment they are written. What this run closes or blocks is swept by the
+# next one, which is also what keeps the review gate able to find its own
+# completions - and able to move them back to `[!]` in the file it read them in.
 ARCHIVED=$(with_backlog_lock backlog_archive_done "${BACKLOG}")
 case ${ARCHIVED} in ""|*[!0-9]*) ARCHIVED=0 ;; esac
 [ "${ARCHIVED}" -gt 0 ] &&
   log_event swept "moved ${ARCHIVED} completed task(s) into $(ledger_archive "${BACKLOG}")"
+
+SWEPT_BLOCKED=$(with_backlog_lock backlog_sweep_blocked "${BACKLOG}")
+BLOCKED_OUT=$(printf '%s' "${SWEPT_BLOCKED}" | cut -d' ' -f1)
+BLOCKED_BACK=$(printf '%s' "${SWEPT_BLOCKED}" | cut -d' ' -f2)
+case ${BLOCKED_OUT} in ""|*[!0-9]*) BLOCKED_OUT=0 ;; esac
+case ${BLOCKED_BACK} in ""|*[!0-9]*) BLOCKED_BACK=0 ;; esac
+[ "${BLOCKED_OUT}" -gt 0 ] &&
+  log_event swept "moved ${BLOCKED_OUT} blocked task(s) into $(ledger_blocked_file "${BACKLOG}")"
+# The way back. A task somebody unblocked by hand is a task this run may pick up,
+# and it is only pickable once it is in the file the worksheet is built from.
+[ "${BLOCKED_BACK}" -gt 0 ] &&
+  log_event swept "${BLOCKED_BACK} task(s) are no longer blocked and are back in ${BACKLOG}"
 
 # --- gate 7: is there anything to do? -------------------------------------
 # Last, and immediately before the only expensive thing in this file.
@@ -950,7 +964,7 @@ fi
 DONE_AFTER=$(backlog_count "${BACKLOG}" x)
 TASKS_DONE=$((DONE_AFTER - DONE_BEFORE))
 [ "${TASKS_DONE}" -lt 0 ] && TASKS_DONE=0
-TASKS_BLOCKED=$(backlog_count "${BACKLOG}" "!")
+TASKS_BLOCKED=$(ledger_count "${BACKLOG}" "!")
 
 # Session state moves under the same lock as the ledger, and for the same
 # reason: `state_update` reads the file, filters it and renames the result over

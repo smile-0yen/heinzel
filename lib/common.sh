@@ -11,7 +11,7 @@
 # Multibyte truncation is locale-dependent (DESIGN 6.3). Fix it once, here.
 export LC_CTYPE=UTF-8
 
-HEINZEL_VERSION="0.3.3"
+HEINZEL_VERSION="0.3.4"
 
 # The TTL ceiling is deliberately not configurable. A session that can be
 # created with an unbounded lifetime is not a session, it is a mode.
@@ -805,7 +805,7 @@ backlog_ids_done_by_run() {
   ' "${f}"
 }
 
-# --- the completed archive -------------------------------------------------
+# --- the ledger's other files ----------------------------------------------
 #
 # The backlog is a queue, and a queue that keeps everything it ever served is a
 # log wearing a queue's format. Every closed task stayed in `backlog.md` next to
@@ -813,15 +813,31 @@ backlog_ids_done_by_run() {
 # to add a todo grew without bound and the `[!]` lines that need a decision sank
 # into a month of `[x]`.
 #
-# So the ledger becomes two files that share one format:
+# So the ledger is three files that share one format, split by whose move it is:
 #
-#   backlog.md             what is still live:  [ ]  [~]  [!]
-#   backlog.completed.md   what is closed:      [x]
+#   backlog.md             the machine's queue:  [ ]  [~]
+#   backlog.blocked.md     waiting on a person:  [!]
+#   backlog.completed.md   what is closed:       [x]
 #
-# The archive is derived from the backlog's own name rather than configured. A
-# second setting is a second thing to get wrong, and the two files have to be
-# found together by every reader — including one that only has the backlog path
-# out of `state.json`.
+# Sweeping `[x]` out was the first half and it left the second half visible: a
+# blocked task is not work the runner can pick up either, so it sat in the queue
+# being skipped by every run that read past it, and the queue still was not the
+# list of what is queued. `backlog.md` now answers one question — what happens
+# next — and the file whose whole content is addressed to a human is a file a
+# human can open on its own.
+#
+# Both are derived from the backlog's own name rather than configured. A second
+# setting is a second thing to get wrong, and the files have to be found together
+# by every reader — including one that only has the backlog path out of
+# `state.json`.
+#
+# The blocked file is *live*, and that is its one difference from the archive:
+# `[x]` is terminal, `[!]` is not. So its sweep runs both ways — `[!]` leaves the
+# backlog, and a line in the blocked file that is no longer `[!]` (`hzl unblock`,
+# or a human with an editor) goes back into it. One-way would strand an unblocked
+# task in a file no worksheet is ever built from, which is losing work quietly.
+# For the same reason every *mutation* addresses the ledger's live files and
+# never the archive: `ledger_file_of_id` looks in those two only.
 #
 # Two invariants survive the split, and they are the whole reason the reads
 # below exist rather than each caller opening the file it happens to know about:
@@ -847,9 +863,19 @@ Ids are still live in this file - `hzl` reads it when it allocates the next one 
 so do not renumber or delete them by hand.
 '
 
-# The archive that belongs to a backlog. Beside it, and named after it, so the
-# two sort together in a directory listing and neither can be found without the
-# other.
+BLOCKED_TEMPLATE='# Blocked
+
+Tasks an unattended run stopped on: each needed a judgement call, a privilege, or
+something irreversible it would not do on its own. The reason is in the comment
+at the end of the line, and `hzl take <id>` writes a prompt for one of them.
+
+This file is live, not a record. Change a `[!]` back to `[ ]` here (or run
+`hzl unblock <id>`) and the task returns to the backlog at the next sweep.
+'
+
+# The archive that belongs to a backlog, and the blocked file that belongs to it.
+# Beside it and named after it, so the three sort together in a directory listing
+# and none of them can be found without the others.
 ledger_archive() {
   local f=$1
   [ -n "${f}" ] || return 1
@@ -859,21 +885,42 @@ ledger_archive() {
   esac
 }
 
-ledger_archive_ensure() {
-  local a
-  a=$(ledger_archive "$1") || return 1
-  [ -f "${a}" ] && return 0
-  mkdir -p "$(dirname "${a}")" || return 1
-  printf '%s' "${ARCHIVE_TEMPLATE}" >"${a}"
+# Not `ledger_blocked`: that one is the report read, and this is a path.
+ledger_blocked_file() {
+  local f=$1
+  [ -n "${f}" ] || return 1
+  case ${f} in
+    *.md) printf '%s.blocked.md' "${f%.md}" ;;
+    *) printf '%s.blocked' "${f}" ;;
+  esac
 }
 
-# The files that together are the ledger, backlog first. The archive is listed
-# only when it exists: a machine that has never swept has a one-file ledger, and
+# Created on the first sweep that has something to put there, never before: a
+# machine that has closed nothing and blocked nothing has a one-file ledger, and
 # every read below has to work there unchanged.
-ledger_files() {
-  local f=$1 a
+ledger_file_ensure() { # path template
+  local p=$1
+  [ -n "${p}" ] || return 1
+  [ -f "${p}" ] && return 0
+  mkdir -p "$(dirname "${p}")" || return 1
+  printf '%s' "$2" >"${p}"
+}
+
+# The files that hold live work, backlog first. These are the ones a mutation may
+# land in; a task moves between them and out of them into the archive.
+ledger_live_files() {
+  local f=$1 b
   [ -n "${f}" ] || return 1
   printf '%s\n' "${f}"
+  b=$(ledger_blocked_file "${f}") 2>/dev/null
+  [ -n "${b}" ] && [ -r "${b}" ] && printf '%s\n' "${b}"
+  return 0
+}
+
+# The files that together are the ledger: the live ones, then the archive.
+ledger_files() {
+  local f=$1 a
+  ledger_live_files "${f}" || return 1
   a=$(ledger_archive "${f}") 2>/dev/null
   [ -n "${a}" ] && [ -r "${a}" ] && printf '%s\n' "${a}"
   return 0
@@ -932,27 +979,38 @@ $(ledger_files "$1")
 EOF
 }
 
-# The sweep: every `[x]` line, with the continuation lines belonging to it,
-# moves from the backlog to the archive. Prints how many tasks moved.
+# The sweep, in one function because both sweeps are the same move: every task
+# line whose marker is wanted, with the continuation lines belonging to it, goes
+# from one ledger file to another. `want` is the set of marker characters to
+# move; with a leading `^` it is the set to keep and everything else moves.
+# Prints how many tasks moved.
 #
-# The archive is appended to *before* the backlog is rewritten, and that order
+# The destination is appended to *before* the source is rewritten, and that order
 # is the whole safety argument. A crash between the two leaves a task in both
-# files, which the next sweep repairs (an id already in the archive is dropped
-# from the backlog rather than appended twice); the other order would lose the
-# task outright. Duplication is visible and self-healing, loss is neither.
+# files, which the next sweep repairs (an id already at the destination is
+# dropped from the source rather than appended twice); the other order would lose
+# the task outright. Duplication is visible and self-healing, loss is neither.
 #
 # Appended chronologically, not merged by priority: this is a record of when
-# things closed. Each run of tasks carries the `## P<n>` heading it came from,
-# so `backlog_scan` reads the archive with the same priorities the backlog had,
-# and a revert can put a line back where it belongs.
+# things moved. Each run of tasks carries the `## P<n>` heading it came from, so
+# `backlog_scan` reads the destination with the same priorities the source had,
+# and a revert - or the sweep back out of the blocked file - can put a line where
+# it belongs.
 #
 # Caller holds the backlog lock.
-backlog_archive_done() {
-  local f=$1 a seen delta keep n
+ledger_move_marked() { # src dst want [template]
+  local f=$1 a=$2 want=$3 invert=0 seen delta keep n
   [ -r "${f}" ] && [ -w "${f}" ] || { printf 0; return 1; }
-  [ "$(backlog_count "${f}" x)" -gt 0 ] || { printf 0; return 0; }
-  ledger_archive_ensure "${f}" || { printf 0; return 1; }
-  a=$(ledger_archive "${f}") || { printf 0; return 1; }
+  [ -n "${a}" ] || { printf 0; return 1; }
+  case ${want} in ^*) invert=1; want=${want#^} ;; esac
+
+  # Nothing to move is the common case, and it must not create the destination:
+  # a ledger that has never blocked anything has no blocked file to back up.
+  [ "$(backlog_scan "${f}" 2>/dev/null |
+       awk -F'\t' -v want="${want}" -v inv="${invert}" '
+         $4 != "" { hit = (index(want, $3) > 0); if (inv) hit = !hit; if (hit) n++ }
+         END { print n + 0 }')" -gt 0 ] || { printf 0; return 0; }
+  ledger_file_ensure "${a}" "${4:-}" || { printf 0; return 1; }
 
   seen=$(mktemp "${TMPDIR:-/tmp}/hzl-arc-seen.XXXXXX") || { printf 0; return 1; }
   delta=$(mktemp "${TMPDIR:-/tmp}/hzl-arc-delta.XXXXXX") || { rm -f "${seen}"; printf 0; return 1; }
@@ -964,7 +1022,8 @@ backlog_archive_done() {
   # every line it reads to one of two places rather than summarise the ones it
   # recognises. `mode` carries the last task line's destination forward, so an
   # indented note follows the task it belongs to.
-  n=$(awk -v idfile="${seen}" -v out_keep="${keep}" -v out_arc="${delta}" '
+  n=$(awk -v idfile="${seen}" -v out_keep="${keep}" -v out_arc="${delta}" \
+          -v want="${want}" -v inv="${invert}" '
     BEGIN {
       while ((getline line < idfile) > 0) if (line != "") archived[line] = 1
       prio = 99; lastprio = ""; mode = "keep"; n = 0
@@ -990,9 +1049,11 @@ backlog_archive_done() {
         sub(/^\(id:/, "", id)
         sub(/\).*$/, "", id)
       }
-      # An id-less completion is left alone: there is nothing to deduplicate it
-      # by, so archiving it could not be made idempotent.
-      if ((marker == "x" || marker == "X") && id != "") {
+      # An id-less line is left alone: there is nothing to deduplicate it by, so
+      # moving it could not be made idempotent.
+      hit = (index(want, marker) > 0)
+      if (inv) hit = !hit
+      if (hit && id != "") {
         mode = "archive"
         n++
         # Already there: the residue of a crash between the append and the
@@ -1017,6 +1078,106 @@ backlog_archive_done() {
   fi
   rm -f "${seen}" "${delta}" "${keep}"
   printf '%s' "${n}"
+}
+
+# Everything closed anywhere in the live ledger moves to the archive. Both live
+# files, because `hzl done` closes a blocked task where it lies, and a `[x]` left
+# in the blocked file is a completion in the file that is supposed to be nothing
+# but open questions. Prints how many tasks moved.
+#
+# Caller holds the backlog lock.
+backlog_archive_done() { # backlog
+  local f=$1 a m n total=0 rc=0
+  a=$(ledger_archive "${f}") || { printf 0; return 1; }
+  while IFS= read -r m; do
+    [ -n "${m}" ] || continue
+    n=$(ledger_move_marked "${m}" "${a}" 'xX' "${ARCHIVE_TEMPLATE}") || rc=1
+    case ${n} in ""|*[!0-9]*) n=0 ;; esac
+    total=$((total + n))
+  done <<EOF
+$(ledger_live_files "${f}")
+EOF
+  printf '%s' "${total}"
+  return ${rc}
+}
+
+# The blocked sweep, which runs both ways because blocked work is live work:
+# `[!]` leaves the backlog for the blocked file, and anything in the blocked file
+# that is no longer `[!]` goes back into the backlog. Prints `out back`.
+#
+# Out first: a task that was blocked and is now `[ ]` again must not be moved out
+# and back in the same sweep. Ordering the other way would still be correct - the
+# marker decides, not the order - but it would churn the file for nothing.
+#
+# What comes back is appended under a `## P<n>` heading of its own rather than
+# spliced into the section it came from. Appending is the operation the crash
+# argument above is built on, and a repeated heading is legal in this format:
+# priority is the nearest heading above a line, so the task lands back at exactly
+# the priority it left with.
+#
+# Caller holds the backlog lock.
+backlog_sweep_blocked() { # backlog
+  local f=$1 b out=0 back=0 rc=0
+  b=$(ledger_blocked_file "${f}") || { printf '0 0'; return 1; }
+  out=$(ledger_move_marked "${f}" "${b}" '!' "${BLOCKED_TEMPLATE}") || rc=1
+  case ${out} in ""|*[!0-9]*) out=0 ;; esac
+  if [ -r "${b}" ]; then
+    back=$(ledger_move_marked "${b}" "${f}" '^!' "${BACKLOG_TEMPLATE}") || rc=1
+    case ${back} in ""|*[!0-9]*) back=0 ;; esac
+  fi
+  printf '%s %s' "${out}" "${back}"
+  return ${rc}
+}
+
+# --- the live ledger, as one file ------------------------------------------
+#
+# A task the runner is not working on is in the backlog or in the blocked file,
+# and which of the two is an implementation detail of the sweep. Every read and
+# every write a human drives goes through these, so that `hzl block h-0007` and
+# `hzl done h-0007` do not have to know where the line currently sits.
+#
+# Deliberately not extended to the archive. A mutation that reached it would
+# rewrite the record - and `hzl done` on an id that was closed last month should
+# say "no such id", not silently close it a second time.
+
+# backlog_scan across the live files. Line numbers are per file, so a caller that
+# needs to *change* a line resolves its file with `ledger_file_of_id` first.
+ledger_scan_live() { # backlog
+  local f
+  while IFS= read -r f; do
+    [ -n "${f}" ] || continue
+    backlog_scan "${f}" 2>/dev/null
+  done <<EOF
+$(ledger_live_files "$1")
+EOF
+}
+
+# How many tasks carry this marker anywhere in the live ledger. `[!]` is the
+# reason this exists: after the split, counting the backlog alone reports that
+# nothing is blocked, which is the one answer that must never be wrong.
+ledger_count() { # backlog marker
+  ledger_scan_live "$1" | awk -F'\t' -v m="$2" '$3 == m {n++} END {print n + 0}'
+}
+
+# Which live file holds an id, empty and status 3 when none does.
+ledger_file_of_id() { # backlog id
+  local id=$2 f
+  while IFS= read -r f; do
+    [ -n "${f}" ] || continue
+    [ -n "$(backlog_line_of_id "${f}" "${id}")" ] && { printf '%s' "${f}"; return 0; }
+  done <<EOF
+$(ledger_live_files "$1")
+EOF
+  return 3
+}
+
+# backlog_set_state without having to know which live file the task is in.
+# Status 3 - no such id - is passed through unchanged: it is what tells a caller
+# it typed a wrong id.
+ledger_set_state() { # backlog id marker [meta]
+  local f
+  f=$(ledger_file_of_id "$1" "$2") || return 3
+  backlog_set_state "${f}" "$2" "$3" "${4:-}"
 }
 
 # --- reading the ledger for a human ----------------------------------------
@@ -1065,14 +1226,19 @@ $(ledger_files "$1")
 EOF
 }
 
-# TSV: date, id, reason, text. The backlog only: a blocked task is live work,
-# and the archive holds nothing but completions.
+# TSV: date, id, reason, text. The live files only: a blocked task is live work,
+# and the archive holds nothing but completions. Both of them, because a `[!]`
+# written by this run is still in the backlog until the next sweep moves it - the
+# report has to read the same set the sweep moves between.
 #
 # The trailing `run:<id>` comes off the reason. Every other reader of this
 # metadata takes the rest of the line and keeps the run id in it, which is right
 # for a record and wrong for a sentence somebody reads over breakfast.
 ledger_blocked() { # backlog
-  awk '
+  local lf
+  while IFS= read -r lf; do
+    [ -n "${lf}" ] || continue
+    awk '
     /^[ \t]*(```|~~~)/ { infence = !infence; next }
     infence { next }
     /^[ \t]*-[ \t]+\[!\][ \t]*/ {
@@ -1103,7 +1269,10 @@ ledger_blocked() { # backlog
       sub(/[ \t]*<!--.*-->[ \t]*$/, "", rest)
       printf "%s\t%s\t%s\t%s\n", d, id, reason, rest
     }
-  ' "$1"
+    ' "${lf}"
+  done <<EOF
+$(ledger_live_files "$1")
+EOF
 }
 
 # --- the worksheet ---------------------------------------------------------

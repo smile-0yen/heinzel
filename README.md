@@ -58,8 +58,9 @@ design is about bounding it.
   without the denials. A truncated diff says so. A misspelled effort level is rejected at startup.
 - **Its output gets read back.** Changes made by the executor can be reviewed by a second,
   read-only engine before the ledger is allowed to close a task.
-- **The backlog stays short, and what needs you is loud.** Completed tasks are swept out of the
-  ledger into an archive beside it, so the file you open holds what is waiting and nothing else.
+- **The backlog stays short, and what needs you is loud.** What is closed and what is blocked are
+  swept into files beside the backlog, so the file you open is the queue and nothing else — and
+  what needs a decision is a file of its own rather than a marker to spot.
   `hzl report` is the morning read — what is blocked, with reasons, and what got done — and it
   exits 10 when something needs a decision, so it can drive a notification without being parsed.
 - **The agent never gets the backlog.** Each run is handed a worksheet holding only the tasks it is

@@ -6,6 +6,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-09-06
+
+### Added
+- **The blocked file** (`docs/SPEC.md` §8.0). Sweeping `[x]` out of the backlog
+  was half the job, and it left the other half visible: a `[!]` line is not
+  work the runner can pick up either. It sat in the queue being read past by
+  every run, so the file called the backlog still was not a list of what
+  happens next, and the lines that are addressed to a person were mixed in
+  with the ones addressed to the machine.
+
+  So the ledger is three files sharing one format, split by whose move it is:
+  `backlog.md` is the queue (`[ ]`, `[~]`), `backlog.blocked.md` is what waits
+  on a person (`[!]`), `backlog.completed.md` is the record (`[x]`). Both
+  derived names come from the backlog's own, never from configuration, for the
+  reason the archive already had: every reader has to find the set from the one
+  path `state.json` carries. The sweep runs where it ran before — top of a run,
+  after recovery, before the worksheet — and appends to the destination before
+  rewriting the source, so a crash leaves a task in two files rather than none.
+
+  The blocked file is **live**, and that is its one difference from the
+  archive. `[x]` is terminal; `[!]` is not. So its sweep runs both ways: `[!]`
+  leaves the backlog, and a line that is no longer `[!]` — `hzl unblock`, or a
+  person with an editor — goes back to the backlog at the priority it left
+  with. One-way would strand an unblocked task in a file no worksheet is ever
+  built from, which is losing work quietly. `hzl block` and `hzl unblock` sweep
+  as part of the command, because an unblock you cannot see in `hzl next` until
+  the next run is not an unblock.
+
+  Two more questions turn out to be about *the ledger* rather than one of its
+  files. `ledger_count` is what "how many are blocked" now asks: counted off
+  the backlog alone the answer is zero, and that is the one answer that must
+  never be wrong. `ledger_file_of_id` is what every mutation asks first, so
+  `hzl done`, `hzl block` and `hzl take` work on a task wherever it is sitting.
+  It deliberately looks in the live files only: a mutation that reached the
+  archive would rewrite the record, and `hzl done` on an id closed last month
+  should say "no such id" rather than close it a second time.
+
+  47 new assertions; 502 pass.
+
+### Changed
+- `hzl archive` runs the whole sweep, not just the completions, and says which
+  way each task moved. A hand sweep that left the backlog in a state no run
+  ever leaves it in was a way to be surprised later.
+- `hzl report --json` gains `blocked_file` beside `backlog` and `archive`.
+- The `swept` log event now covers all three files.
+
+### Known gap
+- The generated permission deny-list still names only `backlog.md`, so
+  `backlog.blocked.md` and `backlog.completed.md` are not denied to the agent
+  by name (under the default layout they are still inside the denied
+  `HEINZEL_HOME` for `Edit`, and outside the sandbox's working directory for
+  everything else). Adding them to `etc/heinzel-settings.json.in` was refused
+  by the sandbox this run; it is on the backlog.
+
 ## [0.3.3] - 2026-09-06
 
 ### Added

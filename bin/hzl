@@ -211,7 +211,7 @@ cmd_status() {
   # "3 todo" and a `next` that finds nothing to look like a contradiction.
   # The counts partition the ledger; that is the property worth reading.
   if [ -n "${backlog}" ] && [ -r "${backlog}" ]; then
-    field "backlog" "$(backlog_count "${backlog}" " ") todo / $(backlog_count "${backlog}" "~") in progress / $(backlog_count "${backlog}" "!") blocked / $(backlog_count "${backlog}" x) done"
+    field "backlog" "$(backlog_count "${backlog}" " ") todo / $(backlog_count "${backlog}" "~") in progress / $(ledger_count "${backlog}" "!") blocked / $(backlog_count "${backlog}" x) done"
   else
     field "backlog" "not readable (${backlog:-unset})"
   fi
@@ -632,7 +632,7 @@ EOF
   # been counting the wrong file — usually no file at all — since the mode
   # started being flipped first.
   if [ -n "${backlog}" ] && [ -r "${backlog}" ]; then
-    field "blocked, needs you" "$(backlog_count "${backlog}" "!")"
+    field "blocked, needs you" "$(ledger_count "${backlog}" "!")"
   fi
   local notes today
   today=$(date +%Y-%m-%d)
@@ -856,12 +856,15 @@ cmd_next() {
 
 # Blocked tasks are the ones a human has to close. Without an id this lists
 # them; with an id it writes a prompt to paste into an interactive session.
+#
+# Read across the live ledger, not out of the backlog: after a sweep the blocked
+# tasks are in the blocked file, and this command exists for exactly them.
 cmd_take() {
   local b id=${1:-}
   b=$(need_backlog) || exit 1
   if [ -z "${id}" ]; then
     local n
-    n=$(backlog_count "${b}" "!")
+    n=$(ledger_count "${b}" "!")
     if [ "${n}" -eq 0 ]; then
       say "nothing is blocked."
       return 0
@@ -869,23 +872,26 @@ cmd_take() {
     printf '\n'
     say "blocked, waiting for you:"
     printf '\n'
-    backlog_scan "${b}" | awk -F'\t' '$3 == "!" {printf "  P%-3s %-8s %s\n", $2, $4, $5}'
+    ledger_scan_live "${b}" | awk -F'\t' '$3 == "!" {printf "  P%-3s %-8s %s\n", $2, $4, $5}'
     printf '\n'
     dim "  'hzl take <id>' prints a prompt for an interactive session"
     printf '\n'
     return 0
   fi
 
-  local text marker lineno
-  text=$(backlog_text_of_id "${b}" "${id}")
+  local f text marker lineno
+  # The file the line is in, so that the notes under it are read from the same
+  # place the text was - and so the prompt names the file a person can open.
+  f=$(ledger_file_of_id "${b}" "${id}") || { err "no such id: ${id}"; exit 3; }
+  text=$(backlog_text_of_id "${f}" "${id}")
   [ -n "${text}" ] || { err "no such id: ${id}"; exit 3; }
-  marker=$(backlog_marker_of_id "${b}" "${id}")
-  lineno=$(backlog_line_of_id "${b}" "${id}")
+  marker=$(backlog_marker_of_id "${f}" "${id}")
+  lineno=$(backlog_line_of_id "${f}" "${id}")
 
   printf '\n--- paste this into an interactive session ---\n\n'
-  printf 'Task %s from %s:\n\n' "${id}" "${b}"
+  printf 'Task %s from %s:\n\n' "${id}" "${f}"
   printf '  %s\n' "${text}"
-  backlog_notes_for_line "${b}" "${lineno}"
+  backlog_notes_for_line "${f}" "${lineno}"
   if [ "${marker}" = "!" ]; then
     printf '\nThis was blocked by an unattended run, which means it needed a\n'
     printf 'judgement call, a privilege, or an irreversible action it would not take\n'
@@ -899,9 +905,25 @@ cmd_take() {
 # in together: a run reading the ledger between them would see a completion with
 # nothing saying what changed. `backlog_set_state`'s status 3 - no such id - is
 # passed through, because that is what tells the caller it typed a wrong id.
+#
+# The file is resolved once, under the lock, and both mutations go to it: a task
+# closed while it sits in the blocked file must not have its note land in the
+# backlog. The sweep takes it to the archive from wherever it was closed.
 done_with_note() { # backlog id note
-  backlog_set_state "$1" "$2" x "done:$(iso_at) by:human" || return $?
-  [ -n "$3" ] && backlog_add_note "$1" "$2" "$3"
+  local f
+  f=$(ledger_file_of_id "$1" "$2") || return 3
+  backlog_set_state "${f}" "$2" x "done:$(iso_at) by:human" || return $?
+  [ -n "$3" ] && backlog_add_note "${f}" "$2" "$3"
+  return 0
+}
+
+# Blocking and unblocking are a marker change and a move, and they are one
+# change: an unblocked task still sitting in the blocked file when `hzl next`
+# looks is an unblock that did not happen. The runner would sweep it at the top
+# of the next run, which is hours away and long after the person went to bed.
+set_state_and_sweep() { # backlog id marker meta
+  ledger_set_state "$1" "$2" "$3" "${4:-}" || return $?
+  backlog_sweep_blocked "$1" >/dev/null
   return 0
 }
 
@@ -925,13 +947,14 @@ cmd_block() {
   [ -n "${id}" ] || die "usage: hzl block <id> <reason>"
   [ -n "${reason}" ] || die "a reason is required - it is what tells you what to do later"
   b=$(need_backlog) || exit 1
-  with_backlog_lock backlog_set_state "${b}" "${id}" "!" "blocked:$(iso_at) reason:${reason}"
+  with_backlog_lock set_state_and_sweep "${b}" "${id}" "!" "blocked:$(iso_at) reason:${reason}"
   case $? in
     0) ;;
     3) err "no such id: ${id}"; exit 3 ;;
     *) die "could not update ${b}" ;;
   esac
   good "${id} blocked: ${reason}"
+  dim "  it is in $(ledger_blocked_file "${b}") now, with the rest of what needs you"
 }
 
 cmd_unblock() {
@@ -939,7 +962,7 @@ cmd_unblock() {
   local b id=${1:-}
   [ -n "${id}" ] || die "usage: hzl unblock <id>"
   b=$(need_backlog) || exit 1
-  with_backlog_lock backlog_set_state "${b}" "${id}" " " ""
+  with_backlog_lock set_state_and_sweep "${b}" "${id}" " " ""
   case $? in
     0) ;;
     3) err "no such id: ${id}"; exit 3 ;;
@@ -948,17 +971,25 @@ cmd_unblock() {
   good "${id} is back in the queue."
 }
 
+# The same sweep the runner does at the top of a run, on demand. Both halves of
+# it: a `hzl archive` that moved completions and left the blocked tasks where
+# they were would leave the backlog in a state no run ever leaves it in.
 cmd_archive() {
   require_not_root
-  local b n
+  local b n swept out back
   b=$(need_backlog) || exit 1
   n=$(with_backlog_lock backlog_archive_done "${b}")
   case ${n} in ""|*[!0-9]*) die "could not sweep ${b}" ;; esac
-  if [ "${n}" -eq 0 ]; then
-    say "nothing to archive - no completed tasks in the backlog."
-  else
-    good "${n} completed task(s) moved to $(ledger_archive "${b}")"
-  fi
+  swept=$(with_backlog_lock backlog_sweep_blocked "${b}")
+  out=$(printf '%s' "${swept}" | cut -d' ' -f1)
+  back=$(printf '%s' "${swept}" | cut -d' ' -f2)
+  case ${out}${back} in ""|*[!0-9]*) die "could not sweep ${b}" ;; esac
+  [ "${n}" -gt 0 ] && good "${n} completed task(s) moved to $(ledger_archive "${b}")"
+  [ "${out}" -gt 0 ] && good "${out} blocked task(s) moved to $(ledger_blocked_file "${b}")"
+  [ "${back}" -gt 0 ] && good "${back} task(s) are no longer blocked and are back in ${b}"
+  [ $((n + out + back)) -eq 0 ] &&
+    say "nothing to sweep - the backlog holds only what is queued."
+  return 0
 }
 
 # --- the morning report ----------------------------------------------------
@@ -1006,11 +1037,12 @@ cmd_report() {
       --arg since "${since}" \
       --arg backlog "${b}" \
       --arg archive "$(ledger_archive "${b}")" \
+      --arg blocked_file "$(ledger_blocked_file "${b}")" \
       --argjson todo "${n_todo}" \
       --argjson blocked "$(printf '%s\n' "${blocked}" | jq -R -s -c 'split("\n") | map(select(length > 0)) | map(split("\t")) | map({at: .[0], id: .[1], reason: .[2], text: .[3]})')" \
       --argjson completed "$(printf '%s\n' "${completions}" | jq -R -s -c 'split("\n") | map(select(length > 0)) | map(split("\t")) | map({at: .[0], id: .[1], text: .[2]})')" \
-      '{since: $since, backlog: $backlog, archive: $archive, todo: $todo,
-        blocked: $blocked, completed: $completed}'
+      '{since: $since, backlog: $backlog, blocked_file: $blocked_file,
+        archive: $archive, todo: $todo, blocked: $blocked, completed: $completed}'
     [ "${n_blocked}" -gt 0 ] && exit 10
     return 0
   fi
@@ -1259,7 +1291,7 @@ cmd_doctor() {
       *) doc_ok "the backlog is outside the working directory, out of the agent's reach" ;;
     esac
     if [ -r "${b}" ]; then
-      doc_ok "${b}: $(backlog_count "${b}" " ") todo, $(backlog_count "${b}" "~") in progress, $(backlog_count "${b}" x) done, $(backlog_count "${b}" "!") blocked"
+      doc_ok "${b}: $(backlog_count "${b}" " ") todo, $(backlog_count "${b}" "~") in progress, $(backlog_count "${b}" x) done, $(ledger_count "${b}" "!") blocked"
     else
       # Not a fault: `hzl on` creates it from a template.
       doc_warn "no backlog at ${b} yet - 'hzl on' will create it"
@@ -1482,7 +1514,8 @@ backlog
   hzl done <id> [note]       close a task out by hand
   hzl block <id> <reason>    park a task; a reason is required
   hzl unblock <id>           put it back in the queue
-  hzl archive                sweep completed tasks out of the backlog
+  hzl archive                sweep what is closed and what is blocked out of
+                             the backlog, and what is unblocked back into it
   hzl report [options]       the morning read: what is blocked, what got done.
                              Exits 10 if anything is blocked. Options:
                                --days N     how far back to look, default 1

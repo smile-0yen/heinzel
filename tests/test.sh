@@ -2581,6 +2581,148 @@ t_eq "a window with nothing in it reports nothing" \
 
 unset ARC_DIR ARC_B ARC_A ARC_FIXTURE ARC_N
 
+# --- the blocked file ------------------------------------------------------
+
+group 'ledger_blocked_file'
+
+t_eq "the blocked file is named after the backlog beside it" \
+  "/x/backlog.blocked.md" "$(ledger_blocked_file /x/backlog.md)"
+t_eq "a backlog that is not .md still gets one" \
+  "/x/queue.blocked" "$(ledger_blocked_file /x/queue)"
+t_fails "and an empty path has none" "$(ledger_blocked_file "" >/dev/null 2>&1; echo $?)"
+
+BLK_DIR=${TMPROOT}/blocked
+mkdir -p "${BLK_DIR}"
+BLK_B=${BLK_DIR}/backlog.md
+BLK_F=${BLK_DIR}/backlog.blocked.md
+BLK_A=${BLK_DIR}/backlog.completed.md
+
+BLK_FIXTURE=${TMPROOT}/blocked-fixture.md
+cat >"${BLK_FIXTURE}" <<'FIXTURE'
+# Backlog
+
+```
+## P1
+- [!] the fenced example nobody may sweep
+```
+
+## P1
+- [ ] (id:h-0001) still waiting
+- [!] (id:h-0002) needs a decision <!-- blocked:2026-08-02T10:00 reason:needs a name run:20260802-100000 -->
+      note: a continuation line that belongs to h-0002
+- [x] (id:h-0003) closed <!-- done:2026-08-01T10:00+09:00 run:20260801-100000 -->
+
+## P2
+- [~] (id:h-0004) in progress
+- [!] (id:h-0005) needs a credential <!-- blocked:2026-09-05T23:00 reason:no token -->
+FIXTURE
+
+blk_reset() { cp "${BLK_FIXTURE}" "${BLK_B}"; rm -f "${BLK_F}" "${BLK_A}"; }
+
+group 'backlog_sweep_blocked'
+
+blk_reset
+t_eq "both blocked tasks leave the backlog, and nothing comes back" \
+  "2 0" "$(backlog_sweep_blocked "${BLK_B}")"
+t_lacks "the backlog loses the blocked task" "${BLK_B}" "(id:h-0002)"
+t_lacks "and the one at P2" "${BLK_B}" "(id:h-0005)"
+t_has "the blocked file gains it" "${BLK_F}" "(id:h-0002)"
+t_has "a blocked task takes its notes with it" "${BLK_F}" "note: a continuation line that belongs to h-0002"
+t_lacks "and leaves none behind" "${BLK_B}" "note: a continuation line that belongs to h-0002"
+t_has "the todo stays put - the backlog is the queue" "${BLK_B}" "(id:h-0001)"
+t_has "so does the completion, which is the archive's to take" "${BLK_B}" "(id:h-0003)"
+t_has "and the in-progress marker, which is a claim's projection" "${BLK_B}" "(id:h-0004)"
+t_has "the fenced example is documentation, and is never swept" \
+  "${BLK_B}" "the fenced example nobody may sweep"
+t_eq "the blocked file carries the priority the task was blocked at" \
+  "2" "$(backlog_scan "${BLK_F}" | awk -F'\t' '$4 == "h-0005" {print $2}')"
+
+t_eq "a second sweep finds nothing to move either way" "0 0" "$(backlog_sweep_blocked "${BLK_B}")"
+t_eq "and does not append the same task twice" 1 "$(grep -c "(id:h-0002)" "${BLK_F}")"
+
+blk_reset
+printf '# B\n\n## P1\n- [ ] (id:h-0001) waiting\n' >"${BLK_B}"
+t_eq "a ledger with nothing blocked sweeps nothing" "0 0" "$(backlog_sweep_blocked "${BLK_B}")"
+t_eq "and writes no blocked file for it" 0 "$([ -e "${BLK_F}" ] && echo 1 || echo 0)"
+
+# The crash the append-then-rewrite order is chosen for, in the direction the
+# archive cannot show: the blocked file took the line and the process died before
+# the backlog was rewritten.
+blk_reset
+backlog_sweep_blocked "${BLK_B}" >/dev/null
+printf -- '- [!] (id:h-0002) needs a decision <!-- blocked:2026-08-02T10:00 reason:needs a name -->\n' >>"${BLK_B}"
+t_eq "a task left in both files is swept again" "1 0" "$(backlog_sweep_blocked "${BLK_B}")"
+t_lacks "out of the backlog" "${BLK_B}" "(id:h-0002)"
+t_eq "and not into the blocked file a second time" 1 "$(grep -c "(id:h-0002)" "${BLK_F}")"
+
+group 'the way back'
+
+# What makes this sweep different from the archive's: `[x]` is terminal and `[!]`
+# is not, so a task that stops being blocked has to find its way home.
+blk_reset
+backlog_sweep_blocked "${BLK_B}" >/dev/null
+backlog_set_state "${BLK_F}" h-0002 " " ""
+backlog_set_state "${BLK_F}" h-0005 " " ""
+t_eq "an unblocked task comes back" "0 2" "$(backlog_sweep_blocked "${BLK_B}")"
+t_has "into the file the worksheet is built from" "${BLK_B}" "(id:h-0002)"
+t_lacks "and out of the blocked file" "${BLK_F}" "(id:h-0002)"
+t_has "with the notes that belong to it" "${BLK_B}" "note: a continuation line that belongs to h-0002"
+t_eq "at the priority it left with" \
+  "2" "$(backlog_scan "${BLK_B}" | awk -F'\t' '$4 == "h-0005" {print $2}')"
+t_eq "so the runner still attacks P1 first" "h-0001" "$(backlog_next_id "${BLK_B}")"
+t_eq "an in-progress marker stranded there comes back too - it is not blocked" \
+  "1 1" "$(backlog_set_state "${BLK_B}" h-0002 "!" "blocked:2026-09-06T01:00 reason:again"
+           printf -- '- [~] (id:h-0004) stranded\n' >>"${BLK_F}"
+           backlog_sweep_blocked "${BLK_B}")"
+
+group 'closing a task where it lies'
+
+blk_reset
+backlog_sweep_blocked "${BLK_B}" >/dev/null
+t_eq "a mutation finds the file the task is in" "${BLK_F}" "$(ledger_file_of_id "${BLK_B}" h-0002)"
+ledger_set_state "${BLK_B}" h-0002 x "done:2026-09-06T01:00+09:00 by:human"
+t_eq "and the marker lands there, not in the backlog" "x" "$(backlog_marker_of_id "${BLK_F}" h-0002)"
+# One from each live file: h-0003 was closed in the backlog, h-0002 where it lay.
+t_eq "the archive sweep empties both live files of completions" \
+  2 "$(backlog_archive_done "${BLK_B}")"
+t_has "the one closed while blocked reaches the archive" "${BLK_A}" "(id:h-0002)"
+t_lacks "leaving the blocked file to open questions only" "${BLK_F}" "(id:h-0002)"
+
+group 'the ledger is three files'
+
+blk_reset
+backlog_sweep_blocked "${BLK_B}" >/dev/null
+backlog_archive_done "${BLK_B}" >/dev/null
+
+t_eq "ledger_files lists the backlog, the blocked file and the archive" \
+  "${BLK_B} ${BLK_F} ${BLK_A}" "$(ledger_files "${BLK_B}" | tr '\n' ' ' | sed 's/ $//')"
+t_eq "ledger_live_files leaves the record out" \
+  "${BLK_B} ${BLK_F}" "$(ledger_live_files "${BLK_B}" | tr '\n' ' ' | sed 's/ $//')"
+
+t_eq "a marker is looked up across all three" "!" "$(ledger_marker_of_id "${BLK_B}" h-0005)"
+t_eq "including one that has been archived" "x" "$(ledger_marker_of_id "${BLK_B}" h-0003)"
+t_eq "the highest id counts what is blocked" 5 "$(ledger_max_id_num "${BLK_B}")"
+t_eq "which the backlog alone no longer knows" 4 "$(backlog_max_id_num "${BLK_B}")"
+
+# The count that must never be wrong: "nothing is blocked" read off the backlog
+# alone is how a task waiting on a person becomes a task nobody is told about.
+t_eq "blocked is counted across the live files" 2 "$(ledger_count "${BLK_B}" "!")"
+t_eq "and the backlog alone would say nothing is" 0 "$(backlog_count "${BLK_B}" "!")"
+t_eq "the morning report reads the blocked file" 2 "$(ledger_blocked "${BLK_B}" | grep -c .)"
+t_eq "with its reason, and without the run id a person did not ask for" \
+  "needs a name" "$(ledger_blocked "${BLK_B}" | awk -F'\t' '$2 == "h-0002" {print $3}')"
+
+t_eq "ledger_scan_live sees both live files" \
+  4 "$(ledger_scan_live "${BLK_B}" | grep -c .)"
+t_eq "and not the archive" \
+  0 "$(ledger_scan_live "${BLK_B}" | awk -F'\t' '$4 == "h-0003"' | grep -c .)"
+t_fails "an id in no live file has no home" \
+  "$(ledger_file_of_id "${BLK_B}" h-9999 >/dev/null 2>&1; echo $?)"
+t_eq "and a mutation never reaches the archive" \
+  3 "$(ledger_set_state "${BLK_B}" h-0003 " " "" >/dev/null 2>&1; echo $?)"
+
+unset BLK_DIR BLK_B BLK_F BLK_A BLK_FIXTURE
+
 # --- verdict ---------------------------------------------------------------
 
 printf '\n%s passed, %s failed\n' "${PASS}" "${FAIL}"

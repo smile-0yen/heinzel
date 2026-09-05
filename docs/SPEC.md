@@ -442,37 +442,57 @@ is denied it by name in the permission list; a ledger kept outside the working
 directory is additionally outside the sandbox, which is the only boundary a
 subprocess respects.
 
-### 8.0 The completed archive (normative)
+### 8.0 The ledger's three files (normative)
 
-The ledger is two files sharing one format. The backlog holds what is live —
-`[ ]`, `[~]`, `[!]` — and every `[x]` is swept into an archive beside it.
+The ledger is three files sharing one format, split by whose move it is. The
+backlog holds what the runner can pick up; the other two hold what it cannot.
+
+| File | Holds | Path |
+|---|---|---|
+| `backlog.md` | the queue: `[ ]` `[~]` | configured |
+| `backlog.blocked.md` | waiting on a person: `[!]` | derived: `backlog.md` → `backlog.blocked.md`; a name without `.md` gains `.blocked` |
+| `backlog.completed.md` | the record: `[x]` | derived: `backlog.md` → `backlog.completed.md`; a name without `.md` gains `.completed` |
+
+Neither derived path is configurable. A second setting is a second thing to get
+wrong, and every reader has to find the set from the one path `state.json`
+carries.
 
 | Element | Rule |
 |---|---|
-| Path | Derived from the backlog, never configured: `backlog.md` → `backlog.completed.md`; a name without `.md` gains `.completed` |
-| Contents | `[x]` lines and their continuation lines, appended in the order they were swept, each run of them under the `## P<n>` heading it came from |
-| Created | On the first sweep that has something to move. A ledger that has closed nothing has one file |
+| Contents | Task lines and their continuation lines, appended in the order they were swept, each run of them under the `## P<n>` heading it came from |
+| Created | On the first sweep that has something to put there. A ledger that has closed nothing and blocked nothing is one file |
 | Swept by | `hzl archive`, and the runner at the top of a run |
-| Read back | Never picked up. `[x]` is not eligible, and the archive contributes no todos |
+| Read back | The blocked file, yes — it is live, and a task that stops being `[!]` returns to the backlog. The archive, never: `[x]` is terminal and contributes no todos |
 
 The sweep runs **after** any interrupted commit is recovered and **before** the
 worksheet is built. It is not part of the ledger transition: the intent and
 receipt of §11.4 digest the backlog alone, at the moment they are written, and a
-run's own completions are swept by the *next* run — which is also what keeps the
-review gate (§10) able to find and revert what this run closed.
+run's own completions and blocks are swept by the *next* run — which is also what
+keeps the review gate (§10) able to find and revert what this run closed, in the
+file it read it in.
 
-Ordering within a sweep is normative: the archive is appended to first, and the
-backlog rewritten second. A crash between the two leaves a task in both files,
-which the next sweep repairs by dropping it from the backlog; the other order
+Ordering within a sweep is normative: the destination is appended to first, and
+the source rewritten second. A crash between the two leaves a task in both files,
+which the next sweep repairs by dropping it from the source; the other order
 would lose the task. Duplication is visible and self-healing, loss is neither.
 
-Two questions are therefore about the **ledger**, not about one of its files,
+The blocked sweep runs **both ways**, and this is the one place the two derived
+files differ. `[x]` is terminal; `[!]` is not. A line in the blocked file that is
+no longer `[!]` — `hzl unblock`, or a person with an editor — moves back into the
+backlog at the priority it left with. One-way would strand an unblocked task in a
+file no worksheet is built from, which is losing work silently. `hzl block` and
+`hzl unblock` therefore sweep as part of the command rather than leaving the move
+to the next run.
+
+Some questions are therefore about the **ledger**, not about one of its files,
 and asking only the backlog is a defect:
 
 | Question | Function |
 |---|---|
 | What is the highest id ever issued? | `ledger_max_id_num` — an archived id is spent and is never reissued |
 | Is this task already closed? | `ledger_marker_of_id` — finalize recovery asks it, and a "no marker" from a swept backlog would re-apply a completion that landed |
+| How many are blocked? | `ledger_count` — counted off the backlog alone it is zero, and "nothing is blocked" is the one answer that must never be wrong |
+| Where do I write this marker? | `ledger_file_of_id`, over the **live** files only. A mutation must never reach the archive: `hzl done` on an id closed last month says "no such id" rather than closing it twice |
 
 ### 8.0.1 The report (normative)
 
@@ -480,10 +500,10 @@ and asking only the backlog is a defect:
 
 | Element | Rule |
 |---|---|
-| Blocked | Every `[!]` in the backlog, with its `blocked:` date and its `reason:`. The trailing `run:<id>` is stripped — it is a record, not a sentence for a person |
-| Completed | Every `[x]` across both files whose `done:` date is on or after `today − days` (default 1 day) |
+| Blocked | Every `[!]` in the live files, with its `blocked:` date and its `reason:`. The trailing `run:<id>` is stripped — it is a record, not a sentence for a person |
+| Completed | Every `[x]` across the ledger whose `done:` date is on or after `today − days` (default 1 day) |
 | Exit code | `10` when anything is blocked, `0` otherwise, so that a scheduled `hzl report --quiet \|\| notify` needs no output parsing |
-| `--json` | The same content as `{since, backlog, archive, todo, blocked[], completed[]}` |
+| `--json` | The same content as `{since, backlog, blocked_file, archive, todo, blocked[], completed[]}` |
 
 ### 8.1 The worksheet (normative)
 
@@ -1130,7 +1150,7 @@ One line per event, `<ISO8601> <class> <message>`.
 | `skip` | A gate closed; working as intended |
 | `abort` | A precondition failed; needs a human |
 | `HALT` | Runs suppressed until `hzl resume` |
-| `swept` | Completed tasks moved into the archive (§8.0) |
+| `swept` | Tasks moved between the ledger's files (§8.0) |
 | `ok` | A run completed |
 
 ## §13 Configuration
