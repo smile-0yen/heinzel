@@ -11,7 +11,7 @@
 # Multibyte truncation is locale-dependent (DESIGN 6.3). Fix it once, here.
 export LC_CTYPE=UTF-8
 
-HEINZEL_VERSION="0.3.2"
+HEINZEL_VERSION="0.3.3"
 
 # The TTL ceiling is deliberately not configurable. A session that can be
 # created with an unbounded lifetime is not a session, it is a mode.
@@ -707,7 +707,10 @@ backlog_max_id_num() {
 # collide, and the completion marker's `run:` field has to stay unambiguous.
 backlog_assign_ids() {
   local f=$1 prefix=${2:-h} start tmp
-  start=$(($(backlog_max_id_num "${f}") + 1))
+  # Ledger-wide, not file-wide: an id whose task has been swept into the
+  # archive is spent, and reissuing it would put two different tasks behind one
+  # `run:` attribution.
+  start=$(($(ledger_max_id_num "${f}") + 1))
   tmp=$(mktemp "${TMPDIR:-/tmp}/hzl-backlog.XXXXXX") || return 1
   # `next` is an awk keyword, so the counter cannot be called that.
   # Fenced blocks are skipped here for the same reason backlog_scan skips them,
@@ -800,6 +803,307 @@ backlog_ids_done_by_run() {
       }
     }
   ' "${f}"
+}
+
+# --- the completed archive -------------------------------------------------
+#
+# The backlog is a queue, and a queue that keeps everything it ever served is a
+# log wearing a queue's format. Every closed task stayed in `backlog.md` next to
+# the three or four lines that are actually waiting, so the file a human opens
+# to add a todo grew without bound and the `[!]` lines that need a decision sank
+# into a month of `[x]`.
+#
+# So the ledger becomes two files that share one format:
+#
+#   backlog.md             what is still live:  [ ]  [~]  [!]
+#   backlog.completed.md   what is closed:      [x]
+#
+# The archive is derived from the backlog's own name rather than configured. A
+# second setting is a second thing to get wrong, and the two files have to be
+# found together by every reader — including one that only has the backlog path
+# out of `state.json`.
+#
+# Two invariants survive the split, and they are the whole reason the reads
+# below exist rather than each caller opening the file it happens to know about:
+#
+#   * an id is allocated once, ever. `backlog_max_id_num` reading only the
+#     backlog would hand out h-0007 again the moment the first h-0007 was
+#     archived, and `run:` attribution would stop meaning anything.
+#   * "is this task already closed" is a question about the ledger, not about
+#     one of its files. Finalize recovery asks it, and an answer of "no marker
+#     here" from a swept backlog would re-apply a completion that landed.
+#
+# What does *not* change is the crash boundary. The sweep is not part of the
+# ledger transition: it runs at the top of a run, after any pending commit is
+# recovered and before the worksheet is built, so the intent and receipt of
+# §13.4 still digest a single file at the moment they are written.
+
+ARCHIVE_TEMPLATE='# Completed
+
+Tasks the ledger has closed, swept out of the backlog so that what is waiting
+stays short. This is the record, not the queue: nothing here is picked up again.
+
+Ids are still live in this file - `hzl` reads it when it allocates the next one -
+so do not renumber or delete them by hand.
+'
+
+# The archive that belongs to a backlog. Beside it, and named after it, so the
+# two sort together in a directory listing and neither can be found without the
+# other.
+ledger_archive() {
+  local f=$1
+  [ -n "${f}" ] || return 1
+  case ${f} in
+    *.md) printf '%s.completed.md' "${f%.md}" ;;
+    *) printf '%s.completed' "${f}" ;;
+  esac
+}
+
+ledger_archive_ensure() {
+  local a
+  a=$(ledger_archive "$1") || return 1
+  [ -f "${a}" ] && return 0
+  mkdir -p "$(dirname "${a}")" || return 1
+  printf '%s' "${ARCHIVE_TEMPLATE}" >"${a}"
+}
+
+# The files that together are the ledger, backlog first. The archive is listed
+# only when it exists: a machine that has never swept has a one-file ledger, and
+# every read below has to work there unchanged.
+ledger_files() {
+  local f=$1 a
+  [ -n "${f}" ] || return 1
+  printf '%s\n' "${f}"
+  a=$(ledger_archive "${f}") 2>/dev/null
+  [ -n "${a}" ] && [ -r "${a}" ] && printf '%s\n' "${a}"
+  return 0
+}
+
+# The marker on an id anywhere in the ledger. Empty when no file has it.
+ledger_marker_of_id() {
+  local id=$2 f m
+  while IFS= read -r f; do
+    [ -n "${f}" ] || continue
+    m=$(backlog_marker_of_id "${f}" "${id}")
+    [ -n "${m}" ] && { printf '%s' "${m}"; return 0; }
+  done <<EOF
+$(ledger_files "$1")
+EOF
+  return 1
+}
+
+# The highest id number the ledger has ever issued, across both files. This is
+# the one that allocation must use; `backlog_max_id_num` is the per-file read it
+# is built from.
+ledger_max_id_num() {
+  local f n max=0
+  while IFS= read -r f; do
+    [ -n "${f}" ] || continue
+    n=$(backlog_max_id_num "${f}")
+    [ "${n}" -gt "${max}" ] && max=${n}
+  done <<EOF
+$(ledger_files "$1")
+EOF
+  printf '%s' "${max}"
+}
+
+# Is a task with exactly this text anywhere in the ledger? Asked on the
+# recovery path, where a run may have inserted it before it stopped.
+ledger_has_text() {
+  local f
+  while IFS= read -r f; do
+    [ -n "${f}" ] || continue
+    backlog_scan "${f}" 2>/dev/null | cut -f5- | grep -qxF -- "$2" && return 0
+  done <<EOF
+$(ledger_files "$1")
+EOF
+  return 1
+}
+
+# The ids a run closed, across both files, so that the review gate can still
+# find its own completions after a sweep has moved them.
+ledger_ids_done_by_run() {
+  local f
+  while IFS= read -r f; do
+    [ -n "${f}" ] || continue
+    backlog_ids_done_by_run "${f}" "$2"
+  done <<EOF
+$(ledger_files "$1")
+EOF
+}
+
+# The sweep: every `[x]` line, with the continuation lines belonging to it,
+# moves from the backlog to the archive. Prints how many tasks moved.
+#
+# The archive is appended to *before* the backlog is rewritten, and that order
+# is the whole safety argument. A crash between the two leaves a task in both
+# files, which the next sweep repairs (an id already in the archive is dropped
+# from the backlog rather than appended twice); the other order would lose the
+# task outright. Duplication is visible and self-healing, loss is neither.
+#
+# Appended chronologically, not merged by priority: this is a record of when
+# things closed. Each run of tasks carries the `## P<n>` heading it came from,
+# so `backlog_scan` reads the archive with the same priorities the backlog had,
+# and a revert can put a line back where it belongs.
+#
+# Caller holds the backlog lock.
+backlog_archive_done() {
+  local f=$1 a seen delta keep n
+  [ -r "${f}" ] && [ -w "${f}" ] || { printf 0; return 1; }
+  [ "$(backlog_count "${f}" x)" -gt 0 ] || { printf 0; return 0; }
+  ledger_archive_ensure "${f}" || { printf 0; return 1; }
+  a=$(ledger_archive "${f}") || { printf 0; return 1; }
+
+  seen=$(mktemp "${TMPDIR:-/tmp}/hzl-arc-seen.XXXXXX") || { printf 0; return 1; }
+  delta=$(mktemp "${TMPDIR:-/tmp}/hzl-arc-delta.XXXXXX") || { rm -f "${seen}"; printf 0; return 1; }
+  keep=$(mktemp "${TMPDIR:-/tmp}/hzl-arc-keep.XXXXXX") || { rm -f "${seen}" "${delta}"; printf 0; return 1; }
+
+  backlog_scan "${a}" 2>/dev/null | cut -f4 | sed '/^$/d' >"${seen}"
+
+  # The parse is backlog_scan's, repeated here because this pass has to write
+  # every line it reads to one of two places rather than summarise the ones it
+  # recognises. `mode` carries the last task line's destination forward, so an
+  # indented note follows the task it belongs to.
+  n=$(awk -v idfile="${seen}" -v out_keep="${keep}" -v out_arc="${delta}" '
+    BEGIN {
+      while ((getline line < idfile) > 0) if (line != "") archived[line] = 1
+      prio = 99; lastprio = ""; mode = "keep"; n = 0
+    }
+    /^[ \t]*(```|~~~)/ { infence = !infence; mode = "keep"; print > out_keep; next }
+    infence { print > out_keep; next }
+    /^##[ \t]*[Pp][0-9]+/ {
+      h = $0
+      sub(/^##[ \t]*[Pp]/, "", h)
+      sub(/[^0-9].*$/, "", h)
+      if (h != "") prio = h + 0
+      mode = "keep"; print > out_keep; next
+    }
+    /^[ \t]*-[ \t]+\[.\][ \t]*/ {
+      marker = $0
+      sub(/^[ \t]*-[ \t]+\[/, "", marker)
+      sub(/\].*$/, "", marker)
+      rest = $0
+      sub(/^[ \t]*-[ \t]+\[.\][ \t]*/, "", rest)
+      id = ""
+      if (rest ~ /^\(id:[a-zA-Z0-9_-]+\)/) {
+        id = rest
+        sub(/^\(id:/, "", id)
+        sub(/\).*$/, "", id)
+      }
+      # An id-less completion is left alone: there is nothing to deduplicate it
+      # by, so archiving it could not be made idempotent.
+      if ((marker == "x" || marker == "X") && id != "") {
+        mode = "archive"
+        n++
+        # Already there: the residue of a crash between the append and the
+        # rewrite. Dropping it here is the repair.
+        if (id in archived) next
+        if (prio != lastprio) { printf "\n## P%d\n", prio > out_arc; lastprio = prio }
+        print > out_arc
+        archived[id] = 1
+        next
+      }
+      mode = "keep"; print > out_keep; next
+    }
+    /^[ \t]+[^ \t]/ { if (mode == "archive") print > out_arc; else print > out_keep; next }
+    { mode = "keep"; print > out_keep; next }
+    END { print n + 0 }
+  ' "${f}") || { rm -f "${seen}" "${delta}" "${keep}"; printf 0; return 1; }
+
+  case ${n} in ""|*[!0-9]*) n=0 ;; esac
+  if [ "${n}" -gt 0 ]; then
+    cat "${delta}" >>"${a}" || { rm -f "${seen}" "${delta}" "${keep}"; printf 0; return 1; }
+    cat "${keep}" >"${f}" || { rm -f "${seen}" "${delta}" "${keep}"; printf 0; return 1; }
+  fi
+  rm -f "${seen}" "${delta}" "${keep}"
+  printf '%s' "${n}"
+}
+
+# --- reading the ledger for a human ----------------------------------------
+#
+# The two questions the morning after answers: what is waiting on a decision,
+# and what got done. They are here rather than in `bin/hzl` because they are
+# reads of the ledger format, and the ledger format has one parser per question
+# and a test around it.
+
+# TSV: date, id, text. Across both files, so a completion that was swept into
+# the archive still appears in the report for the morning it happened.
+#
+# Dates are compared as strings, which ISO8601 is ordered for by construction.
+# Doing it inside awk keeps this to one pass per file however long the archive
+# gets - and the archive is the file with no bound on it.
+ledger_completed_since() { # backlog since-date
+  local f
+  while IFS= read -r f; do
+    [ -n "${f}" ] || continue
+    awk -v since="$2" '
+      /^[ \t]*(```|~~~)/ { infence = !infence; next }
+      infence { next }
+      /^[ \t]*-[ \t]+\[[xX]\][ \t]*/ {
+        meta = $0
+        if (meta !~ /<!--/) next
+        sub(/^.*<!--[ \t]*/, "", meta)
+        sub(/[ \t]*-->.*$/, "", meta)
+        if (!match(meta, /done:[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/)) next
+        d = substr(meta, RSTART + 5, 10)
+        if (d < since) next
+        rest = $0
+        sub(/^[ \t]*-[ \t]+\[.\][ \t]*/, "", rest)
+        id = ""
+        if (rest ~ /^\(id:[a-zA-Z0-9_-]+\)/) {
+          id = rest
+          sub(/^\(id:/, "", id)
+          sub(/\).*$/, "", id)
+          sub(/^\(id:[a-zA-Z0-9_-]+\)[ \t]*/, "", rest)
+        }
+        sub(/[ \t]*<!--.*-->[ \t]*$/, "", rest)
+        printf "%s\t%s\t%s\n", d, id, rest
+      }
+    ' "${f}"
+  done <<EOF
+$(ledger_files "$1")
+EOF
+}
+
+# TSV: date, id, reason, text. The backlog only: a blocked task is live work,
+# and the archive holds nothing but completions.
+#
+# The trailing `run:<id>` comes off the reason. Every other reader of this
+# metadata takes the rest of the line and keeps the run id in it, which is right
+# for a record and wrong for a sentence somebody reads over breakfast.
+ledger_blocked() { # backlog
+  awk '
+    /^[ \t]*(```|~~~)/ { infence = !infence; next }
+    infence { next }
+    /^[ \t]*-[ \t]+\[!\][ \t]*/ {
+      meta = $0
+      d = ""; reason = ""
+      if (meta ~ /<!--/) {
+        sub(/^.*<!--[ \t]*/, "", meta)
+        sub(/[ \t]*-->.*$/, "", meta)
+        if (match(meta, /blocked:[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/))
+          d = substr(meta, RSTART + 8, 10)
+        if (match(meta, /reason:/)) {
+          reason = substr(meta, RSTART + 7)
+          sub(/[ \t]*recovered:[^ \t]*[ \t]*$/, "", reason)
+          sub(/[ \t]*run:[^ \t]*[ \t]*$/, "", reason)
+        }
+      }
+      if (reason == "") reason = "not stated"
+      if (d == "") d = "-"
+      rest = $0
+      sub(/^[ \t]*-[ \t]+\[.\][ \t]*/, "", rest)
+      id = ""
+      if (rest ~ /^\(id:[a-zA-Z0-9_-]+\)/) {
+        id = rest
+        sub(/^\(id:/, "", id)
+        sub(/\).*$/, "", id)
+        sub(/^\(id:[a-zA-Z0-9_-]+\)[ \t]*/, "", rest)
+      }
+      sub(/[ \t]*<!--.*-->[ \t]*$/, "", rest)
+      printf "%s\t%s\t%s\t%s\n", d, id, reason, rest
+    }
+  ' "$1"
 }
 
 # --- the worksheet ---------------------------------------------------------

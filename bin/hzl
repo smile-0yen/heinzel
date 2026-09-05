@@ -948,6 +948,106 @@ cmd_unblock() {
   good "${id} is back in the queue."
 }
 
+cmd_archive() {
+  require_not_root
+  local b n
+  b=$(need_backlog) || exit 1
+  n=$(with_backlog_lock backlog_archive_done "${b}")
+  case ${n} in ""|*[!0-9]*) die "could not sweep ${b}" ;; esac
+  if [ "${n}" -eq 0 ]; then
+    say "nothing to archive - no completed tasks in the backlog."
+  else
+    good "${n} completed task(s) moved to $(ledger_archive "${b}")"
+  fi
+}
+
+# --- the morning report ----------------------------------------------------
+#
+# What a human needs to know after a night of unattended runs, and nothing else:
+# what is waiting on a decision, and what got done. `hzl status` answers "is the
+# machine doing the right thing"; this answers "is there anything for me".
+#
+# Blocked comes first and completed second, because blocked is the only part
+# that is actually addressed to the reader. Everything else in this file prints
+# the queue in the order the runner would attack it; this one prints it in the
+# order a person triages it.
+#
+# Exit 10 means something is blocked. That is what makes the report usable from
+# a scheduled job — `hzl report --quiet || notify` — without parsing its output.
+
+cmd_report() {
+  local b days=1 json=0 quiet=0 since blocked completions n_blocked n_done n_todo
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --days) days=${2:-1}; shift ;;
+      --json) json=1 ;;
+      --quiet) quiet=1 ;;
+      *) die "report: unknown option $1" ;;
+    esac
+    shift
+  done
+  case ${days} in ""|*[!0-9]*) die "report: --days takes a number of days" ;; esac
+  b=$(need_backlog) || exit 1
+
+  # BSD date, like every other date arithmetic in this tool. A day boundary and
+  # not 24 hours: "since yesterday" is what a person means in the morning, and
+  # the ledger only records completions to the day anyway.
+  since=$(date -v-"${days}"d +%F 2>/dev/null)
+  [ -n "${since}" ] || die "could not compute a date ${days} day(s) ago"
+
+  blocked=$(ledger_blocked "${b}")
+  completions=$(ledger_completed_since "${b}" "${since}")
+  n_blocked=$(printf '%s' "${blocked}" | grep -c . )
+  n_done=$(printf '%s' "${completions}" | grep -c . )
+  n_todo=$(backlog_count "${b}" " ")
+
+  if [ "${json}" = 1 ]; then
+    jq -n \
+      --arg since "${since}" \
+      --arg backlog "${b}" \
+      --arg archive "$(ledger_archive "${b}")" \
+      --argjson todo "${n_todo}" \
+      --argjson blocked "$(printf '%s\n' "${blocked}" | jq -R -s -c 'split("\n") | map(select(length > 0)) | map(split("\t")) | map({at: .[0], id: .[1], reason: .[2], text: .[3]})')" \
+      --argjson completed "$(printf '%s\n' "${completions}" | jq -R -s -c 'split("\n") | map(select(length > 0)) | map(split("\t")) | map({at: .[0], id: .[1], text: .[2]})')" \
+      '{since: $since, backlog: $backlog, archive: $archive, todo: $todo,
+        blocked: $blocked, completed: $completed}'
+    [ "${n_blocked}" -gt 0 ] && exit 10
+    return 0
+  fi
+
+  if [ "${quiet}" = 1 ]; then
+    [ "${n_blocked}" -gt 0 ] && exit 10
+    return 0
+  fi
+
+  printf '\n'
+  if [ "${n_blocked}" -eq 0 ]; then
+    good "nothing is blocked."
+  else
+    bad "${n_blocked} task(s) blocked, waiting for you:"
+    printf '\n'
+    printf '%s\n' "${blocked}" |
+      awk -F'\t' '{printf "  %-8s %-11s %s\n           %s\n", $2, $1, $4, $3}'
+    dim "  'hzl take <id>' prints a prompt for an interactive session"
+  fi
+
+  printf '\n'
+  if [ "${n_done}" -eq 0 ]; then
+    say "nothing completed since ${since}."
+  else
+    say "completed since ${since} (${n_done}):"
+    printf '\n'
+    printf '%s\n' "${completions}" | sort |
+      awk -F'\t' '{printf "  %-8s %-11s %s\n", $2, $1, $3}'
+  fi
+
+  printf '\n'
+  field "still to do" "${n_todo}"
+  printf '\n'
+  [ "${n_blocked}" -gt 0 ] && exit 10
+  return 0
+}
+
 # --- runs ------------------------------------------------------------------
 
 cmd_runnow() {
@@ -1382,6 +1482,13 @@ backlog
   hzl done <id> [note]       close a task out by hand
   hzl block <id> <reason>    park a task; a reason is required
   hzl unblock <id>           put it back in the queue
+  hzl archive                sweep completed tasks out of the backlog
+  hzl report [options]       the morning read: what is blocked, what got done.
+                             Exits 10 if anything is blocked. Options:
+                               --days N     how far back to look, default 1
+                               --json       the same thing, machine-readable
+                               --quiet      say nothing; the exit code is the
+                                            whole answer
 
 everything else
   hzl status [--json|--quiet]  what is actually true right now
@@ -1415,6 +1522,8 @@ case ${cmd} in
   done) cmd_done "$@" ;;
   block) cmd_block "$@" ;;
   unblock) cmd_unblock "$@" ;;
+  archive) cmd_archive "$@" ;;
+  report) cmd_report "$@" ;;
   run-now) cmd_runnow "$@" ;;
   logs) cmd_logs "$@" ;;
   doctor) cmd_doctor "$@" ;;

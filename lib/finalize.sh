@@ -332,7 +332,10 @@ finalize_recover() { # run-id backlog
 
   while IFS= read -r id; do
     [ -n "${id}" ] || continue
-    marker=$(backlog_marker_of_id "${backlog}" "${id}")
+    # Across the ledger, not just the backlog: a completion that landed and was
+    # then swept into the archive is still a completion, and re-applying it
+    # would put the task back into the backlog as a fresh `[x]`.
+    marker=$(ledger_marker_of_id "${backlog}" "${id}")
     if [ "${marker}" != x ]; then
       backlog_set_state "${backlog}" "${id}" x \
         "done:$(iso_at) run:${legacy} recovered:${run}" && n_done=$((n_done + 1))
@@ -346,7 +349,7 @@ EOF
     [ -n "${id}" ] || continue
     reason=$(jq -r --arg i "${id}" '.blocked[]? | select(.id == $i) | .reason' "${f}" 2>/dev/null | head -1)
     [ -n "${reason}" ] || reason="not stated"
-    marker=$(backlog_marker_of_id "${backlog}" "${id}")
+    marker=$(ledger_marker_of_id "${backlog}" "${id}")
     if [ "${marker}" != "!" ]; then
       backlog_set_state "${backlog}" "${id}" "!" \
         "blocked:$(iso_at) reason:${reason} run:${legacy} recovered:${run}" &&
@@ -374,7 +377,7 @@ EOF
     text=$(jq -r --argjson i "${i}" '.new[$i].text // ""' "${f}" 2>/dev/null)
     i=$((i + 1))
     [ -n "${text}" ] || continue
-    if [ "${expected}" != "${now}" ] && _finalize_has_text "${backlog}" "${text}"; then
+    if [ "${expected}" != "${now}" ] && ledger_has_text "${backlog}" "${text}"; then
       continue
     fi
     backlog_insert_at_priority "${backlog}" "${prio}" "${text}" && n_new=$((n_new + 1))
@@ -392,10 +395,6 @@ EOF
   printf '%s %s %s %s\n' "${n_done}" "${n_blocked}" "${n_new}" 0
 }
 
-# Is a task with exactly this text already in the ledger? Only asked on the
-# moved-ledger path, where the run may have inserted it before it stopped.
-_finalize_has_text() { # backlog text
-  local backlog=$1 text=$2
-  backlog_scan "${backlog}" 2>/dev/null |
-    cut -f5- | grep -qxF -- "${text}"
-}
+# The "already in the ledger" question this used to answer itself now lives in
+# lib/common.sh as `ledger_has_text`, because after the completed archive was
+# split out it is a question about two files rather than one.

@@ -110,13 +110,17 @@ Privileged subcommands escalate internally.
 | `done` | `<id> [note]` | 0 / 1 / **3** |
 | `block` | `<id> <reason>` | 0 / 1 / **3** |
 | `unblock` | `<id>` | 0 / 1 / **3** |
+| `archive` | — | 0 / 1 |
+| `report` | `--days N`, `--json`, `--quiet` | **0** nothing blocked, **10** something is, 1 error |
 | `run-now` | `--dry-run` | the runner's exit code |
 | `logs` | `-f`, `-n N` | 0 / 1 |
 | `doctor` | — | 0 clean, 1 problems found |
 | `install` / `uninstall` | — | 0 / 1 |
 
-`status`'s exit code is a contract other scripts may branch on; `--quiet`
-produces the code and no output.
+`status`'s and `report`'s exit codes are contracts other scripts may branch on;
+`--quiet` produces the code and no output. They answer different questions —
+`status` whether the machine is doing the right thing, `report` whether anything
+is waiting on you — and 10 means "yes" to whichever was asked.
 
 ### 3.1 `hzl on` — order of operations
 
@@ -437,6 +441,49 @@ octal literal.
 is denied it by name in the permission list; a ledger kept outside the working
 directory is additionally outside the sandbox, which is the only boundary a
 subprocess respects.
+
+### 8.0 The completed archive (normative)
+
+The ledger is two files sharing one format. The backlog holds what is live —
+`[ ]`, `[~]`, `[!]` — and every `[x]` is swept into an archive beside it.
+
+| Element | Rule |
+|---|---|
+| Path | Derived from the backlog, never configured: `backlog.md` → `backlog.completed.md`; a name without `.md` gains `.completed` |
+| Contents | `[x]` lines and their continuation lines, appended in the order they were swept, each run of them under the `## P<n>` heading it came from |
+| Created | On the first sweep that has something to move. A ledger that has closed nothing has one file |
+| Swept by | `hzl archive`, and the runner at the top of a run |
+| Read back | Never picked up. `[x]` is not eligible, and the archive contributes no todos |
+
+The sweep runs **after** any interrupted commit is recovered and **before** the
+worksheet is built. It is not part of the ledger transition: the intent and
+receipt of §11.4 digest the backlog alone, at the moment they are written, and a
+run's own completions are swept by the *next* run — which is also what keeps the
+review gate (§10) able to find and revert what this run closed.
+
+Ordering within a sweep is normative: the archive is appended to first, and the
+backlog rewritten second. A crash between the two leaves a task in both files,
+which the next sweep repairs by dropping it from the backlog; the other order
+would lose the task. Duplication is visible and self-healing, loss is neither.
+
+Two questions are therefore about the **ledger**, not about one of its files,
+and asking only the backlog is a defect:
+
+| Question | Function |
+|---|---|
+| What is the highest id ever issued? | `ledger_max_id_num` — an archived id is spent and is never reissued |
+| Is this task already closed? | `ledger_marker_of_id` — finalize recovery asks it, and a "no marker" from a swept backlog would re-apply a completion that landed |
+
+### 8.0.1 The report (normative)
+
+`hzl report` is the morning read: what is blocked, and what got done.
+
+| Element | Rule |
+|---|---|
+| Blocked | Every `[!]` in the backlog, with its `blocked:` date and its `reason:`. The trailing `run:<id>` is stripped — it is a record, not a sentence for a person |
+| Completed | Every `[x]` across both files whose `done:` date is on or after `today − days` (default 1 day) |
+| Exit code | `10` when anything is blocked, `0` otherwise, so that a scheduled `hzl report --quiet \|\| notify` needs no output parsing |
+| `--json` | The same content as `{since, backlog, archive, todo, blocked[], completed[]}` |
 
 ### 8.1 The worksheet (normative)
 
@@ -1083,6 +1130,7 @@ One line per event, `<ISO8601> <class> <message>`.
 | `skip` | A gate closed; working as intended |
 | `abort` | A precondition failed; needs a human |
 | `HALT` | Runs suppressed until `hzl resume` |
+| `swept` | Completed tasks moved into the archive (§8.0) |
 | `ok` | A run completed |
 
 ## §13 Configuration

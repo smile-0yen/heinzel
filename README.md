@@ -19,6 +19,7 @@ hzl remote                # open it up:   screen sharing on, wake-on-LAN, read-o
 hzl on --duration 10h     # start an unattended session (expires by itself)
 hzl off                   # stop it, and restore what it changed
 hzl status                # what is actually true right now
+hzl report                # the morning read: what is blocked, what got done
 ```
 
 The two axes are independent: you can open the machine without starting a session, and you can run
@@ -57,6 +58,10 @@ design is about bounding it.
   without the denials. A truncated diff says so. A misspelled effort level is rejected at startup.
 - **Its output gets read back.** Changes made by the executor can be reviewed by a second,
   read-only engine before the ledger is allowed to close a task.
+- **The backlog stays short, and what needs you is loud.** Completed tasks are swept out of the
+  ledger into an archive beside it, so the file you open holds what is waiting and nothing else.
+  `hzl report` is the morning read — what is blocked, with reasons, and what got done — and it
+  exits 10 when something needs a decision, so it can drive a notification without being parsed.
 - **The agent never gets the backlog.** Each run is handed a worksheet holding only the tasks it is
   allowed to work on; the runner merges the result back and is the ledger's only writer. A run
   cannot close, revert or reword a task it was not given, and that is checked against a list the

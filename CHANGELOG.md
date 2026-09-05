@@ -6,6 +6,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-09-06
+
+### Added
+- **The completed archive, and a morning report** (`docs/SPEC.md` §8.0, §8.0.1).
+  The backlog kept every task it ever served. Two things followed, and both
+  were felt by the person and not by the machine: the file you open to add a
+  todo was mostly history, and the `[!]` lines that are the one part actually
+  addressed to you sank into a month of `[x]`. The ledger is the surface a
+  human and the runner share, and half of it had stopped being readable.
+
+  So the ledger becomes two files sharing one format. `backlog.md` holds what
+  is live — `[ ]`, `[~]`, `[!]` — and every completion is swept into
+  `backlog.completed.md` beside it, appended in the order things closed, each
+  run of them under the `## P<n>` heading it came from. The path is derived
+  from the backlog's own name rather than configured: a second setting is a
+  second thing to get wrong, and every reader has to find the pair from the one
+  path `state.json` carries.
+
+  The sweep is deliberately *not* part of the ledger transition. It runs at the
+  top of a run, after any interrupted commit is recovered and before the
+  worksheet is built, so the intent and receipt of §11.4 still digest one file
+  at the moment they are written, and a run's own completions survive in the
+  backlog long enough for the review gate to revert them. Within a sweep the
+  archive is appended to first and the backlog rewritten second: a crash
+  between the two leaves a task in both files, which the next sweep repairs by
+  dropping it from the backlog. The other order loses the task. Duplication is
+  visible and self-healing; loss is neither.
+
+  Two questions turn out to have been about *the ledger* all along, and asking
+  only the backlog is now a defect. `ledger_max_id_num` is what allocation
+  uses, because an archived id is spent and reissuing it would put two
+  different tasks behind one `run:` attribution; `ledger_marker_of_id` is what
+  finalize recovery asks, because "no marker here" from a swept backlog would
+  re-apply a completion that had already landed.
+
+- **`hzl report`** — what is blocked, and what got done. `hzl status` answers
+  whether the machine is doing the right thing; this answers whether anything
+  is waiting on *you*, which is a different question and was previously only
+  answerable by reading the ledger. Blocked comes first, with the `run:` id
+  stripped off the reason — correct in a record, wrong in a sentence somebody
+  reads over breakfast — and completions are read across both files, so a task
+  swept overnight still appears in the report for the morning it closed.
+
+  It exits **10** when something is blocked and **0** when nothing is, so
+  `hzl report --quiet || notify` needs nothing to parse its output, and
+  `--json` gives the same content to something that writes the summary for you.
+  Scheduling it is left to the operator on purpose: Heinzel installs exactly
+  one launchd job, and a tool that quietly grows a second one is a tool you
+  stop being able to reason about.
+
+- **`hzl archive`** — the same sweep, on demand, for the first run against an
+  existing backlog and for tidying by hand.
+
 ## [0.3.2] - 2026-09-03
 
 ### Added

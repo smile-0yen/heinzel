@@ -458,6 +458,18 @@ $(claims_runs "${WS_IDENTITY}")
 EOF
 fi
 
+# --- the completed archive -------------------------------------------------
+# Everything closed before this run leaves the backlog, so that what a human
+# opens is what is still waiting. Here and not at the end of a run, and not
+# inside the ledger transition: any commit left unrecorded has already been
+# recovered above, and the intent and receipt of §13.4 digest one file at the
+# moment they are written. What this run closes is swept by the next one, which
+# is also what keeps the review gate able to find its own completions.
+ARCHIVED=$(with_backlog_lock backlog_archive_done "${BACKLOG}")
+case ${ARCHIVED} in ""|*[!0-9]*) ARCHIVED=0 ;; esac
+[ "${ARCHIVED}" -gt 0 ] &&
+  log_event swept "moved ${ARCHIVED} completed task(s) into $(ledger_archive "${BACKLOG}")"
+
 # --- gate 7: is there anything to do? -------------------------------------
 # Last, and immediately before the only expensive thing in this file.
 # The blanket reset stays: it is the legacy path, and it is what puts back a

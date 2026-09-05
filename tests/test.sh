@@ -2453,6 +2453,134 @@ t_eq "no subcommand asks herdr to do anything but name its version" \
 
 unset HZL_SPIKE_DIR HZL_TEST_HERDR_CALLS
 
+# --- the completed archive -------------------------------------------------
+
+group 'ledger_archive'
+
+t_eq "the archive is named after the backlog beside it" \
+  "/x/backlog.completed.md" "$(ledger_archive /x/backlog.md)"
+t_eq "a backlog that is not .md still gets one" \
+  "/x/queue.completed" "$(ledger_archive /x/queue)"
+t_fails "and an empty path has none" "$(ledger_archive "" >/dev/null 2>&1; echo $?)"
+
+ARC_DIR=${TMPROOT}/archive
+mkdir -p "${ARC_DIR}"
+ARC_B=${ARC_DIR}/backlog.md
+ARC_A=${ARC_DIR}/backlog.completed.md
+
+# Written once and copied per case: every assertion below starts from the same
+# ledger, and a test that mutated the fixture would decide the next one.
+ARC_FIXTURE=${TMPROOT}/archive-fixture.md
+cat >"${ARC_FIXTURE}" <<'FIXTURE'
+# Backlog
+
+```
+## P1
+- [ ] the fenced example nobody may sweep
+```
+
+## P1
+- [ ] (id:h-0001) still waiting
+- [x] (id:h-0002) closed last week <!-- done:2026-08-01T10:00+09:00 run:20260801-100000 -->
+      note: a continuation line that belongs to h-0002
+- [!] (id:h-0003) needs a decision <!-- blocked:2026-08-02T10:00 reason:needs a name run:20260802-100000 -->
+
+## P2
+- [~] (id:h-0004) in progress
+- [x] (id:h-0005) closed yesterday <!-- done:2026-09-05T23:00+09:00 run:20260905-230000 -->
+FIXTURE
+
+arc_reset() { cp "${ARC_FIXTURE}" "${ARC_B}"; rm -f "${ARC_A}"; }
+
+group 'backlog_archive_done'
+
+arc_reset
+ARC_N=$(backlog_archive_done "${ARC_B}")
+t_eq "both completions move" 2 "${ARC_N}"
+t_lacks "the backlog loses the closed task" "${ARC_B}" "(id:h-0002)"
+t_lacks "and the one closed yesterday" "${ARC_B}" "(id:h-0005)"
+t_has "the archive gains it" "${ARC_A}" "(id:h-0002)"
+t_has "the todo stays put" "${ARC_B}" "(id:h-0001)"
+t_has "so does the blocked task - it is what the human is here for" "${ARC_B}" "(id:h-0003)"
+t_has "and the in-progress marker, which is a claim's projection" "${ARC_B}" "(id:h-0004)"
+t_has "the fenced example is documentation, and is never swept" "${ARC_B}" "the fenced example nobody may sweep"
+t_has "a completion takes its notes with it" "${ARC_A}" "note: a continuation line that belongs to h-0002"
+t_lacks "and leaves none behind" "${ARC_B}" "note: a continuation line that belongs to h-0002"
+
+t_eq "the archive carries the priority the task was closed at" \
+  "1" "$(backlog_scan "${ARC_A}" | awk -F'\t' '$4 == "h-0002" {print $2}')"
+t_eq "each of them" \
+  "2" "$(backlog_scan "${ARC_A}" | awk -F'\t' '$4 == "h-0005" {print $2}')"
+
+t_eq "a second sweep finds nothing left to move" 0 "$(backlog_archive_done "${ARC_B}")"
+t_eq "and does not append the same task twice" \
+  1 "$(grep -c "(id:h-0002)" "${ARC_A}")"
+
+arc_reset
+t_eq "a ledger with nothing closed sweeps nothing" 0 \
+  "$(printf '# B\n\n## P1\n- [ ] (id:h-0001) waiting\n' >"${ARC_B}"; backlog_archive_done "${ARC_B}")"
+t_eq "and writes no archive for it" 0 "$([ -e "${ARC_A}" ] && echo 1 || echo 0)"
+
+# The crash the append-then-rewrite order is chosen for: the archive took the
+# line and the process died before the backlog was rewritten. The repair is the
+# next sweep, and it has to drop the duplicate rather than archive it again.
+arc_reset
+backlog_archive_done "${ARC_B}" >/dev/null
+printf -- '- [x] (id:h-0002) closed last week <!-- done:2026-08-01T10:00+09:00 run:20260801-100000 -->\n' >>"${ARC_B}"
+ARC_N=$(backlog_archive_done "${ARC_B}")
+t_eq "a task left in both files is swept again" 1 "${ARC_N}"
+t_lacks "out of the backlog" "${ARC_B}" "(id:h-0002)"
+t_eq "and not into the archive a second time" 1 "$(grep -c "(id:h-0002)" "${ARC_A}")"
+
+group 'the ledger is both files'
+
+arc_reset
+backlog_archive_done "${ARC_B}" >/dev/null
+
+t_eq "ledger_files lists the backlog and its archive" \
+  "${ARC_B} ${ARC_A}" "$(ledger_files "${ARC_B}" | tr '\n' ' ' | sed 's/ $//')"
+t_eq "and only the backlog when nothing has been swept" \
+  "${ARC_FIXTURE}" "$(ledger_files "${ARC_FIXTURE}" | tr '\n' ' ' | sed 's/ $//')"
+
+t_eq "a marker is looked up across the ledger" "x" "$(ledger_marker_of_id "${ARC_B}" h-0002)"
+t_eq "including one still in the backlog" "!" "$(ledger_marker_of_id "${ARC_B}" h-0003)"
+t_eq "an id nowhere in it has no marker" "" "$(ledger_marker_of_id "${ARC_B}" h-9999)"
+
+# The invariant the whole split turns on: an archived id is spent.
+t_eq "the highest id counts archived tasks" 5 "$(ledger_max_id_num "${ARC_B}")"
+t_eq "which the backlog alone no longer knows" 4 "$(backlog_max_id_num "${ARC_B}")"
+printf -- '- [ ] a task with no id yet\n' >>"${ARC_B}"
+backlog_assign_ids "${ARC_B}"
+t_has "so allocation does not reissue a swept id" "${ARC_B}" "(id:h-0006) a task with no id yet"
+
+t_eq "text is matched across the ledger" 0 \
+  "$(ledger_has_text "${ARC_B}" "closed last week" && echo 0 || echo 1)"
+t_eq "and text nobody wrote is not" 1 \
+  "$(ledger_has_text "${ARC_B}" "never written anywhere" && echo 0 || echo 1)"
+t_eq "a run's completions are found after they are swept" \
+  "h-0002" "$(ledger_ids_done_by_run "${ARC_B}" 20260801-100000)"
+
+group 'the morning report'
+
+arc_reset
+backlog_archive_done "${ARC_B}" >/dev/null
+
+t_eq "a blocked task is reported with its date, id and text" \
+  "2026-08-02	h-0003	needs a decision" \
+  "$(ledger_blocked "${ARC_B}" | awk -F'\t' '{printf "%s\t%s\t%s", $1, $2, $4}')"
+t_eq "and its reason, without the run id a person did not ask for" \
+  "needs a name" "$(ledger_blocked "${ARC_B}" | cut -f3)"
+t_eq "nothing else is blocked" 1 "$(ledger_blocked "${ARC_B}" | grep -c .)"
+
+t_eq "completions are filtered by date" \
+  "2026-09-05	h-0005	closed yesterday" "$(ledger_completed_since "${ARC_B}" 2026-09-01)"
+t_eq "and reach back through the archive when asked to" \
+  2 "$(ledger_completed_since "${ARC_B}" 2026-01-01 | grep -c .)"
+t_eq "a window with nothing in it reports nothing" \
+  0 "$(ledger_completed_since "${ARC_B}" 2026-12-01 | grep -c .)"
+
+unset ARC_DIR ARC_B ARC_A ARC_FIXTURE ARC_N
+
 # --- verdict ---------------------------------------------------------------
 
 printf '\n%s passed, %s failed\n' "${PASS}" "${FAIL}"

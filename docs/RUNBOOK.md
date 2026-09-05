@@ -174,6 +174,8 @@ managed for you:
 | `hzl done <id> "note"` | Close it out by hand |
 | `hzl block <id> "reason"` | Park it. The reason is required |
 | `hzl unblock <id>` | Put it back in the queue |
+| `hzl archive` | Sweep completed tasks out of the backlog by hand |
+| `hzl report` | The morning read: what is blocked, what got done |
 
 Priority order is all of P1 before any of P2, and top to bottom within a
 section. Only `[ ]` lines are ever picked up: a blocked task stays blocked
@@ -181,8 +183,51 @@ until you move it, which is deliberate.
 
 **Expect blocked tasks to accumulate.** The agent is told that when a task
 needs a judgement call, a credential, or anything irreversible, the right
-answer is to stop and say why. `hzl take` in the morning is the normal way to
+answer is to stop and say why. `hzl report` in the morning is the normal way to
 use this, not an exception.
+
+### What is closed leaves the file
+
+A backlog that keeps everything it ever served is a log wearing a queue's
+format, and it costs you twice: the file you open to add a todo is mostly
+history, and the `[!]` lines that actually need you sink into a month of `[x]`.
+
+So the ledger is two files. `backlog.md` holds what is live, and every
+completed task is swept into `backlog.completed.md` beside it — same format,
+same ids, same priorities, appended in the order things closed. The runner
+sweeps at the top of each run; `hzl archive` does it on demand.
+
+You do not have to think about this, with two exceptions:
+
+- **Both files are the ledger.** Ids are allocated across the pair, so an
+  archived `h-0007` is never handed out again. Do not renumber or delete ids in
+  the archive.
+- **Back them up together.** The archive is where the record of what was done
+  lives; the backlog on its own no longer answers "what happened last month".
+
+### The morning
+
+```
+hzl report            what is blocked and what got done since yesterday
+hzl report --days 7   the week
+hzl take <id>         a prompt for the one you want to unblock
+```
+
+`hzl report` exits **10** when something is blocked and **0** when nothing is,
+so it can drive a notification without anything parsing its output:
+
+```sh
+hzl report --quiet || osascript -e 'display notification "heinzel needs you"'
+```
+
+`--json` gives the same content as `{since, backlog, archive, todo, blocked[],
+completed[]}`, which is the shape to hand to something that writes you a summary.
+
+Scheduling that is **yours to set up, deliberately**. Heinzel installs exactly
+one launchd job, the one that runs the nightly session, and it does not grow a
+second one for a report — a tool that quietly adds background jobs is a tool you
+stop being able to reason about. A `crontab` line or your own LaunchAgent is the
+whole of it.
 
 ## The budget
 
