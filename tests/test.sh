@@ -3209,6 +3209,94 @@ FIXTURE
 
 arc_reset() { cp "${ARC_FIXTURE}" "${ARC_B}"; rm -f "${ARC_A}"; }
 
+# --- a ledger file is replaced, never emptied ------------------------------
+#
+# Every rewrite in the ledger used to be `mktemp` in $TMPDIR and then
+# `cat "${tmp}" >"${f}"`: a truncate followed by a write. Between those two the
+# file is empty on disk, and a crash there loses every task in it — the ones
+# nobody had started included. The ledger is the one file in this program that
+# cannot be rebuilt from anything else.
+#
+# Checked through the inode, which is what the difference is: a rename gives the
+# name a new file and leaves the old one alone, so a reader holding the file it
+# started with never sees it empty. A file rewritten in place has one inode from
+# beginning to end, and the empty moment is visible through it.
+
+group 'a ledger file is replaced, not emptied'
+
+LT_DIR=${TMPROOT}/ledger-atomic
+mkdir -p "${LT_DIR}"
+LT_B=${LT_DIR}/backlog.md
+lt_reset() {
+  cat >"${LT_B}" <<'LTFIX'
+# Backlog
+
+## P1
+- [x] (id:h-0001) closed <!-- done:2026-09-06T10:00 -->
+- [ ] (id:h-0002) untouched, and the one a truncate would lose
+- [~] (id:h-0003) in progress
+- [ ] a line with no id yet
+LTFIX
+  chmod 644 "${LT_B}"
+  rm -f "${LT_DIR}/backlog.completed.md" "${LT_DIR}/backlog.blocked.md"
+}
+
+# One assertion per writer, because each of them was its own truncate. The
+# hard link is a second name for the file the write starts with: if the write
+# went through it, the content behind that name changes too.
+for lt_case in \
+  "backlog_set_state|backlog_set_state \"\${LT_B}\" h-0002 x done:now" \
+  "backlog_add_note|backlog_add_note \"\${LT_B}\" h-0002 a-note" \
+  "backlog_reset_inprogress|backlog_reset_inprogress \"\${LT_B}\"" \
+  "backlog_assign_ids|backlog_assign_ids \"\${LT_B}\"" \
+  "backlog_insert_at_priority|backlog_insert_at_priority \"\${LT_B}\" 1 a-new-task" \
+  "ledger_move_marked|ledger_move_marked \"\${LT_B}\" \"\${LT_DIR}/backlog.completed.md\" xX"
+do
+  lt_name=${lt_case%%|*}
+  lt_cmd=${lt_case#*|}
+  lt_reset
+  LT_KEEP=${LT_DIR}/as-it-was
+  rm -f "${LT_KEEP}"
+  ln "${LT_B}" "${LT_KEEP}"
+  LT_INO=$(stat -f '%i' "${LT_B}")
+  LT_WAS=$(cksum <"${LT_B}")
+  eval "${lt_cmd}" >/dev/null 2>&1
+  t_eq "${lt_name} puts a new file there, in one rename" \
+    different \
+    "$([ "$(stat -f '%i' "${LT_B}")" != "${LT_INO}" ] && echo different || echo same)"
+  t_eq "so the file it replaced is whole, and still holds the untouched task" \
+    "${LT_WAS}" "$(cksum <"${LT_KEEP}")"
+  t_eq "and the ledger keeps its mode, not mktemp's" \
+    644 "$(stat -f '%Lp' "${LT_B}")"
+  rm -f "${LT_KEEP}"
+done
+
+# The scratch file has to be in the same directory as its target: across
+# filesystems `mv` is a copy and an unlink, which has the hole back again.
+lt_reset
+LT_TMP=$(ledger_tmp "${LT_B}")
+t_eq "a scratch file is made beside the file it will replace" \
+  "${LT_DIR}" "$(dirname "${LT_TMP}")"
+t_eq "with the target's mode, so the ledger stays readable" \
+  644 "$(stat -f '%Lp' "${LT_TMP}")"
+rm -f "${LT_TMP}"
+ledger_tmp "" >/dev/null 2>&1
+t_fails "and no file at all has no scratch file" "$?"
+
+# Structural, because a seventh writer added later would reintroduce the hole
+# silently: nothing in the ledger writes over a file it did not rename into
+# place.
+LT_INPLACE=$(grep -n 'cat "${tmp}" >"${f}"\|cat "${keep}" >"${f}"' \
+  "${TEST_ROOT}"/lib/*.sh "${TEST_ROOT}"/bin/* |
+  grep -v ':[0-9]*:[[:space:]]*#')
+t_eq "no ledger writer rewrites its file in place" "" "${LT_INPLACE}"
+LT_FARTMP=$(grep -n 'mktemp "${TMPDIR:-/tmp}/hzl-backlog' "${TEST_ROOT}"/lib/*.sh)
+t_eq "and none of them builds the replacement on another filesystem" \
+  "" "${LT_FARTMP}"
+
+unset LT_DIR LT_B LT_KEEP LT_INO LT_WAS LT_TMP lt_case lt_name lt_cmd
+unset LT_INPLACE LT_FARTMP
+
 group 'backlog_archive_done'
 
 arc_reset

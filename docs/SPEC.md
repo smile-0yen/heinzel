@@ -1154,6 +1154,16 @@ boundary of §9.2 between the third and the fourth:
 > `ledger_digest_before` says which: a ledger that still digests to it was never
 > written, and one that does not was written to at least in part.
 
+> **Normative: a ledger file is replaced, never emptied.** Every rewrite builds
+> the new file whole in a scratch file **in the same directory** and renames it
+> over the old one — `ledger_tmp` is the one place that knows both halves of
+> that, and the scratch file carries the target's mode. Writing in place is a
+> truncate followed by a write, and between the two the ledger is empty on disk:
+> a crash there loses every task in it, the ones nobody had started included.
+> Same directory because across filesystems `mv` falls back to copy-then-unlink,
+> which has the same hole. The ledger is the one file in this program that
+> cannot be rebuilt from anything else.
+
 > **Normative: the ledger changes once per merge, by rename.** `worksheet_merge`
 > applies every candidate to a copy of the ledger in the same directory and
 > renames the copy over it, once, at the end. Applied in place, a merge of six

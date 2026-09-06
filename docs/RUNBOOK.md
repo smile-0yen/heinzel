@@ -278,6 +278,20 @@ second one for a report — a tool that quietly adds background jobs is a tool y
 stop being able to reason about. A `crontab` line or your own LaunchAgent is the
 whole of it.
 
+What is set up here is a **Claude scheduled task**, `heinzel-morning-report`,
+which runs `hzl report --days 1` every morning at 07:00 and writes the summary
+in the language the blocked notes are written in. It is a task of the Claude
+desktop app, not a launchd job and not a cloud routine: the ledger is a local
+file under `HEINZEL_HOME` and a cloud agent has no way to reach it. It lives in
+`~/.claude/scheduled-tasks/heinzel-morning-report/`, is listed under
+"Scheduled" in the app, and runs while the app is open — if the app was closed
+when it was due, it runs at the next launch. Nothing in `hzl` knows about it, so
+removing it is removing that directory and nothing else.
+
+The one thing its prompt must say, and does, is that **exit 10 is not a
+failure**: `hzl report` exits 10 exactly when something is blocked, which is the
+morning it matters most.
+
 ## The budget
 
 Three ceilings, all independent:

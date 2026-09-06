@@ -11,7 +11,7 @@
 # Multibyte truncation is locale-dependent (DESIGN 6.3). Fix it once, here.
 export LC_CTYPE=UTF-8
 
-HEINZEL_VERSION="0.3.16"
+HEINZEL_VERSION="0.3.17"
 
 # The TTL ceiling is deliberately not configurable. A session that can be
 # created with an unbounded lifetime is not a session, it is a mode.
@@ -722,13 +722,38 @@ backlog_max_id_num() {
 
 # Ids are allocated by the tool, never written by hand: hand-written ids
 # collide, and the completion marker's `run:` field has to stay unambiguous.
+# --- rewriting a ledger file -----------------------------------------------
+#
+# Every rewrite below builds the new file whole and renames it over the old one.
+# The scratch file is in the **same directory** as its target, which is what
+# makes the rename a rename rather than a copy: across filesystems `mv` falls
+# back to copy-then-unlink, and that has the same hole as writing in place.
+#
+# What it replaces was `mktemp` in `$TMPDIR` and then `cat "${tmp}" >"${f}"` —
+# a truncate followed by a write. Between those two the ledger is empty on disk,
+# and a crash there loses every task in it, the ones nobody had started
+# included. A ledger is the one file in this program that cannot be rebuilt from
+# anything else (SPEC §8.0).
+#
+# The scratch file carries the target's mode: `mktemp` makes a private file, and
+# a ledger a person cannot read is not a ledger.
+ledger_tmp() { # file -> a scratch path beside it
+  local f=$1 tmp mode
+  [ -n "${f}" ] || return 1
+  tmp=$(mktemp "$(dirname "${f}")/.ledger.XXXXXX") || return 1
+  mode=$(stat -f '%Lp' "${f}" 2>/dev/null)
+  case ${mode} in ""|*[!0-7]*) mode=644 ;; esac
+  chmod "${mode}" "${tmp}" 2>/dev/null
+  printf '%s' "${tmp}"
+}
+
 backlog_assign_ids() {
   local f=$1 prefix=${2:-h} start tmp
   # Ledger-wide, not file-wide: an id whose task has been swept into the
   # archive is spent, and reissuing it would put two different tasks behind one
   # `run:` attribution.
   start=$(($(ledger_max_id_num "${f}") + 1))
-  tmp=$(mktemp "${TMPDIR:-/tmp}/hzl-backlog.XXXXXX") || return 1
+  tmp=$(ledger_tmp "${f}") || return 1
   # `next` is an awk keyword, so the counter cannot be called that.
   # Fenced blocks are skipped here for the same reason backlog_scan skips them,
   # and the omission was visible: the allocator stamped an id onto the example
@@ -750,7 +775,7 @@ backlog_assign_ids() {
     }
     { print }
   ' "${f}" >"${tmp}" || { rm -f "${tmp}"; return 1; }
-  cat "${tmp}" >"${f}" && rm -f "${tmp}"
+  mv -f "${tmp}" "${f}" || { rm -f "${tmp}"; return 1; }
 }
 
 # Replace a line's marker, and replace its trailing metadata comment wholesale
@@ -760,7 +785,7 @@ backlog_set_state() {
   meta=$(oneline "${meta}")
   lineno=$(backlog_line_of_id "${f}" "${id}")
   [ -n "${lineno}" ] || return 3
-  tmp=$(mktemp "${TMPDIR:-/tmp}/hzl-backlog.XXXXXX") || return 1
+  tmp=$(ledger_tmp "${f}") || return 1
   awk -v target="${lineno}" -v marker="${marker}" -v meta="${meta}" '
     NR == target {
       line = $0
@@ -772,7 +797,7 @@ backlog_set_state() {
     }
     { print }
   ' "${f}" >"${tmp}" || { rm -f "${tmp}"; return 1; }
-  cat "${tmp}" >"${f}" && rm -f "${tmp}"
+  mv -f "${tmp}" "${f}" || { rm -f "${tmp}"; return 1; }
 }
 
 # Add an indented continuation line directly under a task.
@@ -782,12 +807,12 @@ backlog_add_note() {
   [ -n "${note}" ] || return 0
   lineno=$(backlog_line_of_id "${f}" "${id}")
   [ -n "${lineno}" ] || return 3
-  tmp=$(mktemp "${TMPDIR:-/tmp}/hzl-backlog.XXXXXX") || return 1
+  tmp=$(ledger_tmp "${f}") || return 1
   awk -v target="${lineno}" -v note="${note}" '
     { print }
     NR == target { printf "      note: %s\n", note }
   ' "${f}" >"${tmp}" || { rm -f "${tmp}"; return 1; }
-  cat "${tmp}" >"${f}" && rm -f "${tmp}"
+  mv -f "${tmp}" "${f}" || { rm -f "${tmp}"; return 1; }
 }
 
 # An interrupted run leaves [~] behind. The runner rolls them back on the way
@@ -796,12 +821,12 @@ backlog_reset_inprogress() {
   local f=$1 tmp n=0
   n=$(backlog_count "${f}" "~")
   [ "${n}" -gt 0 ] || { printf 0; return 0; }
-  tmp=$(mktemp "${TMPDIR:-/tmp}/hzl-backlog.XXXXXX") || return 1
+  tmp=$(ledger_tmp "${f}") || return 1
   awk '
     /^[ \t]*-[ \t]+\[~\]/ { sub(/\[~\]/, "[ ]"); print; next }
     { print }
   ' "${f}" >"${tmp}" || { rm -f "${tmp}"; return 1; }
-  cat "${tmp}" >"${f}" && rm -f "${tmp}"
+  mv -f "${tmp}" "${f}" || { rm -f "${tmp}"; return 1; }
   printf '%s' "${n}"
 }
 
@@ -1120,7 +1145,11 @@ ledger_move_marked() { # src dst want [template]
 
   seen=$(mktemp "${TMPDIR:-/tmp}/hzl-arc-seen.XXXXXX") || { printf 0; return 1; }
   delta=$(mktemp "${TMPDIR:-/tmp}/hzl-arc-delta.XXXXXX") || { rm -f "${seen}"; printf 0; return 1; }
-  keep=$(mktemp "${TMPDIR:-/tmp}/hzl-arc-keep.XXXXXX") || { rm -f "${seen}" "${delta}"; printf 0; return 1; }
+  # `keep` becomes the source file, so it is made beside it: the rewrite below
+  # is a rename, and a rename across filesystems is a copy. `seen` and `delta`
+  # stay in $TMPDIR — one is read back here and the other is appended to the
+  # destination, and neither ever becomes a file of its own.
+  keep=$(ledger_tmp "${f}") || { rm -f "${seen}" "${delta}"; printf 0; return 1; }
 
   backlog_scan "${a}" 2>/dev/null | cut -f4 | sed '/^$/d' >"${seen}"
 
@@ -1187,7 +1216,7 @@ ledger_move_marked() { # src dst want [template]
   case ${n} in ""|*[!0-9]*) n=0 ;; esac
   if [ "${n}" -gt 0 ]; then
     cat "${delta}" >>"${a}" || { rm -f "${seen}" "${delta}" "${keep}"; printf 0; return 1; }
-    cat "${keep}" >"${f}" || { rm -f "${seen}" "${delta}" "${keep}"; printf 0; return 1; }
+    mv -f "${keep}" "${f}" || { rm -f "${seen}" "${delta}" "${keep}"; printf 0; return 1; }
   fi
   rm -f "${seen}" "${delta}" "${keep}"
   printf '%s' "${n}"
@@ -1609,7 +1638,7 @@ backlog_insert_at_priority() {
     END { print seen }
   ' "${f}")
   [ -n "${after}" ] || return 1
-  tmp=$(mktemp "${TMPDIR:-/tmp}/hzl-backlog.XXXXXX") || return 1
+  tmp=$(ledger_tmp "${f}") || return 1
   # Through ENVIRON, not awk -v: awk -v interprets escape sequences, and this
   # text was written by an agent that had no reason to avoid a backslash.
   HZL_INS_TEXT=${text} awk -v target="${after}" '
@@ -1617,7 +1646,7 @@ backlog_insert_at_priority() {
     { print }
     NR == target { printf "- [ ] %s\n", text }
   ' "${f}" >"${tmp}" || { rm -f "${tmp}"; return 1; }
-  cat "${tmp}" >"${f}" && rm -f "${tmp}"
+  mv -f "${tmp}" "${f}" || { rm -f "${tmp}"; return 1; }
 }
 
 # Merge a finished worksheet into the ledger. Prints `done blocked new ignored`.
@@ -1643,10 +1672,10 @@ worksheet_merge() {
   # some of this run's work recorded, or half a line of it, while the receipt
   # written afterwards described a ledger that had never existed.
   #
-  # `cp -p`, so the copy carries the ledger's own mode: `mktemp` makes a private
-  # file, and a ledger a person cannot read is not a ledger.
-  work=$(mktemp "$(dirname "${f}")/.merge.XXXXXX") || { printf '0 0 0 0\n'; return 1; }
-  cp -p "${f}" "${work}" 2>/dev/null || { rm -f "${work}"; printf '0 0 0 0\n'; return 1; }
+  # Through `ledger_tmp`, which is the one place that knows a scratch file goes
+  # beside its target and carries its mode.
+  work=$(ledger_tmp "${f}") || { printf '0 0 0 0\n'; return 1; }
+  cat "${f}" >"${work}" || { rm -f "${work}"; printf '0 0 0 0\n'; return 1; }
   while IFS= read -r row; do
     [ -n "${row}" ] || continue
     lineno=$(printf '%s' "${row}" | cut -f1)

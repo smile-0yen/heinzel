@@ -6,6 +6,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.17] - 2026-09-07
+
+The last of the review findings against h-0020, closed. The third of them had
+already gone with 0.3.14.
+
+### Fixed
+- **A ledger file is replaced, never emptied.** Six writers — `backlog_set_state`,
+  `backlog_add_note`, `backlog_reset_inprogress`, `backlog_assign_ids`,
+  `backlog_insert_at_priority` and the source rewrite in `ledger_move_marked` —
+  built the new file in `$TMPDIR` and then did `cat "${tmp}" >"${f}"`: a
+  truncate followed by a write. Between those two the ledger is empty on disk,
+  and a crash there loses every task in it, the ones nobody had started
+  included — the whole queue, to move one marker. They all now build the
+  replacement in a scratch file beside the target and rename it over, through
+  one new helper, `ledger_tmp`, which knows both halves of why: the same
+  directory, because across filesystems `mv` falls back to copy-then-unlink and
+  the hole comes back; and the target's mode, because `mktemp` makes a private
+  file and a ledger a person cannot read is not a ledger. `worksheet_merge`,
+  which grew its own copy in 0.3.16, uses the same helper now.
+
+  Twenty-four assertions, one set per writer, each checked against the unfixed
+  code: a hard link taken before the write still holds the whole file
+  afterwards, the inode changed, and the mode survived. Two of them are
+  structural, so that a seventh writer added later cannot reintroduce the hole
+  quietly.
+
+### Added
+- **A morning report that runs itself.** The request behind h-0020 asked for a
+  Claude routine that reports `blocked` and `completed` each morning, and that
+  half was never built. It is a Claude scheduled task now,
+  `heinzel-morning-report`, running `hzl report --days 1` at 07:00 daily and
+  summarising it in the language the blocked notes are written in — including
+  reading each blocked task's steps file for what it actually asks of the
+  reader. Deliberately not a second launchd job: `hzl install` still installs
+  exactly one, and this one is the app's, removable by deleting its directory.
+  Deliberately not a cloud routine either — the ledger is a local file and a
+  cloud agent cannot reach it. `docs/RUNBOOK.md` says where it lives and that
+  `hzl report`'s exit 10 is not a failure, which is the one thing its prompt has
+  to know.
+
 ## [0.3.16] - 2026-09-06
 
 The three review findings left open against h-0012, closed. The first of them
