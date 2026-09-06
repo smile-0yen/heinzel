@@ -1163,6 +1163,61 @@ t_fails "and so is a value that is not a string" "$?"
 t_fails "no refused launch left a collected record behind" "$?"
 fake_reset
 
+# --- which backend a run goes to -------------------------------------------
+#
+# The session's, not this process's environment. A run starts at 03:00 from
+# launchd, which passes a minimal environment and none of ours: `HEINZEL_RUNTIME`
+# read there could only ever say `local`, whatever `hzl on` recorded, and the
+# run would then write down a backend it had not used (SPEC §9.0).
+#
+# The state file is absent here and is put back that way at the end of the
+# block: the schema group below writes its own fixture and expects to find
+# nothing in the way.
+
+group 'the backend a run goes to'
+
+t_eq "with no session, the environment names the backend" \
+  herdr "$(HEINZEL_RUNTIME=herdr runtime_selected)"
+t_eq "and with neither, it is local" local "$(runtime_selected)"
+
+printf '{"mode":"heinzel","runtime_backend":"herdr"}\n' >"${STATE_FILE}"
+t_eq "a session that recorded one is the one that answers" \
+  herdr "$(runtime_selected)"
+t_eq "and the environment does not overrule it" \
+  herdr "$(HEINZEL_RUNTIME=local runtime_selected)"
+
+RT_FS=${TMPROOT}/runtime-from-state
+fake_reset
+FAKE_ARGV=${RT_FS}/must-not-exist.argv
+engine_run claude executor "${RUN_WORK}" "${RUN_PROMPT}" "${RT_FS}" 60 2>/dev/null
+t_fails "and a run goes there, so an unregistered one fails the run" "$?"
+[ -e "${FAKE_ARGV}" ]
+t_fails "without starting anything here instead" "$?"
+
+# The other direction, which is the one the environment could get wrong: a
+# session that recorded `local` runs here even when the environment asks for a
+# backend this build does not have.
+printf '{"mode":"heinzel","runtime_backend":"local"}\n' >"${STATE_FILE}"
+RT_FS2=${TMPROOT}/runtime-from-state-local
+fake_reset
+FAKE_OUT_FILE=${CLAUDE_OK_RAW}
+HEINZEL_RUNTIME=herdr engine_run claude executor "${RUN_WORK}" \
+  "${RUN_PROMPT}" "${RT_FS2}" 60
+t_status "a session that recorded local runs, whatever the environment says" \
+  0 "$?"
+t_eq "and the result names the backend it was actually run on" \
+  local "$(jq -r '.backend' "${RT_FS2}/result.json")"
+
+# A session recorded before the field existed is a v1 file, and v1 means local
+# (§13.7). The environment does not get to speak for it either: there is a
+# session, and it answered.
+printf '{"mode":"heinzel"}\n' >"${STATE_FILE}"
+t_eq "a session from before the field existed answers local" \
+  local "$(HEINZEL_RUNTIME=herdr runtime_selected)"
+
+rm -f "${STATE_FILE}"
+fake_reset
+
 # --- record schemas --------------------------------------------------------
 #
 # Three records outlive a run and are read by something other than the code that

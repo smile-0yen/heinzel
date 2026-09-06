@@ -24,6 +24,7 @@
 #   runtime_register  <backend>
 #   runtime_known     <backend>                                        -> 0/1
 #   runtime_backends                          the registered keys, one per line
+#   runtime_selected                          the backend this run goes to
 #   runtime_run_batch <backend> <launch.json> <run.json> <collected.json>
 #
 # Everything crosses the boundary as a path to a JSON file, never as a shell
@@ -64,6 +65,30 @@ runtime_backends() {
   for b in ${_HZ_RUNTIMES}; do
     printf '%s\n' "${b}"
   done
+}
+
+# The backend this run goes to: the one the session promised, and only failing
+# that the one the environment asks for.
+#
+# The session's answer comes first because `hzl on` recorded it while someone
+# was there to choose it, and the run that keeps that promise starts at 03:00
+# from launchd — which passes a minimal environment and none of ours
+# (docs/SPEC.md §9.0, §14). `HEINZEL_RUNTIME` read at that moment could only
+# ever say `local`, whatever the session asked for, and the run would then
+# record a backend it had not used. So the environment variable is what selects
+# a backend when there is no session to have selected one: a run started by
+# hand, or a `hzl on` choosing what to write down in the first place.
+#
+# The key is not validated here. `hzl on` refuses one the registry does not
+# know, and `runtime_run_batch` refuses it again at the moment of use — a state
+# file written by a build that had a backend this one does not must fail the
+# run, not fall back to the backend that happens to be here.
+runtime_selected() {
+  if [ -r "${STATE_FILE:-}" ]; then
+    state_runtime_backend
+    return
+  fi
+  printf '%s' "${HEINZEL_RUNTIME:-local}"
 }
 
 # Start what <launch.json> names, on <backend>, according to <run.json>, and

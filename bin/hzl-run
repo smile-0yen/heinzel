@@ -316,7 +316,7 @@ store_snapshot() { # runner-state
     --arg trigger "${TRIGGER}" \
     --arg workdir "${WORKDIR}" \
     --arg backlog "${BACKLOG}" \
-    --arg runtime_backend "${HEINZEL_RUNTIME:-local}" \
+    --arg runtime_backend "$(runtime_selected)" \
     --argjson pid "$$" \
     --arg started_at "$(iso_at "${STARTED:-}")" \
     --arg updated_at "$(iso_at)" \
@@ -736,7 +736,7 @@ else
   # was collected, so nothing is known about the attempt.
   VERDICT=error
   ATTEMPT_OUTCOME=UNKNOWN
-  ATTEMPT_BACKEND=${HEINZEL_RUNTIME:-local}
+  ATTEMPT_BACKEND=$(runtime_selected)
 fi
 [ -n "${VERDICT}" ] || VERDICT=error
 [ -n "${ATTEMPT_OUTCOME}" ] || ATTEMPT_OUTCOME=UNKNOWN

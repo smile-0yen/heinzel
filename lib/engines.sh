@@ -416,11 +416,13 @@ engine_normalize_result() {
 # result.json. Inside, it is Agent Driver -> runtime backend -> Agent Driver.
 #
 # The backend is named by a string. There is one, `local`, and a misspelling is
-# refused by the registry rather than quietly served by it.
+# refused by the registry rather than quietly served by it. Which one it is is
+# `runtime_selected`'s answer — the session's, not this process's environment.
 engine_run() {
   local engine=$1 role=$2 workdir=$3 promptfile=$4 outdir=$5
   local tmo=${6:-3600}
-  local rc spec run collected backend=${HEINZEL_RUNTIME:-local}
+  local rc spec run collected backend
+  backend=$(runtime_selected)
 
   mkdir -p "${outdir}" || return 1
   : >"${outdir}/stderr"

@@ -6,6 +6,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.9] - 2026-09-06
+
+The review finding left open against h-0008, closed.
+
+### Fixed
+- **A run goes to the backend its session recorded.** `hzl on` writes
+  `runtime_backend` into `state.json` — that field was h-0008's own addition —
+  and then nothing read it. `engine_run`, the run snapshot's `runtime_backend`
+  and the backend reported for a run with no `result.json` each read
+  `HEINZEL_RUNTIME` instead, defaulting to `local`. A run starts at 03:00 from
+  launchd, which passes `PATH`, `HOME` and `LANG` and nothing else (§14), so at
+  the one moment it mattered the environment variable could only ever say
+  `local`, whatever the session had asked for — and the run would then record a
+  backend it had not used. All three now go through one new function,
+  `runtime_selected`, which answers with the session's recorded backend
+  whenever there is a state file and reads `HEINZEL_RUNTIME` only when there is
+  not: a run started by hand, or `hzl on` deciding what to write down in the
+  first place. A state file naming a backend this build does not have still
+  fails the run at `runtime_run_batch`; it is not fallen back from. A v1 state
+  file, written before the field existed, answers `local` as it always meant
+  to. `docs/SPEC.md` §9.0 states it normatively, and nine assertions cover both
+  directions — a session that recorded an unknown backend fails the run without
+  starting anything here, and one that recorded `local` runs here even when the
+  environment asks for something else.
+
 ## [0.3.8] - 2026-09-06
 
 The two review findings left open against h-0007, closed.

@@ -186,7 +186,7 @@ Mode 0600. Written by validating with `jq` and replacing with `mv`. Writers are
 | Field | Type | Meaning | Written by |
 |---|---|---|---|
 | `schema_version` | number | `2`. **Absent means 1**: the file predates the field | on |
-| `runtime_backend` | string | The backend this session's runs go to. **Absent means `local`** | on |
+| `runtime_backend` | string | The backend this session's runs go to, and the one they actually use (§9.0). **Absent means `local`** | on |
 | `mode` | string | `"heinzel"` / `"normal"`. **Alone this does not mean a session is live** (§5) | on / off |
 | `activated_at`, `activated_at_epoch` | string, number | Start time, both forms | on |
 | `expires_at`, `expires_at_epoch` | string, number | TTL. `now >= expires_at_epoch` ⇒ normal | on |
@@ -639,6 +639,7 @@ argument survives as one argument).
 runtime_register  <backend>
 runtime_known     <backend>                                        -> 0/1
 runtime_backends                          the registered keys, one per line
+runtime_selected                          the backend this run goes to
 runtime_run_batch <backend> <launch.json> <run.json> <collected.json>
 ```
 
@@ -650,6 +651,18 @@ refused; there is no fallback to the one that happens to be local.
 
 The default and only backend is `local`. `HEINZEL_RUNTIME` selects another one
 once another one exists; a name the registry does not know fails the run.
+
+> **Normative: a run goes to the backend its session recorded.**
+> `runtime_selected` answers with `state.json`'s `runtime_backend` whenever
+> there is a state file, and reads `HEINZEL_RUNTIME` only when there is not —
+> a run started by hand, or `hzl on` deciding what to write down. Everything
+> that names a backend at run time goes through it: `engine_run`, the run
+> snapshot's `runtime_backend`, and the backend a run with no `result.json`
+> reports. A run starts from launchd, which passes a minimal environment and
+> none of ours (§14); an environment variable read there could only ever say
+> `local`, whatever the session asked for, and the run would then record a
+> backend it had not used. A state file naming a backend this build does not
+> have fails the run at `runtime_run_batch` — it is not fallen back from.
 
 `launch.json` is structured, never a shell command string: an `executable`, an
 `argv` array and an `env` object, plus the `engine`, `role`, `io_mode` and the
