@@ -6,6 +6,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.12] - 2026-09-06
+
+The three review findings left open against h-0010, closed. All three are in
+`lib/claims.sh`, which had not been touched since that task wrote it.
+
+### Fixed
+- **A workspace reached through a symlink is the same workspace.**
+  `claims_workspace_identity` built its identity with `abspath`, which
+  canonicalises the parent and keeps the last component as written. A workdir
+  reached as itself and through a symlink to it was therefore two identities
+  with two claims directories, and neither could see the other's claims — one
+  workspace claimed twice at once, which is the single thing a claim exists to
+  prevent. The identity is now the physical path (`cd -P`), which resolves every
+  symlink on the way including the last one. A workdir that is not there still
+  falls back to `abspath`: naming a workspace and requiring it to exist are
+  different questions.
+- **A claim is created, not written over.** `claims_acquire` read the claim file
+  and then wrote it, so two runs that both found a task free could both succeed,
+  and the second would overwrite the first's record of holding a task they were
+  both working on. It now writes the record into a temp file in the same
+  directory and `ln`s it into place — link refuses an existing name, so the
+  refusal is the filesystem's and exactly one of any number of racers ends up
+  holding the task. (`_lock_take` in `lib/locks.sh` has always done it this way;
+  the technique is spelled out again rather than shared, because locks.sh
+  already depends on claims.sh for the workspace hash.) That the short locks
+  happen to serialise today's only caller is not the claim keeping its own
+  promise. Sixteen concurrent acquirers now assert it, and the assertion fails
+  on the old code every time.
+- **The fencing generation survives a release.** It lived in the claim file, so
+  releasing the claim took the counter with it and the next holder was issued
+  generation 1 again — the same number the previous holder had, which is exactly
+  what a fencing check has to be able to tell apart. It moves to
+  `<task>.generation` beside the claim, the way `lib/locks.sh` has kept its
+  lease generation all along, and is bumped before the claim is taken; a run
+  that loses the race consumes a number, because generations must be unique and
+  increasing rather than gapless. `claims_generation` still reports the standing
+  claim's number, and 0 when nothing holds the task.
+
 ## [0.3.11] - 2026-09-06
 
 The four review findings left open against h-0014, closed. All of them are in

@@ -1624,9 +1624,39 @@ t_eq "an identity is a host and an absolute path" \
   "$(abspath "${CL_WORK}")" "$(printf '%s' "${CL_ID}" | sed 's/^[^:]*://')"
 # Two spellings of one directory are one workspace. Without this, a workdir
 # reached through a symlink would get its own claims directory and the two
-# would not see each other's claims at all.
+# would not see each other's claims at all — one workspace claimed twice at
+# once, which is the thing a claim exists to prevent.
 t_eq "and it is canonical, so one directory has one identity" \
   "${CL_ID}" "$(claims_workspace_identity "${CL_WORK}/.")"
+
+# The spelling that matters, and the one `.` does not test: the workdir itself
+# reached through a symlink. `abspath` canonicalises the parent and keeps the
+# last name as written, so this is the case where the two must be made to agree
+# deliberately.
+CL_LINK=${TMPROOT}/claim-workspace-link
+ln -sfn "${CL_WORK}" "${CL_LINK}"
+t_eq "a workspace reached through a symlink is the same workspace" \
+  "${CL_ID}" "$(claims_workspace_identity "${CL_LINK}")"
+t_eq "so it is not given a claims directory of its own" \
+  "$(claims_dir "${CL_ID}")" \
+  "$(claims_dir "$(claims_workspace_identity "${CL_LINK}")")"
+
+# And a symlink in the middle of the path, which is the shape a checkout under
+# a linked parent has.
+CL_PARENT=${TMPROOT}/claim-parent
+CL_PARENT_LINK=${TMPROOT}/claim-parent-link
+mkdir -p "${CL_PARENT}/inner"
+ln -sfn "${CL_PARENT}" "${CL_PARENT_LINK}"
+t_eq "and so is one reached through a symlinked parent" \
+  "$(claims_workspace_identity "${CL_PARENT}/inner")" \
+  "$(claims_workspace_identity "${CL_PARENT_LINK}/inner")"
+
+# A workdir that is not there still names something: refusing would turn "no
+# such directory" into "no identity" for every caller that only wanted to name
+# one.
+t_eq "a workspace that does not exist is still named" \
+  "$(abspath "${TMPROOT}/claim-not-there")" \
+  "$(claims_workspace_identity "${TMPROOT}/claim-not-there" | sed 's/^[^:]*://')"
 t_eq "the same workspace hashes the same way twice" \
   "$(claims_workspace_hash "${CL_ID}")" \
   "$(claims_workspace_hash "$(claims_workspace_identity "${CL_WORK}")")"
@@ -1673,6 +1703,60 @@ claims_acquire "${CL_ID2}" h-0001 "${CL_B}"
 t_ok "the same id in another workspace is free to claim" "$?"
 t_eq "and the first workspace is untouched" \
   "${CL_A}" "$(claims_holder "${CL_ID}" h-0001)"
+
+group 'claims: one taker, one counter'
+
+# Two runs that both find a task free must not both come away holding it. The
+# claim is taken by creating its file, which the filesystem lets exactly one
+# caller do; reading and then writing would let both write, and the second
+# would overwrite the first's record of holding a task they were both working
+# on. Sixteen racers rather than two, because the window a check-then-write
+# leaves open is small and a test that only sometimes enters it is not a test.
+CL_RACE=h-0900
+CL_RACE_DIR=${TMPROOT}/claim-race
+mkdir -p "${CL_RACE_DIR}"
+: >"${CL_RACE_DIR}/winners"
+CL_I=1
+while [ "${CL_I}" -le 16 ]; do
+  (
+    _cl_run="r-20260906T0900$(printf '%02d' "${CL_I}")-race01"
+    claims_acquire "${CL_ID}" "${CL_RACE}" "${_cl_run}" 2>/dev/null &&
+      printf '%s\n' "${_cl_run}" >>"${CL_RACE_DIR}/winners"
+  ) &
+  CL_I=$((CL_I + 1))
+done
+wait
+t_eq "of sixteen runs racing for one free task, exactly one comes away with it" \
+  1 "$(wc -l <"${CL_RACE_DIR}/winners" | tr -d ' ')"
+t_eq "and the run holding it is the one that was told it had won" \
+  "$(cat "${CL_RACE_DIR}/winners")" "$(claims_holder "${CL_ID}" "${CL_RACE}")"
+claims_release "${CL_ID}" "${CL_RACE}" "$(claims_holder "${CL_ID}" "${CL_RACE}")"
+
+# The fencing counter outlives the claim it was issued for. Kept inside the
+# claim file, it went away with the file and started again at 1 — so the run
+# that took a task over was handed a generation the previous holder already
+# had, and a fencing check could not tell the two apart. lib/locks.sh keeps its
+# lease generation in a file of its own for the same reason.
+CL_G=h-0800
+claims_acquire "${CL_ID}" "${CL_G}" "${CL_A}"
+t_eq "a first claim is generation 1" 1 "$(claims_generation "${CL_ID}" "${CL_G}")"
+claims_release "${CL_ID}" "${CL_G}" "${CL_A}"
+t_eq "a task nothing holds has no generation to be compared against" \
+  0 "$(claims_generation "${CL_ID}" "${CL_G}")"
+claims_acquire "${CL_ID}" "${CL_G}" "${CL_B}"
+t_eq "the generation only goes up, across a release" \
+  2 "$(claims_generation "${CL_ID}" "${CL_G}")"
+claims_release "${CL_ID}" "${CL_G}" "${CL_B}"
+claims_acquire "${CL_ID}" "${CL_G}" "${CL_A}"
+t_eq "so a run that comes back is not handed the number it left with" \
+  3 "$(claims_generation "${CL_ID}" "${CL_G}")"
+claims_release "${CL_ID}" "${CL_G}" "${CL_A}"
+
+# The counter files sit beside the claims in the same directory, and are not
+# claims: what a run holds is read from the claim files alone. After all of the
+# above, run A holds the one task it took in the group before this one.
+t_eq "a generation file is never listed as a claim" \
+  "h-0001" "$(claims_of_run "${CL_ID}" "${CL_A}" | tr '\n' ' ' | sed 's/ *$//')"
 
 group 'claims reconcile: the kill case'
 

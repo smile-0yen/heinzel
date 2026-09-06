@@ -27,7 +27,7 @@
 #   claims_acquire  <identity> <task-id> <run-id>    -> 0, or 1 if held
 #   claims_release  <identity> <task-id> <run-id>    -> only this run's claim
 #   claims_holder   <identity> <task-id>             -> the run id, or empty
-#   claims_generation <identity> <task-id>           -> the fencing generation
+#   claims_generation <identity> <task-id>           -> the claim's generation
 #   claims_of_run   <identity> <run-id>              -> its task ids
 #   claims_runs     <identity>                       -> every run holding one
 #   claims_reconcile <identity> <run-id>             -> releases exactly its own
@@ -37,15 +37,28 @@
 
 CLAIMS_SCHEMA=1
 
-# What "the same workspace" means. Host and absolute path today; a worktree or
+# What "the same workspace" means. Host and physical path today; a worktree or
 # a remote checkout will need more, which is why callers pass an identity string
 # around rather than a path (§13.4).
+#
+# Physical, not merely absolute: `cd -P` resolves every symlink on the way,
+# including the last component, which `abspath` does not — it canonicalises the
+# parent and keeps the name. One directory reached as itself and as a symlink to
+# it would otherwise be two identities with two claims directories, and neither
+# would see the other's claims. That is a workspace claimed twice at once, which
+# is the one thing a claim exists to prevent.
+#
+# A workdir that is not there falls back to `abspath`: there is nothing to
+# resolve, and refusing would turn "no such directory" into "no identity" for
+# every caller that only wanted to name one.
 claims_workspace_identity() {
-  local workdir=$1 host
+  local workdir=$1 host path
   [ -n "${workdir}" ] || return 1
   host=$(hostname -s 2>/dev/null)
   [ -n "${host}" ] || host=localhost
-  printf '%s:%s' "${host}" "$(abspath "${workdir}")"
+  path=$(cd -P "${workdir}" 2>/dev/null && pwd)
+  [ -n "${path}" ] || path=$(abspath "${workdir}")
+  printf '%s:%s' "${host}" "${path}"
 }
 
 # A directory name that cannot contain a path separator, whatever the identity
@@ -93,6 +106,8 @@ claims_holder() {
   jq -r '.run_id // ""' "${f}" 2>/dev/null
 }
 
+# The generation the claim standing right now was issued at, and 0 when nothing
+# holds it. What a fencing check compares against.
 claims_generation() {
   local f v
   f=$(_claims_file "$1" "$2" 2>/dev/null) || return 1
@@ -104,50 +119,131 @@ claims_generation() {
   esac
 }
 
+_claims_gen_file() { # identity task
+  local f
+  f=$(_claims_file "$1" "$2") || return 1
+  printf '%s.generation' "${f%.json}"
+}
+
+# The fencing counter for one task in one workspace. It only goes up, and it
+# outlives the claim it was issued for — that is the difference between a
+# generation and a retry count. A holder that comes back after its claim was
+# released and retaken compares the generation it was issued against the one in
+# force and finds itself old (§14.3); a counter kept in the claim file itself
+# went away with it and started again at 1, so the run that took over was handed
+# a number the previous holder already had and the two were indistinguishable.
+# `lib/locks.sh` keeps its lease generation the same way, for the same reason.
+#
+# It is bumped before the claim is taken, so a run that loses the race has still
+# consumed a number. Generations must be unique and increasing, not gapless.
+_claims_bump_generation() { # identity task -> the new generation
+  local id=$1 task=$2 f v g dir tmp
+  f=$(_claims_gen_file "${id}" "${task}") || return 1
+  dir=$(dirname "${f}")
+  mkdir -p "${dir}" || return 1
+  chmod 700 "${dir}" 2>/dev/null
+  v=0
+  [ -r "${f}" ] && v=$(head -1 "${f}" 2>/dev/null | tr -dc '0-9')
+  case ${v} in
+    ""|*[!0-9]*) v=0 ;;
+  esac
+  g=$((v + 1))
+  tmp=$(mktemp "${dir}/.gen.XXXXXX") || return 1
+  if printf '%s\n' "${g}" >"${tmp}" && chmod 600 "${tmp}" && mv -f "${tmp}" "${f}"; then
+    printf '%s' "${g}"
+    return 0
+  fi
+  rm -f "${tmp}"
+  return 1
+}
+
+_claims_record() { # identity task run-id generation
+  jq -c -n \
+    --argjson schema_version "${CLAIMS_SCHEMA}" \
+    --arg workspace_identity "$1" \
+    --arg task_id "$2" \
+    --arg run_id "$3" \
+    --argjson generation "$4" \
+    --arg claimed_at "$(iso_at)" \
+    '{schema_version: $schema_version,
+      workspace_identity: $workspace_identity, task_id: $task_id,
+      run_id: $run_id, generation: $generation,
+      claimed_at: $claimed_at}' 2>/dev/null
+}
+
+# Create the file holding this claim, or fail because somebody else already did.
+# Written whole into a temp file in the same directory, then `ln`: link refuses
+# an existing name, and the refusal is the filesystem's, so of two runs that
+# both found the task free exactly one ends up holding it. `mv` would not do —
+# it replaces, which is how a check-then-write lets both callers believe they
+# won.
+#
+# This is the technique `_lock_take` in lib/locks.sh uses, spelled out again
+# rather than shared: locks.sh already depends on this file for the workspace
+# hash, and a dependency the other way as well would make the two impossible to
+# source in either order.
+_claims_take() { # file json
+  local f=$1 json=$2 dir tmp
+  dir=$(dirname "${f}")
+  tmp=$(mktemp "${dir}/.claim.XXXXXX") || return 1
+  if printf '%s' "${json}" | jq -e . >"${tmp}" 2>/dev/null &&
+     chmod 600 "${tmp}" && ln "${tmp}" "${f}" 2>/dev/null; then
+    rm -f "${tmp}"
+    return 0
+  fi
+  rm -f "${tmp}"
+  return 1
+}
+
 # Take a task for a run. A task already held by *another* run is refused: that
 # is the whole point of a claim, and a run that took one anyway would be the
 # second writer in a workspace built for one.
 #
+# A free task is taken by creating its file, which the filesystem allows exactly
+# one caller to do. Reading the file and then writing it would let two runs that
+# both found it free both write it and both return 0, and the second would
+# overwrite the first's record of holding it — the claim would say one run held
+# a task two were working on. That the short locks happen to serialise today's
+# only caller is not the claim keeping its own promise.
+#
 # The same run re-acquiring its own claim succeeds and bumps the generation.
-# Retaking a claim you already hold is not a conflict, and the generation is
-# what a later fencing check compares against (§14.3).
+# Retaking a claim you already hold is not a conflict, and only the holder takes
+# this path, so replacing the file it already owns is safe.
 claims_acquire() {
-  local id=$1 task=$2 run=$3 f dir holder gen tmp
+  local id=$1 task=$2 run=$3 f dir holder gen json tmp
   [ -n "${run}" ] || return 1
   f=$(_claims_file "${id}" "${task}") || return 1
   dir=$(dirname "${f}")
   mkdir -p "${dir}" || return 1
   chmod 700 "${dir}" 2>/dev/null
 
-  gen=1
-  if [ -r "${f}" ]; then
+  if [ -e "${f}" ]; then
     holder=$(jq -r '.run_id // ""' "${f}" 2>/dev/null)
-    if [ -n "${holder}" ] && [ "${holder}" != "${run}" ]; then
-      return 1
+    [ "${holder}" = "${run}" ] || return 1
+    gen=$(_claims_bump_generation "${id}" "${task}") || return 1
+    json=$(_claims_record "${id}" "${task}" "${run}" "${gen}") || return 1
+    [ -n "${json}" ] || return 1
+    tmp=$(mktemp "${dir}/.claim.XXXXXX") || return 1
+    if printf '%s' "${json}" | jq -e . >"${tmp}" 2>/dev/null &&
+       chmod 600 "${tmp}" && mv -f "${tmp}" "${f}"; then
+      return 0
     fi
-    gen=$(($(claims_generation "${id}" "${task}") + 1))
+    rm -f "${tmp}"
+    return 1
   fi
 
-  tmp=$(mktemp "${dir}/.claim.XXXXXX") || return 1
-  if jq -n \
-       --argjson schema_version "${CLAIMS_SCHEMA}" \
-       --arg workspace_identity "${id}" \
-       --arg task_id "${task}" \
-       --arg run_id "${run}" \
-       --argjson generation "${gen}" \
-       --arg claimed_at "$(iso_at)" \
-       '{schema_version: $schema_version,
-         workspace_identity: $workspace_identity, task_id: $task_id,
-         run_id: $run_id, generation: $generation,
-         claimed_at: $claimed_at}' >"${tmp}" 2>/dev/null; then
-    chmod 600 "${tmp}" && mv -f "${tmp}" "${f}" && return 0
-  fi
-  rm -f "${tmp}"
-  return 1
+  gen=$(_claims_bump_generation "${id}" "${task}") || return 1
+  json=$(_claims_record "${id}" "${task}" "${run}" "${gen}") || return 1
+  [ -n "${json}" ] || return 1
+  _claims_take "${f}" "${json}"
 }
 
 # Release one claim, and only if this run is the one holding it. A release that
 # did not check would be the blanket rollback again, one file at a time.
+#
+# The generation file stays. It is the task's counter, not this claim's, and it
+# is worth nothing if it resets: the next holder would be issued a number the
+# last one already had.
 claims_release() {
   local id=$1 task=$2 run=$3 f holder
   f=$(_claims_file "${id}" "${task}") || return 1
