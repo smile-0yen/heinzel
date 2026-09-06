@@ -597,6 +597,16 @@ cat >"${FAKE_BIN}/claude" <<'FAKE'
 #!/bin/bash
 # A stand-in for an agent CLI, for tests/test.sh. It never touches a network.
 [ -n "${FAKE_ARGV:-}" ] && printf '%s\0' "$@" >"${FAKE_ARGV}"
+# The value of each name in FAKE_ENV_NAMES, in that order, NUL-separated, so a
+# value holding a newline or an `=` is still one value. Indirect expansion
+# rather than `env`: BSD env has no -0, and a line-per-variable dump could not
+# say which newline was a separator.
+if [ -n "${FAKE_ENV_FILE:-}" ]; then
+  : >"${FAKE_ENV_FILE}"
+  for _fake_n in ${FAKE_ENV_NAMES:-}; do
+    printf '%s\0' "${!_fake_n-}" >>"${FAKE_ENV_FILE}"
+  done
+fi
 [ -n "${FAKE_LAST_FILE:-}" ] && printf '%s' "${FAKE_LAST_TEXT:-}" >"${FAKE_LAST_FILE}"
 [ -n "${FAKE_OUT_FILE:-}" ] && cat "${FAKE_OUT_FILE}"
 [ -n "${FAKE_ERR_FILE:-}" ] && cat "${FAKE_ERR_FILE}" >&2
@@ -609,17 +619,21 @@ PATH=${FAKE_BIN}:${PATH}
 export PATH
 
 FAKE_ARGV=""
+FAKE_ENV_FILE=""
+FAKE_ENV_NAMES=""
 FAKE_LAST_FILE=""
 FAKE_LAST_TEXT=""
 FAKE_OUT_FILE=""
 FAKE_ERR_FILE=""
 FAKE_SLEEP=0
 FAKE_RC=0
-export FAKE_ARGV FAKE_LAST_FILE FAKE_LAST_TEXT FAKE_OUT_FILE FAKE_ERR_FILE \
-       FAKE_SLEEP FAKE_RC
+export FAKE_ARGV FAKE_ENV_FILE FAKE_ENV_NAMES FAKE_LAST_FILE FAKE_LAST_TEXT \
+       FAKE_OUT_FILE FAKE_ERR_FILE FAKE_SLEEP FAKE_RC
 
 fake_reset() {
   FAKE_ARGV=""
+  FAKE_ENV_FILE=""
+  FAKE_ENV_NAMES=""
   FAKE_LAST_FILE=""
   FAKE_LAST_TEXT=""
   FAKE_OUT_FILE=""
@@ -1095,10 +1109,58 @@ t_eq "the stream paths in the record are the ones it was given" \
 [ -e "${RT_DIR}/collected.json.tmp" ]
 t_fails "the temp file it renamed from is gone" "$?"
 
-jq '.env = {"API_KEY": "x"}' "${RT_DIR}/launch.json" >"${RT_DIR}/env-launch.json"
+# A launch environment is carried, not refused: the backend passes a validated
+# env as `env KEY=VALUE ... command` (RUNTIME-BACKENDS §8.4). The values are
+# read back out of the process NUL-separated, for the same reason the argv is —
+# one of them holds a newline and an `=`, and a line-per-variable dump could not
+# say which newline was a separator.
+RT_ENVD=${TMPROOT}/runtime-env.dump
+fake_reset
+FAKE_ENV_FILE=${RT_ENVD}
+FAKE_ENV_NAMES='HZL_TEST_ONE HZL_TEST_TWO'
+jq '.env = {"HZL_TEST_ONE": "a value with spaces",
+            "HZL_TEST_TWO": "two\nlines = one value"}' \
+  "${RT_DIR}/launch.json" >"${RT_DIR}/env-launch.json"
 runtime_run_batch local "${RT_DIR}/env-launch.json" "${RT_RUN}" \
+  "${RT_DIR}/env-collected.json"
+t_status "a launch that carries an environment runs" 0 "$?"
+t_argv "and the process is given each value whole" "${RT_ENVD}" \
+  'a value with spaces' 'two
+lines = one value'
+
+# What a process cannot be given is refused at the spec, before anything is
+# started. NUL is not representable in an OS argv or environ entry, and it is
+# the delimiter the restore uses: an argument holding one would arrive as two.
+fake_reset
+FAKE_ARGV=${RT_DIR}/must-not-exist.argv
+jq '.argv += [("x" + ([0] | implode) + "y")]' "${RT_DIR}/launch.json" \
+  >"${RT_DIR}/nul-argv-launch.json"
+runtime_run_batch local "${RT_DIR}/nul-argv-launch.json" "${RT_RUN}" \
   "${TMPROOT}/never.json" 2>/dev/null
-t_fails "a launch environment it cannot carry is refused, not dropped" "$?"
+t_fails "an argv holding a NUL byte is refused, not silently split in two" "$?"
+[ -e "${FAKE_ARGV}" ]
+t_fails "and nothing was started" "$?"
+
+jq '.env = {"HZL_TEST_ONE": ("x" + ([0] | implode) + "y")}' \
+  "${RT_DIR}/launch.json" >"${RT_DIR}/nul-env-launch.json"
+runtime_run_batch local "${RT_DIR}/nul-env-launch.json" "${RT_RUN}" \
+  "${TMPROOT}/never.json" 2>/dev/null
+t_fails "an environment value holding a NUL byte is refused too" "$?"
+
+jq '.env = {"HZL TEST": "x"}' "${RT_DIR}/launch.json" \
+  >"${RT_DIR}/bad-name-launch.json"
+runtime_run_batch local "${RT_DIR}/bad-name-launch.json" "${RT_RUN}" \
+  "${TMPROOT}/never.json" 2>/dev/null
+t_fails "a name env could not set is refused, not folded into a value" "$?"
+
+jq '.env = {"HZL_TEST_ONE": 3}' "${RT_DIR}/launch.json" \
+  >"${RT_DIR}/bad-value-launch.json"
+runtime_run_batch local "${RT_DIR}/bad-value-launch.json" "${RT_RUN}" \
+  "${TMPROOT}/never.json" 2>/dev/null
+t_fails "and so is a value that is not a string" "$?"
+
+[ -e "${TMPROOT}/never.json" ]
+t_fails "no refused launch left a collected record behind" "$?"
 fake_reset
 
 # --- record schemas --------------------------------------------------------

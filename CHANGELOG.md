@@ -6,6 +6,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.8] - 2026-09-06
+
+The two review findings left open against h-0007, closed.
+
+### Fixed
+- **The local runtime carries a launch environment instead of refusing one.**
+  `docs/RUNTIME-BACKENDS.md` §8.4 has the LocalRuntime pass a validated env as
+  `env KEY=VALUE ... command`, but `lib/runtimes/local.sh` failed any launch
+  whose `env` was not empty, and a test held that refusal in place as the
+  contract. Nothing writes a non-empty `env` yet — `engine_build_launch` still
+  writes `{}` — so the refusal cost nothing today and would have cost the next
+  backend the seam it is supposed to inherit. The environment is now restored
+  NUL-delimited, name and value alternating, the same way argv already was, and
+  prepended as `env KEY=VALUE ...`; `env` execs the command in place, so the pid
+  the watchdog holds and the process group it signals are unchanged. Nothing is
+  prepended when there is no environment to carry.
+- **A launch that cannot be represented in a process is refused.** An argument
+  holding a NUL byte was silently split in two: NUL is the delimiter the restore
+  reads on, so `jq` emitted one and the loop read two arguments where the spec
+  said one. §8.4 asks for that to be rejected at the spec, and it now is —
+  together with a NUL in an environment value, an environment name outside
+  `[A-Za-z_][A-Za-z0-9_]*`, and a non-string in either array. The check runs
+  before anything is started, so a refused launch leaves no process and no
+  `collected.json`. `docs/SPEC.md` §9.0 states it normatively. Seven assertions
+  cover the carried environment (values holding a space, a newline and an `=`,
+  read back out of the process NUL-separated) and each refusal.
+
 ## [0.3.7] - 2026-09-06
 
 The review finding left open against h-0006, closed.

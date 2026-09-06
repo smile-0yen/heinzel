@@ -27,19 +27,36 @@ runtime_register local
 runtime_local_run_batch() {
   local launch=$1 run=$2 collected=$3
   local executable cwd tmo kill_after stdout_path stderr_path output_path
-  local rc started ended prev_pwd arg
-  local -a cmd
+  local rc started ended prev_pwd arg key value bad
+  local -a cmd envp cmdline
 
   executable=$(jq -r '.executable // ""' "${launch}" 2>/dev/null) || return 1
   [ -n "${executable}" ] || { err "launch spec names no executable"; return 1; }
 
-  # This backend cannot carry a launch environment yet. Refusing beats dropping
-  # it: a backend that silently honours half a launch spec is worse than one
-  # that says plainly it cannot honour all of it (§8.1).
-  if [ "$(jq -r '.env | length' "${launch}" 2>/dev/null)" != 0 ]; then
-    err "the local runtime does not carry a launch environment yet"
-    return 1
-  fi
+  # Schema validation, before anything is started (§8.4). Two things a launch
+  # spec can hold that a process cannot be given: a NUL byte anywhere in argv or
+  # in an environment value — no OS argv or environ entry can carry one, and it
+  # is also the delimiter the restores below use, so an argument holding one
+  # would arrive as two — and an environment name outside `[A-Za-z_][A-Za-z0-9_]*`,
+  # which `env` would read as part of a value or refuse outright. Refusing beats
+  # honouring half a launch spec (§8.1).
+  bad=$(jq -r '
+      def nul: ([0] | implode);
+      if ((.argv // []) | any(type != "string")) then
+        "launch spec has an argument that is not a string"
+      elif ((.argv // []) | any(contains(nul))) then
+        "launch spec has an argument holding a NUL byte"
+      elif ((.env // {}) | type) != "object" then
+        "launch spec has an env that is not an object"
+      elif ((.env // {}) | keys_unsorted
+             | any(test("^[A-Za-z_][A-Za-z0-9_]*$") | not)) then
+        "launch spec has an environment name that is not a variable name"
+      elif ((.env // {}) | to_entries | any(.value | type != "string")) then
+        "launch spec has an environment value that is not a string"
+      elif ((.env // {}) | to_entries | any(.value | contains(nul))) then
+        "launch spec has an environment value holding a NUL byte"
+      else "" end' "${launch}" 2>/dev/null) || return 1
+  [ -z "${bad}" ] || { err "${bad}"; return 1; }
 
   cwd=$(jq -r '.cwd // ""' "${run}" 2>/dev/null) || return 1
   tmo=$(jq -r '.timeout_sec // 3600' "${run}")
@@ -59,6 +76,26 @@ runtime_local_run_batch() {
   done < <(jq -j -r '.argv[] | ., ([0] | implode)' "${launch}")
   [ ${#cmd[@]} -gt 0 ] || { err "launch spec has an empty argv"; return 1; }
 
+  # env comes back the same way, name and value alternating, for the same
+  # reason: a value may hold a newline or an `=` and still be one value.
+  envp=()
+  while IFS= read -r -d '' key && IFS= read -r -d '' value; do
+    envp[${#envp[@]}]="${key}=${value}"
+  done < <(jq -j -r \
+    '(.env // {}) | to_entries[] | .key, ([0] | implode), .value, ([0] | implode)' \
+    "${launch}")
+
+  # `env KEY=VALUE ... command` (§8.4), and nothing at all when there is no
+  # environment to carry. `env` execs the command in its own process, so the pid
+  # the watchdog holds is still the agent's own and the process group it signals
+  # is unchanged.
+  cmdline=()
+  if [ ${#envp[@]} -gt 0 ]; then
+    cmdline=(env "${envp[@]}")
+  fi
+  cmdline[${#cmdline[@]}]="${executable}"
+  cmdline+=("${cmd[@]}")
+
   started=$(now_epoch)
 
   # cd here rather than wrapping the command in a subshell: `( cd x && cmd ) &`
@@ -68,7 +105,7 @@ runtime_local_run_batch() {
   # launchd even when the prompt was passed as an argument.
   prev_pwd=${PWD}
   cd "${cwd}" || { err "cannot cd to ${cwd}"; return 1; }
-  hzl_timeout "${kill_after}" "${tmo}" "${executable}" "${cmd[@]}" \
+  hzl_timeout "${kill_after}" "${tmo}" "${cmdline[@]}" \
     >"${stdout_path}" 2>"${stderr_path}" </dev/null
   rc=$?
   cd "${prev_pwd}" || true

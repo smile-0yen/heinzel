@@ -658,6 +658,19 @@ run it, how long to allow it, and where the three streams go. `collected.json`
 is what the backend observed and nothing more — `exit_code`, `duration_sec` and
 those same paths. The runner reads none of the three.
 
+> **Normative: a launch a process cannot be given is refused, not trimmed to
+> fit.** A backend validates the spec before it starts anything. NUL cannot
+> appear in an OS argv or environ entry, and it is also the delimiter the arrays
+> are restored with, so an argument holding one would arrive as two; an
+> environment name outside `[A-Za-z_][A-Za-z0-9_]*` is not a name that can be
+> set. Either one fails the run. Honouring part of a launch spec would start a
+> process that was given something other than what the spec said, and nothing
+> downstream would be able to tell (`docs/RUNTIME-BACKENDS.md` §8.4).
+
+The `local` backend carries a validated environment as
+`env KEY=VALUE ... command`, which execs the command in place, so the pid the
+watchdog holds and the process group it signals are still the agent's own.
+
 ### 9.1 `result.json`
 
 ```json
