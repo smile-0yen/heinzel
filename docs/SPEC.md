@@ -205,6 +205,7 @@ Mode 0600. Written by validating with `jq` and replacing with `mv`. Writers are
 | `max_tasks_per_run` | number | Per-run ceiling | on / set |
 | `max_tasks_total` | number | Per-session ceiling | on / set |
 | `tasks_done_total` | number | Completed so far; incremented before the run record is written | run |
+| `counted_runs` | array | Run ids whose completions recovery has already added to `tasks_done_total`, written in the same update that moves it. **Absent means none** (§11.4) | run |
 | `run_timeout_sec` | number | Wall clock per run, ≥ 60 | on / set |
 | `hours` | string | The schedule at activation, for the record | on |
 | `caffeinate_pid` | number | Liveness marker. Killing it stops everything | on |
@@ -1153,6 +1154,15 @@ boundary of §9.2 between the third and the fourth:
 > `ledger_digest_before` says which: a ledger that still digests to it was never
 > written, and one that does not was written to at least in part.
 
+> **Normative: the ledger changes once per merge, by rename.** `worksheet_merge`
+> applies every candidate to a copy of the ledger in the same directory and
+> renames the copy over it, once, at the end. Applied in place, a merge of six
+> candidates was six rewrites of the file, each a truncate followed by a write:
+> a crash between two of them left a ledger holding some of the run's work and
+> not the rest — or half a line — while the receipt written afterwards described
+> a ledger that had never existed. The copy carries the ledger's own mode, and a
+> merge that changed nothing does not replace the file at all.
+
 > **Normative: recovery applies an interrupted commit exactly once.** On the
 > untouched-ledger path the whole intent is applied. On the moved-ledger path
 > every id is checked and only the ones that did not land are applied — a marker
@@ -1166,6 +1176,14 @@ boundary of §9.2 between the third and the fourth:
 > counter is the last thing a run does — so recovery counts every completion in
 > the intent, once, and the receipt records how many. A run that survives counts
 > its own the way it always did, after the review gate.
+>
+> The counter and the receipt are two files, so no order of the two writes is
+> atomic. The counter therefore carries its own evidence: recovery adds the run
+> id to `counted_runs` **in the same `state.json` update** that moves the total,
+> and counts nothing for a run already named there. Counting first left a crash
+> window in which the receipt was lost, the run stayed pending, and the next
+> recovery counted the same completions again; writing the receipt first would
+> have lost them instead, since a run with a receipt is never recovered.
 
 > **Normative: recovery writes across the ledger, and counts only what it
 > wrote.** It resolves each id with `ledger_set_state`, the same way it reads

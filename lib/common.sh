@@ -11,7 +11,7 @@
 # Multibyte truncation is locale-dependent (DESIGN 6.3). Fix it once, here.
 export LC_CTYPE=UTF-8
 
-HEINZEL_VERSION="0.3.15"
+HEINZEL_VERSION="0.3.16"
 
 # The TTL ceiling is deliberately not configurable. A session that can be
 # created with an unbounded lifetime is not a session, it is a mode.
@@ -424,6 +424,23 @@ state_update() {
   fi
   rm -f "${tmp}"
   return 1
+}
+
+# Has this run's completions already been added to `tasks_done_total`?
+#
+# The counter is a number and a recovery is a thing that may run twice, so the
+# number alone cannot say whether it holds a given run's work. `counted_runs`
+# is written in the same `state.json` update that moves the total, so the two
+# are one write: a recovery interrupted between the counter and its receipt
+# finds this true on the way round again and does not count the same
+# completions twice (§11.4). Absent means no run has been counted this way,
+# which is what every state file written before the field says.
+state_run_counted() { # run-id
+  local run=$1
+  [ -n "${run}" ] || return 1
+  [ -r "${STATE_FILE}" ] || return 1
+  jq -e --arg r "${run}" '(.counted_runs // []) | index($r) != null' \
+    "${STATE_FILE}" >/dev/null 2>&1
 }
 
 # Which schema wrote the state file. There was no field before v2, so a file
@@ -1611,11 +1628,25 @@ backlog_insert_at_priority() {
 # guessed at.
 worksheet_merge() {
   local ws=$1 f=$2 run_id=$3 allowed=$4
-  local rows row allow_list lineno prio marker id text reason
+  local rows row allow_list lineno prio marker id text reason work
   local n_done=0 n_blocked=0 n_new=0 n_ignored=0
   [ -r "${ws}" ] && [ -r "${allowed}" ] || { printf '0 0 0 0\n'; return 1; }
+  [ -r "${f}" ] && [ -w "${f}" ] || { printf '0 0 0 0\n'; return 1; }
   allow_list=" $(tr '\n' ' ' <"${allowed}") "
   rows=$(backlog_scan "${ws}" 2>/dev/null)
+
+  # One transition, not one per candidate (SPEC §11.4). Every marker below is
+  # moved on a copy of the ledger in the same directory, and the copy replaces
+  # the ledger in a single rename at the end. Applied in place, a merge of five
+  # candidates was five rewrites of the file — and each of those rewrites is a
+  # truncate followed by a write, so a crash in the middle left a ledger with
+  # some of this run's work recorded, or half a line of it, while the receipt
+  # written afterwards described a ledger that had never existed.
+  #
+  # `cp -p`, so the copy carries the ledger's own mode: `mktemp` makes a private
+  # file, and a ledger a person cannot read is not a ledger.
+  work=$(mktemp "$(dirname "${f}")/.merge.XXXXXX") || { printf '0 0 0 0\n'; return 1; }
+  cp -p "${f}" "${work}" 2>/dev/null || { rm -f "${work}"; printf '0 0 0 0\n'; return 1; }
   while IFS= read -r row; do
     [ -n "${row}" ] || continue
     lineno=$(printf '%s' "${row}" | cut -f1)
@@ -1628,7 +1659,7 @@ worksheet_merge() {
       # line marked done that nobody ever queued is not a completion, and the
       # runner has nothing to check it against.
       if [ "${marker}" = " " ]; then
-        backlog_insert_at_priority "${f}" "${prio}" "${text}" &&
+        backlog_insert_at_priority "${work}" "${prio}" "${text}" &&
           n_new=$((n_new + 1))
       else
         n_ignored=$((n_ignored + 1))
@@ -1641,7 +1672,7 @@ worksheet_merge() {
     esac
     case "${marker}" in
       x|X)
-        backlog_set_state "${f}" "${id}" x "done:$(iso_at) run:${run_id}" &&
+        backlog_set_state "${work}" "${id}" x "done:$(iso_at) run:${run_id}" &&
           n_done=$((n_done + 1))
         ;;
       "!")
@@ -1649,21 +1680,34 @@ worksheet_merge() {
         [ -n "${reason}" ] || reason="not stated"
         # The steps go out of the working directory before the marker moves. A
         # `[!]` a person can see and instructions they cannot open yet is the
-        # one order that reads as "there is nothing more to say".
+        # one order that reads as "there is nothing more to say". They are
+        # installed beside the real ledger, not beside the copy — which is the
+        # same directory, and saying so is cheaper than remembering it.
         ledger_steps_install "${f}" "${id}" \
           "$(worksheet_steps_file "${ws}" "${id}")" >/dev/null 2>&1
-        backlog_set_state "${f}" "${id}" "!" \
+        backlog_set_state "${work}" "${id}" "!" \
           "blocked:$(iso_at) reason:${reason} run:${run_id}" &&
           n_blocked=$((n_blocked + 1))
         ;;
       *)
         # Never picked up, or left in progress by a run that ran out of clock.
         # Either way it goes back to the queue rather than staying half-claimed.
-        backlog_set_state "${f}" "${id}" " " ""
+        backlog_set_state "${work}" "${id}" " " ""
         ;;
     esac
   done <<EOF
 ${rows}
 EOF
+
+  # The one moment the ledger changes. A merge that moved nothing does not
+  # rewrite the file at all: a rename that only touched the mtime would make
+  # every no-op run look like a run that wrote something.
+  if cmp -s "${work}" "${f}"; then
+    rm -f "${work}"
+  elif ! mv -f "${work}" "${f}"; then
+    rm -f "${work}"
+    printf '0 0 0 0\n'
+    return 1
+  fi
   printf '%s %s %s %s\n' "${n_done}" "${n_blocked}" "${n_new}" "${n_ignored}"
 }

@@ -492,6 +492,103 @@ MG_ST=$?
 t_eq "an unreadable worksheet still prints four counts" "0 0 0 0" "${MG_MISSING}"
 t_fails "and reports failure" "${MG_ST}"
 
+# --- the merge is one transition -------------------------------------------
+#
+# Six candidates used to be six rewrites of the ledger, each of them a truncate
+# followed by a write. A crash between two of them left a ledger holding some of
+# the run's work and not the rest — or half a line — while the receipt written
+# afterwards described a ledger that had never existed (SPEC §11.4).
+#
+# Checked through the inode, which is what the difference actually is: a rename
+# gives the name a new file and leaves the old one alone, so a reader holding
+# the ledger it started with never sees it change under them. A file rewritten
+# in place has one inode from beginning to end, and every intermediate state is
+# visible through it.
+
+group 'the merge is one ledger transition'
+
+mg_fixture() { # ledger worksheet ids
+  cat >"$1" <<'MGLED'
+# Backlog
+
+## P1
+- [~] (id:h-0001) first <!-- run:20260901-030005 -->
+- [~] (id:h-0002) second <!-- run:20260901-030005 -->
+- [~] (id:h-0003) third <!-- run:20260901-030005 -->
+MGLED
+  cat >"$2" <<'MGWS'
+# Worksheet
+
+## P1
+- [x] (id:h-0001) first
+- [x] (id:h-0002) second
+- [!] (id:h-0003) third <!-- reason:needs a decision -->
+MGWS
+  printf 'h-0001\nh-0002\nh-0003\n' >"$3"
+}
+
+MG_TDIR=${TMPROOT}/merge-transition
+mkdir -p "${MG_TDIR}"
+MG_TLED=${MG_TDIR}/backlog.md
+MG_TWS=${MG_TDIR}/worksheet.md
+MG_TIDS=${MG_TDIR}/ids.txt
+mg_fixture "${MG_TLED}" "${MG_TWS}" "${MG_TIDS}"
+
+# A second name for the file the merge starts with. Whatever the merge does to
+# the ledger, this name still points at the bytes that were there when it began
+# — unless the merge wrote through them.
+MG_KEEP=${MG_TDIR}/as-it-was
+ln "${MG_TLED}" "${MG_KEEP}"
+MG_INO_BEFORE=$(stat -f '%i' "${MG_TLED}")
+MG_WAS=$(cksum <"${MG_TLED}")
+
+t_eq "three candidates are applied" \
+  "2 1 0 0" "$(worksheet_merge "${MG_TWS}" "${MG_TLED}" "${MG_RUN}" "${MG_TIDS}")"
+t_eq "and all three markers moved, not some of them" \
+  "2 1 0" "$(printf '%s %s %s' "$(backlog_count "${MG_TLED}" x)" \
+                               "$(backlog_count "${MG_TLED}" '!')" \
+                               "$(backlog_count "${MG_TLED}" '~')")"
+
+t_eq "the ledger is a new file, put there in one rename" \
+  different \
+  "$([ "$(stat -f '%i' "${MG_TLED}")" != "${MG_INO_BEFORE}" ] &&
+     echo different || echo same)"
+t_eq "so the file it replaced is intact, byte for byte" \
+  "${MG_WAS}" "$(cksum <"${MG_KEEP}")"
+rm -f "${MG_KEEP}"
+
+# The mode comes from the ledger, not from mktemp: a ledger a person cannot
+# read is not a ledger, and mktemp makes a private file.
+mg_fixture "${MG_TLED}" "${MG_TWS}" "${MG_TIDS}"
+chmod 644 "${MG_TLED}"
+worksheet_merge "${MG_TWS}" "${MG_TLED}" "${MG_RUN}" "${MG_TIDS}" >/dev/null
+t_eq "the ledger keeps its own mode across the transition" \
+  644 "$(stat -f '%Lp' "${MG_TLED}")"
+
+# A merge with nothing to apply leaves the file alone. A rename that only moved
+# the mtime would make every no-op run look like a run that wrote something.
+MG_INO_BEFORE=$(stat -f '%i' "${MG_TLED}")
+printf 'h-9999\n' >"${MG_TIDS}"
+t_eq "a merge with nothing in scope applies nothing" \
+  "0 0 0 3" "$(worksheet_merge "${MG_TWS}" "${MG_TLED}" "${MG_RUN}" "${MG_TIDS}")"
+t_eq "and does not replace the ledger at all" \
+  same \
+  "$([ "$(stat -f '%i' "${MG_TLED}")" = "${MG_INO_BEFORE}" ] &&
+     echo same || echo different)"
+
+# A ledger that cannot be written is refused before the copy is made, rather
+# than after the steps have been installed and the markers computed.
+mg_fixture "${MG_TLED}" "${MG_TWS}" "${MG_TIDS}"
+printf 'h-0001\nh-0002\nh-0003\n' >"${MG_TIDS}"
+chmod 444 "${MG_TLED}"
+MG_RO=$(worksheet_merge "${MG_TWS}" "${MG_TLED}" "${MG_RUN}" "${MG_TIDS}" 2>/dev/null)
+MG_ST=$?
+chmod 644 "${MG_TLED}"
+t_eq "a ledger that cannot be written applies nothing" "0 0 0 0" "${MG_RO}"
+t_fails "and says so" "${MG_ST}"
+t_eq "leaving every marker where it was" \
+  "~" "$(backlog_marker_of_id "${MG_TLED}" h-0001)"
+
 # --- the engine layer ------------------------------------------------------
 #
 # Everything below is a characterization test: it pins the behaviour that
@@ -2244,6 +2341,50 @@ t_eq "so recovery reports no completion applied" \
 t_eq "and counts none either" 0 "$(state_get .tasks_done_total 0)"
 t_eq "and the receipt counts the same number the ledger can show" \
   0 "$(jq -r '.counted' "${HEINZEL_HOME}/runs/${FN_RUN5}/finalize.receipt.json")"
+
+group 'finalize: killed between the counter and the receipt'
+
+# The counter and the receipt are two files, so no order of the two writes is
+# atomic. Counting first left a window in which a crash lost the receipt, the
+# run stayed pending, and the next recovery counted the same completions again;
+# writing the receipt first would lose them instead, because a run with a
+# receipt is never recovered. The state file carries `counted_runs`, written in
+# the same update that moves the total, so the window closes rather than moving.
+FN_LED6=${TMPROOT}/fin-ledger-6.md
+fn_ledger "${FN_LED6}"
+FN_RUN6=r-20260902T045000-fin006
+runstore_init "${FN_RUN6}"
+state_update '.tasks_done_total = 0 | .counted_runs = []'
+
+finalize_intent "${FN_RUN6}" "${FN_WS}" "${FN_LED6}" 20260902-045000 "${FN_IDS}"
+t_eq "recovery applies the intent and counts the completion" \
+  "1 1 1 0" "$(finalize_recover "${FN_RUN6}" "${FN_LED6}")"
+t_eq "the total moved" 1 "$(state_get .tasks_done_total 0)"
+t_ok "and the state says this run's completions are in it" \
+  "$(state_run_counted "${FN_RUN6}"; echo $?)"
+
+# The crash: the counter moved and the receipt never landed, so the run is
+# pending again and everything the recovery does is done a second time.
+rm -f "${HEINZEL_HOME}/runs/${FN_RUN6}/finalize.receipt.json"
+t_eq "with no receipt the run is pending again" \
+  intent "$(finalize_state "${FN_RUN6}")"
+t_eq "so recovery runs a second time, finding the ledger already applied" \
+  "0 0 0 0" "$(finalize_recover "${FN_RUN6}" "${FN_LED6}")"
+t_eq "and the completion is still counted exactly once" \
+  1 "$(state_get .tasks_done_total 0)"
+t_eq "the run is named once in counted_runs, not twice" \
+  1 "$(jq -r '[(.counted_runs // [])[] | select(. == "'"${FN_RUN6}"'")] | length' \
+        "${STATE_FILE}")"
+t_eq "and the receipt is written the second time round" \
+  receipt "$(finalize_state "${FN_RUN6}")"
+
+# A run nobody has counted is not in the list, which is what every state file
+# written before the field says about every run.
+t_fails "a run that was never counted says so" \
+  "$(state_run_counted r-20260902T045000-nosuch; echo $?)"
+state_update 'del(.counted_runs)'
+t_fails "and so does every run, when the field is not there at all" \
+  "$(state_run_counted "${FN_RUN6}"; echo $?)"
 
 # --- the steps a blocked task asks for --------------------------------------
 #

@@ -1131,6 +1131,12 @@ disposable worktree、専用 `HEINZEL_HOME` / `HERDR_CONFIG_PATH` / named namesp
 - executor/reviewer/fixer を step 化
 - required/advisory/legacy review policy と trust-boundary gate
 - bounded revise → fix → re-review
+- **ledger commit を review の後ろへ入れ替える。** 現行 `bin/hzl-run` は
+  `finalize_commit` を `hzl-review` より先に実行し、review が revise/block を返した
+  場合に書き終えた台帳を巻き戻す。巻き戻しは動作しているが、receipt は巻き戻さない
+  ので「commit した」という記録と台帳が食い違う。§13.4 の `VERIFYING → FINALIZING`
+  はこの順序を前提にしており、入れ替えはこの phase で行う（CHANGELOG 0.3.0 で
+  意図的に先送りしたもの）
 - TaskSpec validator と final `workflow_outcome`
 
 ### Phase 5 — Heartbeat、event stream、mobile notifier

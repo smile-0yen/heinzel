@@ -428,8 +428,20 @@ EOF
   # The counter moves with the receipt and never without it. Every completion in
   # the intent is counted, whether this recovery applied it or found it already
   # applied: the run that wrote the intent never reached its own counter.
-  if [ "${applied_done}" -gt 0 ]; then
-    state_update ".tasks_done_total = (.tasks_done_total + ${applied_done})" >/dev/null 2>&1
+  #
+  # It carries its own evidence that it moved, in the same `state.json` write
+  # that moves it, because the counter and the receipt are two files and no
+  # order of two writes is atomic. Counting first and then writing the receipt
+  # meant a crash in between left the receipt unwritten, the run still pending,
+  # and the next recovery counting the same completions a second time; writing
+  # the receipt first would lose them instead, since a run with a receipt is
+  # never recovered. `counted_runs` closes the window rather than moving it: a
+  # recovery that sees this run there already knows the total holds these
+  # completions, whichever of the two writes the crash fell between.
+  if [ "${applied_done}" -gt 0 ] && ! state_run_counted "${run}"; then
+    state_update ".tasks_done_total = (.tasks_done_total + ${applied_done})
+                  | .counted_runs = ((.counted_runs // []) + [\"${run}\"])" \
+      >/dev/null 2>&1
   fi
   finalize_receipt "${run}" "${backlog}" "${n_done}" "${n_blocked}" "${n_new}" 0 \
     true "${applied_done}"

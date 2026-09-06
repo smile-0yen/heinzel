@@ -6,6 +6,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.16] - 2026-09-06
+
+The three review findings left open against h-0012, closed. The first of them
+was a decision rather than a defect, and the decision was to keep the deferral.
+
+### Fixed
+- **The ledger changes once per merge, by rename.** `worksheet_merge` applied
+  each candidate to the ledger in place, so a merge of six candidates was six
+  rewrites of the file — and `backlog_set_state` rewrites by truncating and
+  writing, so a crash between two of them left a ledger holding some of the
+  run's work and not the rest, or half a line of it, while the receipt written
+  afterwards described a ledger that had never existed. Every candidate is now
+  applied to a copy in the same directory, and the copy replaces the ledger in a
+  single rename. The copy is made with `cp -p`, so the ledger keeps its own mode
+  rather than inheriting `mktemp`'s private one, and a merge that changed
+  nothing does not replace the file at all. A ledger that cannot be written is
+  refused before any of it is computed.
+- **Recovery cannot count the same completions twice.** `finalize_recover`
+  moved `tasks_done_total` and then wrote the receipt. The two are separate
+  files, so a crash in between left the counter moved, the receipt missing and
+  the run still pending — and the next recovery added the same completions
+  again. Reversing the order would have lost them instead, because a run with a
+  receipt is never recovered. The counter now carries its own evidence: the run
+  id goes into `counted_runs` in the same `state.json` update that moves the
+  total, and a run already named there is not counted again. `state_run_counted`
+  is new and absent means "no run", which is what every state file written
+  before the field says.
+
+### Decided
+- **The ledger commit stays ahead of the review until Phase 4.** The finding is
+  real — `bin/hzl-run` commits the ledger before `hzl-review` runs, so a revise
+  verdict rolls back a ledger that has already been written while the receipt
+  saying it was written is not rolled back. It is the deferral CHANGELOG 0.3.0
+  recorded with its reasons, the rollback works, and swapping the order is a
+  restructuring of the run, not a fix. `docs/RUNTIME-BACKENDS.md` Phase 4 now
+  names the swap explicitly instead of leaving it to be inferred.
+
+`docs/SPEC.md` §4 documents `counted_runs` and §11.4 both normative rules. Ten
+new assertions, each checked against the unfixed code: the merged ledger is a
+new inode and the file it replaced is intact byte for byte, the mode survives,
+a no-op merge does not replace the file, and a recovery whose receipt is
+removed — the exact crash — counts nothing the second time round.
+
 ## [0.3.15] - 2026-09-06
 
 The review finding split out of h-0021 as h-0022, closed. It is the one the
