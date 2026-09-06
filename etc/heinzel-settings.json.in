@@ -127,7 +127,11 @@
       "Edit(~/Library/LaunchAgents/**)",
 
       "Read(__BACKLOG_ABS__)",
-      "Edit(__BACKLOG_ABS__)"
+      "Edit(__BACKLOG_ABS__)",
+      "Read(__BACKLOG_BLOCKED_ABS__)",
+      "Edit(__BACKLOG_BLOCKED_ABS__)",
+      "Read(__BACKLOG_COMPLETED_ABS__)",
+      "Edit(__BACKLOG_COMPLETED_ABS__)"
     ],
     "allow": [
       "Bash(ls *)", "Bash(ls:*)",

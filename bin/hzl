@@ -1518,6 +1518,16 @@ generate_plist() {
 # the file the runner validates is generated rather than shipped.
 generate_settings() {
   local workdir=$1 backlog=$2 out="${HEINZEL_ROOT}/etc/heinzel-settings.json"
+  local blocked completed
+  # The ledger is three files, and all three are denied by name. The other two
+  # are derived from the backlog rather than looked up, because `ledger_files`
+  # answers with the files that exist and this list has to hold for the ones
+  # that do not exist yet: a blocked file is created by the first sweep that has
+  # something to put in it, and a rule written after the fact would leave the
+  # agent free to edit its own blocked queue until then. These two functions are
+  # pure string work for that reason.
+  blocked=$(ledger_blocked_file "${backlog}") || return 1
+  completed=$(ledger_archive "${backlog}") || return 1
   # __HOME__ as well as the rest: the credential denials are written out in
   # full rather than with a tilde, so they do not depend on permission rules
   # performing tilde expansion - a behaviour this project has not verified.
@@ -1527,6 +1537,8 @@ generate_settings() {
   sed -e "s|__WORKDIR_ABS__|//${workdir#/}|g" \
       -e "s|__WORKSHEET_ABS__|//${workdir#/}/.heinzel/worksheet.md|g" \
       -e "s|__BACKLOG_ABS__|//${backlog#/}|g" \
+      -e "s|__BACKLOG_BLOCKED_ABS__|//${blocked#/}|g" \
+      -e "s|__BACKLOG_COMPLETED_ABS__|//${completed#/}|g" \
       -e "s|__HEINZEL_HOME_ABS__|//${HEINZEL_HOME#/}|g" \
       -e "s|__HEINZEL_ROOT_ABS__|//${HEINZEL_ROOT#/}|g" \
       -e "s|__WORKDIR__|${workdir}|g" \

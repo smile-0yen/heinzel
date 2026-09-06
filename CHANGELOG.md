@@ -6,6 +6,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.15] - 2026-09-06
+
+The review finding split out of h-0021 as h-0022, closed. It is the one the
+nightly run could not do itself: the file it needed to edit is the one that
+defines what the nightly run may edit, and `etc/` is denied to it.
+
+### Fixed
+- **All three ledger files are denied to the agent, not just the backlog.** The
+  ledger became three files in h-0020, and the generated permission list still
+  named one. An agent that can edit `backlog.completed.md` can mark its own work
+  done; one that can edit `backlog.blocked.md` can unblock the task it was told
+  to leave alone. `Read` is denied alongside `Edit` for the same reason it
+  always was on the backlog: what the agent is given is the worksheet, and a run
+  that could read the whole ledger could work on a task nobody put on it.
+  `etc/heinzel-settings.json.in` gains four rules and `generate_settings` the
+  two substitutions behind them.
+
+  The two paths are derived with `ledger_blocked_file` and `ledger_archive`,
+  which are pure string functions, rather than listed with `ledger_files`, which
+  answers with the files that exist. The rule has to hold before the file does:
+  a blocked file is created by the first sweep that has something to put in it,
+  and a list built from what exists would leave the agent free to edit its own
+  blocked queue until that sweep ran.
+
+  The suite now lifts `generate_settings` out of `bin/hzl` and runs it against a
+  copy of the template in the temp tree, so the assertions are about the
+  substitutions the installer really performs: each of the three files is denied
+  for both tools, no placeholder survives, and — the other direction — every
+  placeholder in the template has a substitution behind it. A rule added to the
+  template with nothing behind it now fails here rather than at three in the
+  morning, where it would be valid JSON that matches nothing.
+
+`docs/SPEC.md` §8.0 states it normatively.
+
 ## [0.3.14] - 2026-09-06
 
 The four review findings left open against h-0021, closed.

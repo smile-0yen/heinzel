@@ -3476,6 +3476,72 @@ t_eq "and a mutation never reaches the archive" \
 
 unset BLK_DIR BLK_B BLK_F BLK_A BLK_FIXTURE
 
+# --- what the agent is denied ----------------------------------------------
+#
+# The ledger is three files and the agent may edit none of them: a run that
+# could write the backlog could mark its own tasks done, and one that could
+# write the blocked file could unblock the task it was told to leave alone.
+# Only the backlog was named, so the other two were the agent's to edit.
+#
+# `generate_settings` is lifted out of `bin/hzl` and run against a template in
+# the temp tree rather than reimplemented here, so that the assertions are about
+# the substitutions the installer actually performs. Sourced rather than
+# eval'd, and in a subshell, because it writes to ${HEINZEL_ROOT}/etc.
+
+group 'the generated settings'
+
+GS_SRC=${TMPROOT}/generate-settings.sh
+sed -n '/^generate_settings() {/,/^}/p' "${TEST_ROOT}/bin/hzl" >"${GS_SRC}"
+t_ok "generate_settings can be lifted out of bin/hzl whole" \
+  "$(grep -c '^}' "${GS_SRC}" | grep -q '^1$' && echo 0 || echo 1)"
+
+GS_ROOT=${TMPROOT}/gs-root
+mkdir -p "${GS_ROOT}/etc"
+cp "${TEST_ROOT}/etc/heinzel-settings.json.in" "${GS_ROOT}/etc/"
+GS_OUT=${GS_ROOT}/etc/heinzel-settings.json
+GS_WORK=${TMPROOT}/gs-work
+GS_BACKLOG=${GS_WORK}/backlog.md
+
+(
+  HEINZEL_ROOT=${GS_ROOT}
+  # shellcheck source=/dev/null
+  . "${GS_SRC}"
+  generate_settings "${GS_WORK}" "${GS_BACKLOG}"
+)
+t_ok "the settings generate from the template" "$?"
+t_eq "and are valid JSON, which the runner checks before every run" \
+  0 "$(jq -e . "${GS_OUT}" >/dev/null 2>&1; echo $?)"
+
+# Every one of the three, both tools. Read as well as Edit: a worksheet is what
+# the agent is given, and a run that could read the whole ledger could work on
+# a task nobody put on it.
+for gs_f in "${GS_BACKLOG}" "$(ledger_blocked_file "${GS_BACKLOG}")" \
+            "$(ledger_archive "${GS_BACKLOG}")"; do
+  for gs_tool in Read Edit; do
+    t_eq "${gs_tool}(${gs_f##*/}) is denied" \
+      1 "$(jq -r --arg r "${gs_tool}(//${gs_f#/})" \
+             '[.permissions.deny[] | select(. == $r)] | length' "${GS_OUT}")"
+  done
+done
+
+# The failure this file is written to make impossible: a placeholder that
+# survives is still valid JSON, so the runner's check passes, and every rule
+# carrying one matches nothing. A rule added to the template with no
+# substitution behind it fails here rather than at three in the morning.
+t_eq "no placeholder survives into the generated file" \
+  "" "$(grep -o '__[A-Z_]*__' "${GS_OUT}" | sort -u | tr '\n' ' ' | sed 's/ *$//')"
+
+# And the same check the other way round, so that a template rule nobody
+# substitutes cannot be added without this suite saying so.
+GS_MISSING=""
+for gs_ph in $(grep -o '__[A-Z_]*__' "${GS_ROOT}/etc/heinzel-settings.json.in" | sort -u); do
+  grep -q "s|${gs_ph}|" "${GS_SRC}" || GS_MISSING="${GS_MISSING} ${gs_ph}"
+done
+t_eq "every placeholder in the template has a substitution behind it" \
+  "" "${GS_MISSING}"
+
+unset GS_SRC GS_ROOT GS_OUT GS_WORK GS_BACKLOG gs_f gs_tool gs_ph GS_MISSING
+
 # --- verdict ---------------------------------------------------------------
 
 printf '\n%s passed, %s failed\n' "${PASS}" "${FAIL}"

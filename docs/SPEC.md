@@ -467,6 +467,17 @@ Neither derived path is configurable. A second setting is a second thing to get
 wrong, and every reader has to find the set from the one path `state.json`
 carries.
 
+> **Normative: all three are denied to the agent by name.** `hzl install`
+> writes a `Read` and an `Edit` denial for each of them into
+> `etc/heinzel-settings.json`, deriving the two it is not given from the backlog
+> path — not from the files that happen to exist, because a blocked file is
+> created by the first sweep that has something to put in it and a rule written
+> after the fact would leave the agent free to edit its own blocked queue until
+> then. Denying the backlog alone leaves an agent that can mark its own work
+> done in the archive, or unblock the task it was told to leave alone. `Read` as
+> well as `Edit`: what the agent is given is the worksheet, and a run that could
+> read the whole ledger could work on a task nobody put on it.
+
 | Element | Rule |
 |---|---|
 | Contents | Task lines and their continuation lines, appended in the order they were swept, each run of them under the `## P<n>` heading it came from |
