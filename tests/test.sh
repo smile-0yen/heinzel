@@ -2760,6 +2760,84 @@ bash "${SPIKE_SH}" render >"${TMPROOT}/spike-render.txt" 2>&1
 t_has "and a critical failure outranks both" \
   "${TMPROOT}/spike-render.txt" 'do not implement'
 
+# G-VERIFY is its own class. Its documented consequence is a backend that gets
+# built and then never reports SUCCESS, which is narrower than "do not build
+# it" - so a G-VERIFY failure must not print the critical outcome over a result
+# that says no such thing.
+: >"${SPIKE_DIR}/results.tsv"
+while read -r sp_id sp_gate; do
+  printf '%s\tpass\tseen\n' "${sp_id}" >>"${SPIKE_DIR}/results.tsv"
+done <"${TMPROOT}/spike-steps.txt"
+bash "${SPIKE_SH}" record E5 fail 'profile applied best-effort' >/dev/null 2>&1
+bash "${SPIKE_SH}" render >"${TMPROOT}/spike-render.txt" 2>&1
+t_has "a verifier that cannot be isolated stops SUCCESS, not the backend" \
+  "${TMPROOT}/spike-render.txt" 'no run reaches SUCCESS'
+t_lacks "and does not read as a critical failure" \
+  "${TMPROOT}/spike-render.txt" 'do not implement'
+bash "${SPIKE_SH}" record D2 fail 'wrote outside the workspace' >/dev/null 2>&1
+bash "${SPIKE_SH}" render >"${TMPROOT}/spike-render.txt" 2>&1
+t_has "a critical failure still outranks it" \
+  "${TMPROOT}/spike-render.txt" 'do not implement'
+
+# `na` is fail-closed. A step that could not be run leaves its safety question
+# open, so the gate it belongs to is incomplete - never passed on the strength
+# of the checks nobody performed.
+: >"${SPIKE_DIR}/results.tsv"
+while read -r sp_id sp_gate; do
+  printf '%s\tpass\tseen\n' "${sp_id}" >>"${SPIKE_DIR}/results.tsv"
+done <"${TMPROOT}/spike-steps.txt"
+bash "${SPIKE_SH}" render >"${TMPROOT}/spike-render.txt" 2>&1
+t_has "an all-pass table is the baseline for the na checks" \
+  "${TMPROOT}/spike-render.txt" 'proceed to Phase 1'
+bash "${SPIKE_SH}" record D6 na 'no config redirect, and D6 may not edit the real one' \
+  >/dev/null 2>&1
+t_ok "an na with a reason is recorded" "$?"
+bash "${SPIKE_SH}" render >"${TMPROOT}/spike-render.txt" 2>&1
+t_lacks "a security step nobody could run is not a way through" \
+  "${TMPROOT}/spike-render.txt" 'proceed to Phase 1'
+t_has "it leaves its gate incomplete" \
+  "${TMPROOT}/spike-render.txt" '| G-SEC | critical | incomplete |'
+t_has "and incomplete on a critical gate fails closed" \
+  "${TMPROOT}/spike-render.txt" 'do not implement'
+
+# The same rule on a capability gate, so that `na` is not special-cased to the
+# gates someone remembered to think about.
+: >"${SPIKE_DIR}/results.tsv"
+while read -r sp_id sp_gate; do
+  printf '%s\tpass\tseen\n' "${sp_id}" >>"${SPIKE_DIR}/results.tsv"
+done <"${TMPROOT}/spike-steps.txt"
+bash "${SPIKE_SH}" record F3 na 'B3 failed, no server to restart' >/dev/null 2>&1
+bash "${SPIKE_SH}" render >"${TMPROOT}/spike-render.txt" 2>&1
+t_has "an unrun capability step turns its capability off too" \
+  "${TMPROOT}/spike-render.txt" '| G-RESUME | capability | incomplete |'
+t_has "rather than reporting a capability nobody demonstrated" \
+  "${TMPROOT}/spike-render.txt" 'reported false'
+
+# D3 checks the deny list that etc/heinzel-settings.json.in actually generates,
+# and that list lets a plain `git push origin` through on purpose: github.com is
+# the one allowed outbound domain so that docs/RELEASING.md can push commits and
+# tags. A spike that failed the writer for pushing would fail the correct
+# configuration and pass a broken one.
+HZL_SETTINGS_IN="${TEST_ROOT}/etc/heinzel-settings.json.in"
+t_eq "no deny rule stops a plain git push" 0 \
+  "$(grep -oE '"Bash\(git push[^"]*\)"' "${HZL_SETTINGS_IN}" |
+     grep -cvE 'git push (--force|-f|--mirror|--delete)')"
+t_ok "and the deny list does stop a force push" \
+  "$(grep -qF '"Bash(git push --force*)"' "${HZL_SETTINGS_IN}"; echo $?)"
+t_lacks "so D3 does not ask for a plain push to be refused" \
+  "${SPIKE_DOC}" '**Pass** Both refused'
+t_has "it asks for the force push to be refused" \
+  "${SPIKE_DOC}" 'git push --force origin HEAD'
+
+# D6 sets a distinctive value somewhere to see whether it overrides the launch
+# arguments. The spike is disposable; the operator's own agent config is not.
+t_lacks "D6 does not tell the operator to edit their real Claude settings" \
+  "${SPIKE_DOC}" 'Set a distinctive value in the user config'
+t_has "the spike states outright that it modifies nothing outside its root" \
+  "${SPIKE_DOC}" 'Nothing outside the spike root is modified'
+t_has "and D6's fallback restores what it touched, checked by digest" \
+  "${SPIKE_DOC}" 'must equal d6-before.sha256'
+
 # `run` is a stub on purpose. A spike step that a machine can mark `pass`
 # without a human reading the screen produces a table that looks like evidence.
 bash "${SPIKE_SH}" run D2 >/dev/null 2>&1

@@ -63,7 +63,7 @@ C11|G-ATTEST|how far pane.process_info goes, and where it stops
 C12|G-REVIEW|structured reviewer output survives the terminal round trip
 D1|G-SEC|dontAsk and the generated settings hold in the pane
 D2|G-SEC|the workspace confinement holds
-D3|G-SEC|sudo and git push are denied, in the subprocess too
+D3|G-SEC|the deny list holds: sudo and force-push refused, plain push not
 D4|G-SEC|the Codex executor profile confines the same way
 D5|G-SEC|the reviewer really is read-only
 D6|G-SEC|inherited user config does not override the launch arguments
@@ -84,14 +84,23 @@ G2|G-OWN|nothing left behind: process, socket, job, directory
 EOF
 }
 
-# gate|class|what a failure means. Class is the verdict rule: `critical` stops
-# the implementation, `required-review` only stops a Herdr reviewer counting as
-# required, `capability` turns a feature off.
+# gate|class|what a failure means. Class is the verdict rule, in the order the
+# classes outrank each other: `critical` stops the implementation,
+# `no-success` lets it be built but stops any run reaching SUCCESS,
+# `required-review` only stops a Herdr reviewer counting as required, and
+# `capability` turns a feature off.
+#
+# G-VERIFY is deliberately not critical. Its documented consequence is narrower
+# than the other two: `exec_verifier` returns `verifier_unavailable` and no run
+# reaches SUCCESS, which is a backend that gets built and then refuses to call
+# anything done - not a backend that is never built. Classing it `critical`
+# printed "do not implement the unattended Herdr backend" over a result that
+# says no such thing.
 gates() {
   cat <<'EOF'
 G-SEC|critical|launch parity not established: do not implement the unattended backend
 G-ATTEST|critical|attestation insufficient: refuse resume; no unattended backend if it cannot fail closed
-G-VERIFY|critical|verifier cannot be isolated: exec_verifier returns verifier_unavailable, no SUCCESS
+G-VERIFY|no-success|verifier cannot be isolated: exec_verifier returns verifier_unavailable, no run reaches SUCCESS
 G-INDEP|required-review|a Herdr reviewer in the writer trust domain is never a required review
 G-PROV|capability|no headless server: there is no backend to implement
 G-CAP|capability|version/method probe fails: --backend herdr refuses to start, no local fallback
@@ -300,10 +309,19 @@ lookup() {
     "${RESULTS}"
 }
 
-# A gate is failed if any of its steps failed, incomplete if any is still todo,
-# and passed only if every one of them was looked at. Incomplete counts as
-# failed for the critical gates: not having looked and having looked and seen
-# nothing are the same answer to a fail-closed question.
+# A gate is failed if any of its steps failed, incomplete if any of them went
+# unanswered, and passed only if every one of them was looked at and held.
+# Incomplete counts as failed for the gates that stop something: not having
+# looked and having looked and seen nothing are the same answer to a
+# fail-closed question.
+#
+# `na` is unanswered, not answered well. It is the honest record of a step that
+# could not be run - the earlier step it depended on failed, the platform has
+# no such feature - and every one of those reasons leaves the safety question
+# it was asking still open. Counting it as a pass is how a gate comes to read
+# `pass` on the strength of the checks nobody performed, which is the one
+# failure mode this whole table exists to prevent. A step that genuinely does
+# not apply is a step that should not be in the list.
 gate_verdict() {
   local gate=$1 id g r verdict=pass
   while IFS='|' read -r id g _purpose; do
@@ -311,7 +329,7 @@ gate_verdict() {
     r=$(lookup "${id}" 2)
     case ${r} in
       fail) printf 'fail\n'; return 0 ;;
-      todo|'') verdict=incomplete ;;
+      todo|na|'') verdict=incomplete ;;
     esac
   done <<EOF
 $(steps)
@@ -322,7 +340,7 @@ EOF
 cmd_render() {
   [ -e "${RESULTS}" ] || die "no results file: run '${0##*/} template' first"
   local id gate purpose result note class verdict
-  local critical_bad=0 indep_bad=0 cap_bad=0
+  local critical_bad=0 verify_bad=0 indep_bad=0 cap_bad=0
 
   printf '### Herdr Phase 0 — versions\n\n'
   if [ -e "${VERSIONS}" ]; then cat "${VERSIONS}"; else printf '_(not recorded)_\n'; fi
@@ -348,6 +366,7 @@ EOF
     if [ "${verdict}" != pass ]; then
       case ${class} in
         critical) critical_bad=1 ;;
+        no-success) verify_bad=1 ;;
         required-review) indep_bad=1 ;;
         *) cap_bad=1 ;;
       esac
@@ -361,6 +380,12 @@ EOF
     printf 'do not implement the unattended Herdr backend. A critical gate is\n'
     printf 'failed or incomplete; amend docs/RUNTIME-BACKENDS.md with what was\n'
     printf 'measured. Phases 1 and 2 are LocalRuntime work and are unaffected.\n'
+  elif [ "${verify_bad}" = 1 ]; then
+    printf 'implement the backend, but no run reaches SUCCESS. The verifier\n'
+    printf 'cannot be shown to be isolated, so exec_verifier returns\n'
+    printf 'verifier_unavailable rather than degrading to an unsandboxed\n'
+    printf 'command. An unattended run that cannot check its own work does not\n'
+    printf 'get to call it done; fix the isolation before Phase 4.\n'
   elif [ "${indep_bad}" = 1 ]; then
     printf 'proceed with hybrid required review. A Herdr reviewer sharing the\n'
     printf 'writer trust domain does not count as a required review; it runs on\n'

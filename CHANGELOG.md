@@ -6,6 +6,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.11] - 2026-09-06
+
+The four review findings left open against h-0014, closed. All of them are in
+the Phase 0 Herdr spike, which is a document and a bookkeeping script for a
+spike a person runs by hand; none of them changes any code that runs.
+
+### Fixed
+- **`na` no longer counts as a passed gate.** `gate_verdict` looked only for
+  `fail` and `todo`, so a step recorded `na` left its gate reading `pass`. `na`
+  is the honest record of a step that *could not be run* — the step it depended
+  on failed, the platform has no such feature — and every one of those reasons
+  leaves the safety question the step was asking still open. The whole table
+  exists to stop a gate passing on the strength of checks nobody performed, and
+  it was doing the opposite. `na` is now `incomplete`, exactly like `todo`, on
+  every class of gate rather than only the ones someone thought to special-case.
+  `docs/HERDR-SPIKE.md` says so in both places a reader would look: the verdict
+  rules and the results-table legend.
+
+- **D3 no longer fails the correct configuration.** The step asked for
+  `git push origin HEAD` to be refused and called an unattended writer that can
+  push "the worst outcome available in this document". But
+  `etc/heinzel-settings.json.in` allows a plain push on purpose — `github.com`
+  is the one outbound domain the sandbox permits, so that the release ritual in
+  `docs/RELEASING.md` can push commits and tags — and denies privilege (`sudo`,
+  `su`, `doas`) and history rewriting (`--force`, `-f`, `--mirror`, `--delete`).
+  A spike run against a correctly configured pane would have recorded a `G-SEC`
+  failure, and one against a pane that refused everything would have passed. D3
+  now checks the list that is actually generated: `sudo`, a force push, and a
+  force push laundered through a subprocess must be refused, a plain push must
+  succeed, and a *refused* plain push is its own finding — the pane is applying
+  some profile other than the attested one, and a confinement you cannot
+  predict is one that will surprise a release at night.
+
+- **`G-VERIFY` is `no-success`, not `critical`.** Its documented consequence is
+  that `exec_verifier` returns `verifier_unavailable` and no run reaches
+  `SUCCESS` — a backend that gets built and then declines to call anything done.
+  Classed `critical`, a `G-VERIFY` failure printed "do not implement the
+  unattended Herdr backend" over a result that says no such thing, which is the
+  kind of overstatement that gets a gate argued away later. It is now its own
+  class, outranked by `critical` and outranking `required-review`, with an
+  outcome paragraph that states the real consequence.
+
+- **D6 does not edit the operator's own agent configuration.** The step set a
+  distinctive value in the real `~/.claude/settings.json` and the real Codex
+  user config to see whether it overrode the launch arguments, and gave no way
+  back — in a spike whose defining property is that teardown is a delete, and
+  which kills agents mid-turn two stages later. D6 now establishes each engine's
+  config-location redirect first and puts the distinctive value in a file under
+  the spike root, with a control step that confirms the redirected file is
+  actually read: without it, "the launch arguments won" cannot be told apart
+  from "the file was never read", and the second reads as a pass while proving
+  nothing. Where no redirect exists the answer is `na` with the reason — which,
+  after the first fix above, correctly leaves `G-SEC` incomplete rather than
+  passed. The copy-aside fallback is documented for an operator who decides the
+  answer is worth it, and its restore and digest re-check are part of the step:
+  a D6 that does not print two equal digests is a `fail` whatever the override
+  question answered. A new safety rule states outright that the spike modifies
+  nothing outside its own root.
+
 ## [0.3.10] - 2026-09-06
 
 The review finding left open against h-0009, closed.
