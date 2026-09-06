@@ -335,13 +335,14 @@ engine call.
 |---|---|---|
 | 1 | `effective_mode() == heinzel` | silent exit 0, **no log line** |
 | 2 | `in_window()` | `skip` |
+| 2b | ≥ `HEINZEL_MIN_RUN_GAP_SEC` since the last run started | `skip` |
 | 3 | session budget remaining > 0 | `skip` |
 | 4 | on AC power **or** `--from manual` | `skip` |
 | 5 | time to expiry ≥ `run_timeout_sec` | `skip` |
 | 6 | workdir, backlog, engine, and **valid settings JSON** | `abort` |
 | 7 | at least one `[ ]` task | `skip` |
 
-`--from manual` bypasses gates 2 and 4. The other five apply unchanged.
+`--from manual` bypasses gates 2, 2b and 4. The other five apply unchanged.
 
 Gate 2 because the operator is present and the schedule exists to keep runs out
 of the working day, not to stop a human. Gate 4 for the same reason: it exists
@@ -353,6 +354,18 @@ in the run log either way.
 Gate 1 writing nothing is deliberate: it is the common case, and a machine
 without a session must be untouched by having Heinzel installed. `HEINZEL_DEBUG=1`
 logs it anyway.
+
+> **Normative: gate 2b is what is left of gate 2 when the window is every
+> hour.** `HEINZEL_HOURS=all` is a legitimate schedule — a session that is on
+> may be allowed to work whenever it is on — but it makes `in_window()` always
+> true, and the burst gate 2 exists to stop returns: every slot the machine
+> slept through fires at once on wake, and each one is now inside the window.
+> Gate 2b measures from the last run that **actually ran**, read from the last
+> `runs.jsonl` record, not from the schedule: a run stopped at a gate writes no
+> record, so a closed gate never pushes the next slot further out. An hourly
+> schedule never reaches the default gap; a replay of six missed slots runs one
+> of them. A record whose epoch is in the future is treated as long enough ago —
+> a clock that moved must not stop the machine working until it catches up.
 
 > **Normative: there is no global run lock.** A `lockf -t 0 -k run.lock` used to
 > stand in front of every gate and be held to the last line, spelling "another
@@ -1304,7 +1317,8 @@ the review and model keys, which are environment > conf > default so that
 
 | Key | Default | Accepted |
 |---|---|---|
-| `HEINZEL_HOURS` | `"1 2 3 4 5"` | integers 0–23; normalised, de-duplicated |
+| `HEINZEL_HOURS` | `"1 2 3 4 5"` | integers 0–23, normalised and de-duplicated, **or** the word `all` for every hour. `all` is the whole value or none of it, and `*` is refused by name: the list is read with an unquoted expansion and a `*` would become file names |
+| `HEINZEL_MIN_RUN_GAP_SEC` | `3000` | ≥ 0; `0` disables. The least time between two runs, measured from when the last one started (§7 gate 2b) |
 | `DEFAULT_MAX_TASKS_TOTAL` / `DEFAULT_MAX_TASKS` | `3` / `3` | ≥ 1 |
 | `DEFAULT_RUN_TIMEOUT` | `3600` | ≥ 1 (`set timeout` ≥ 60) |
 | `DEFAULT_DURATION` | `"10h"` | `10h`/`90m`/`3600`, in [60s, 24h] |

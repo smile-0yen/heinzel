@@ -32,7 +32,19 @@ DEFAULT_BACKLOG=""       # e.g. "/Users/you/.heinzel/backlog.md"
 # for the schedule: `hzl install` generates the plist from it, and the runner
 # guards on it independently, because launchd replays calendar events it missed
 # while asleep and would otherwise fire them all at once during the day.
+#
+# `all` means every hour: a session that is on may work whenever it is on. Write
+# the word, not `*` - the value is split by the shell, and `*` would become the
+# names of files. Run `hzl install` after changing this; the plist is generated
+# from it.
 HEINZEL_HOURS="1 2 3 4 5"
+
+# The least time between two runs, in seconds, measured from when the last one
+# started. 0 turns it off. It is what stops a wake-up replay from firing every
+# slot the machine slept through at once, and it is the only such guard left
+# when HEINZEL_HOURS is `all`. An hourly schedule never reaches it: the default
+# is under an hour on purpose. Manual runs (`hzl run-now`) are never gated.
+HEINZEL_MIN_RUN_GAP_SEC=3000
 
 # --- budget ----------------------------------------------------------------
 # Three independent ceilings. The effective per-run limit is

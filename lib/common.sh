@@ -11,7 +11,7 @@
 # Multibyte truncation is locale-dependent (DESIGN 6.3). Fix it once, here.
 export LC_CTYPE=UTF-8
 
-HEINZEL_VERSION="0.3.17"
+HEINZEL_VERSION="0.3.18"
 
 # The TTL ceiling is deliberately not configurable. A session that can be
 # created with an unbounded lifetime is not a session, it is a mode.
@@ -247,6 +247,7 @@ hzl_load_conf() {
   # etc/heinzel.conf.example, not scattered through the code.
   HEINZEL_LABEL="local.heinzel"
   HEINZEL_HOURS="1 2 3 4 5"
+  HEINZEL_MIN_RUN_GAP_SEC=3000
   DEFAULT_MAX_TASKS_TOTAL=3
   DEFAULT_MAX_TASKS=3
   DEFAULT_RUN_TIMEOUT=3600
@@ -296,16 +297,37 @@ hzl_validate_conf() {
   local h n v
 
   [ -n "${HEINZEL_HOURS}" ] || { err "HEINZEL_HOURS is empty"; return 1; }
-  for h in ${HEINZEL_HOURS}; do
-    case ${h} in
-      "") err "HEINZEL_HOURS contains an empty entry"; return 1 ;;
-      *[!0-9]*) err "HEINZEL_HOURS: '${h}' is not an integer"; return 1 ;;
-    esac
-    if [ "${h}" -gt 23 ]; then
-      err "HEINZEL_HOURS: ${h} is out of range 0-23"
+  # Caught before the value is split, because it cannot survive being split:
+  # the list is read with an unquoted expansion, so a `*` in it would become
+  # the names of the files in whatever directory the reader happened to be in.
+  case ${HEINZEL_HOURS} in
+    *'*'*)
+      err "HEINZEL_HOURS: write 'all', not '*' - the value is split by the shell"
+      return 1 ;;
+  esac
+  if hours_is_all; then
+    [ "$(printf '%s\n' ${HEINZEL_HOURS} | grep -c .)" -eq 1 ] || {
+      err "HEINZEL_HOURS: 'all' is the whole value or none of it"
       return 1
-    fi
-  done
+    }
+  else
+    for h in ${HEINZEL_HOURS}; do
+      case ${h} in
+        "") err "HEINZEL_HOURS contains an empty entry"; return 1 ;;
+        *[!0-9]*) err "HEINZEL_HOURS: '${h}' is not an integer"; return 1 ;;
+      esac
+      if [ "${h}" -gt 23 ]; then
+        err "HEINZEL_HOURS: ${h} is out of range 0-23"
+        return 1
+      fi
+    done
+  fi
+
+  case ${HEINZEL_MIN_RUN_GAP_SEC} in
+    ""|*[!0-9]*)
+      err "HEINZEL_MIN_RUN_GAP_SEC: '${HEINZEL_MIN_RUN_GAP_SEC}' is not a whole number of seconds"
+      return 1 ;;
+  esac
 
   for n in DEFAULT_MAX_TASKS_TOTAL DEFAULT_MAX_TASKS DEFAULT_RUN_TIMEOUT \
            LOG_RETENTION_DAYS HEINZEL_REVIEW_TIMEOUT HEINZEL_REVIEW_MAX_PATCH_BYTES; do
@@ -359,10 +381,39 @@ hzl_validate_conf() {
   return 0
 }
 
+# Is the schedule every hour? A session that is on may be allowed to work at any
+# hour of the day, and `all` says that where a list of twenty-four numbers says
+# it less clearly and invites one of them to be left out by accident.
+#
+# `all` is spelled as a word rather than as `*` on purpose: the value is read
+# with an unquoted expansion, and `*` would be replaced by file names.
+hours_is_all() {
+  local h
+  for h in ${HEINZEL_HOURS}; do
+    [ "${h}" = all ] && return 0
+  done
+  return 1
+}
+
 # Normalised, de-duplicated, ascending. One source of truth for the schedule:
-# both the plist and the runner's window guard are generated from this value.
+# the plist, the runner's window guard and the slot count are all derived from
+# this, so `all` has to be expanded here and nowhere else.
 hours_normalised() {
+  if hours_is_all; then
+    printf '0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23'
+    return 0
+  fi
   printf '%s\n' ${HEINZEL_HOURS} | sort -n -u | tr '\n' ' ' | sed 's/ $//'
+}
+
+# The same schedule for a person to read. Twenty-four numbers on one line is a
+# worse answer to "when does this run" than three words.
+hours_display() {
+  if hours_is_all; then
+    printf 'every hour'
+  else
+    hours_normalised
+  fi
 }
 
 in_window() {
@@ -370,10 +421,27 @@ in_window() {
   now=$(date +%H)
   now=${now#0}
   [ -z "${now}" ] && now=0
-  for h in ${HEINZEL_HOURS}; do
+  for h in $(hours_normalised); do
     [ "${h}" -eq "${now}" ] && return 0
   done
   return 1
+}
+
+# When the last recorded run started, or nothing when there is no record.
+#
+# `runs.jsonl` is appended only by a run that actually ran: a run stopped at a
+# gate exits before the record is written, so a closed gate never pushes the
+# next slot further out.
+last_run_started_epoch() {
+  local line v
+  [ -r "${RUNS_JSONL}" ] || return 1
+  line=$(tail -1 "${RUNS_JSONL}" 2>/dev/null)
+  [ -n "${line}" ] || return 1
+  v=$(printf '%s' "${line}" | jq -r '.started_at_epoch // empty' 2>/dev/null)
+  case ${v} in
+    ""|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s' "${v}"
 }
 
 # How many scheduled slots fall between now and a deadline. `on` uses this to
@@ -387,7 +455,7 @@ slots_within() {
     hh=$(date -r "${probe}" +%H)
     hh=${hh#0}
     [ -z "${hh}" ] && hh=0
-    for h in ${HEINZEL_HOURS}; do
+    for h in $(hours_normalised); do
       if [ "${h}" -eq "${hh}" ]; then
         n=$((n + 1))
         break

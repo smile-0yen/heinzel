@@ -349,7 +349,32 @@ store_event() { # kind [message]
 # at once on wake. Without this guard a laptop opened at lunchtime would fire
 # every slot it slept through, in the middle of the working day.
 if [ "${TRIGGER}" != manual ] && ! in_window; then
-  skip "outside the run window (hours: $(hours_normalised))"
+  skip "outside the run window (hours: $(hours_display))"
+fi
+
+# --- gate 2b: the minimum gap ----------------------------------------------
+# What is left of gate 2 when the window is every hour. `HEINZEL_HOURS=all` is
+# a legitimate schedule — a session that is on may be allowed to work whenever
+# it is on — but it makes the window guard above always true, and the burst it
+# was there to stop comes back: every slot the machine slept through fires at
+# once on wake, and each one is now inside the window.
+#
+# So the gap is measured from the last run that actually ran, not from the
+# schedule. An hourly schedule never trips it; a replay of six missed slots
+# runs one of them and skips five. Manual runs are not gated, here as above:
+# `hzl run-now` means now.
+if [ "${TRIGGER}" != manual ] && [ "${HEINZEL_MIN_RUN_GAP_SEC}" -gt 0 ]; then
+  LAST_START=$(last_run_started_epoch) || LAST_START=""
+  if [ -n "${LAST_START}" ]; then
+    SINCE_LAST=$(( $(now_epoch) - LAST_START ))
+    # A record from the future is a clock that moved, not a run that has not
+    # happened yet. Treated as "long enough ago", because the alternative is a
+    # machine that refuses to work until its own clock catches up.
+    if [ "${SINCE_LAST}" -ge 0 ] &&
+       [ "${SINCE_LAST}" -lt "${HEINZEL_MIN_RUN_GAP_SEC}" ]; then
+      skip "the last run started ${SINCE_LAST}s ago, inside the ${HEINZEL_MIN_RUN_GAP_SEC}s minimum gap"
+    fi
+  fi
 fi
 
 # --- gate 3: the session budget -------------------------------------------

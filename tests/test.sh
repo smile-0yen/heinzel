@@ -1329,6 +1329,145 @@ fake_reset
 #     rollback to the previous build unreadable, and nothing would say so until
 #     the rollback.
 
+# --- when a run is allowed to happen ---------------------------------------
+#
+# The schedule is one value, `HEINZEL_HOURS`, and everything that asks "when"
+# derives from it: the plist `hzl install` writes, the runner's window guard,
+# and the count of slots left before a session expires. `all` means every hour —
+# a session that is on may be allowed to work whenever it is on — and it has to
+# be expanded in one place, or the three answers drift apart.
+
+group 'the schedule'
+
+# The defaults without this machine's own etc/heinzel.conf: `hzl_load_conf` sets
+# every default before it reads the file, so a root with no file in it is the
+# cheapest way to get a whole valid configuration in here.
+SC_ROOT=${TMPROOT}/sched-root
+mkdir -p "${SC_ROOT}/etc"
+sc_validate() { # hours [gap] -> the validator's status
+  (
+    # The suite sets marker model and effort values for the argv assertions,
+    # and `hzl_load_conf` lets the environment win for those keys — cleared
+    # here, or every schedule below would be invalid for a reason that has
+    # nothing to do with the schedule.
+    HEINZEL_MODEL="" HEINZEL_EFFORT=""
+    HEINZEL_CODEX_MODEL="" HEINZEL_CODEX_EFFORT=""
+    HEINZEL_ROOT=${SC_ROOT}
+    hzl_load_conf >/dev/null 2>&1
+    HEINZEL_HOURS=$1
+    [ -n "${2:-}" ] && HEINZEL_MIN_RUN_GAP_SEC=$2
+    hzl_validate_conf >/dev/null 2>&1
+  )
+}
+
+HEINZEL_HOURS="5 1 3 1"
+t_eq "a list is normalised, de-duplicated and ascending" \
+  "1 3 5" "$(hours_normalised)"
+t_fails "and is not every hour" "$(hours_is_all; echo $?)"
+t_eq "which is what a person is shown" "1 3 5" "$(hours_display)"
+
+HEINZEL_HOURS="all"
+t_ok "all is every hour" "$(hours_is_all; echo $?)"
+t_eq "and expands to twenty-four of them, for the plist and the guard alike" \
+  "0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23" \
+  "$(hours_normalised)"
+t_eq "a person is told it in three words, not twenty-four numbers" \
+  "every hour" "$(hours_display)"
+t_ok "so no hour of the day is outside the window" "$(in_window; echo $?)"
+t_eq "and every hour before a deadline is a slot" \
+  2 "$(slots_within $(( $(now_epoch) + 7300 )))"
+
+# The hour the guard compares against is the hour it is, not the hour the
+# schedule was written for.
+HEINZEL_HOURS="$(date +%H | sed 's/^0//;s/^$/0/')"
+t_ok "the current hour is in a window that names it" "$(in_window; echo $?)"
+HEINZEL_HOURS="$(( ($(date +%H | sed 's/^0//;s/^$/0/') + 12) % 24 ))"
+t_fails "and twelve hours from now is not" "$(in_window; echo $?)"
+
+sc_validate "1 2 3 4 5"
+t_ok "a list of hours is a valid schedule" "$?"
+sc_validate "all"
+t_ok "and so is all" "$?"
+sc_validate "24"
+t_fails "an hour that is not an hour is refused" "$?"
+sc_validate "all 7"
+t_fails "and all is the whole value or none of it" "$?"
+
+# `*` cannot survive being read: the value is split with an unquoted expansion,
+# so it would become the names of the files in whatever directory the reader
+# happened to be in. Refused by name, rather than left to fail later as
+# "HEINZEL_HOURS: 'CHANGELOG.md' is not an integer".
+sc_validate "*"
+t_fails "a glob is refused" "$?"
+SC_ERR=${TMPROOT}/sched-err.txt
+(
+  HEINZEL_MODEL="" HEINZEL_EFFORT=""
+  HEINZEL_ROOT=${SC_ROOT}
+  hzl_load_conf >/dev/null 2>&1
+  HEINZEL_HOURS="*"
+  hzl_validate_conf
+) >/dev/null 2>"${SC_ERR}"
+t_has "and the message gives the spelling that works" "${SC_ERR}" "write 'all'"
+
+sc_validate "1 2 3" "notanumber"
+t_fails "a gap that is not a number of seconds is refused" "$?"
+sc_validate "1 2 3" "0"
+t_ok "and zero is, because zero turns it off" "$?"
+
+unset HEINZEL_HOURS
+
+# --- the minimum gap between runs ------------------------------------------
+#
+# What is left of the window guard when the window is every hour: `all` makes
+# `in_window` always true, and the burst it was there to stop — every slot the
+# machine slept through, firing at once on wake — is inside the window again.
+# The gap is measured from the last run that actually ran, so an hourly
+# schedule never reaches it and a replay of six missed slots runs one.
+
+group 'the minimum gap between runs'
+
+SC_RUNS_SAVED=${RUNS_JSONL}
+RUNS_JSONL=${TMPROOT}/sched-runs.jsonl
+rm -f "${RUNS_JSONL}"
+last_run_started_epoch >/dev/null 2>&1
+t_fails "with no record at all there is no last run" "$?"
+
+printf '%s\n' '{"run_id":"20260907-010000","started_at_epoch":1757000000}' \
+  >"${RUNS_JSONL}"
+t_eq "the record says when the last run started" \
+  1757000000 "$(last_run_started_epoch)"
+
+printf '%s\n' '{"run_id":"20260907-020000","started_at_epoch":1757003600}' \
+  >>"${RUNS_JSONL}"
+t_eq "and it is the last line, because the file is appended to" \
+  1757003600 "$(last_run_started_epoch)"
+
+# A half-written record is not a time. The same care `last_run_json` takes in
+# `bin/hzl`, for the same reason: a torn line that parsed as something would be
+# worse than one that parses as nothing.
+printf '%s\n' '{"run_id":"20260907-03000' >>"${RUNS_JSONL}"
+last_run_started_epoch >/dev/null 2>&1
+t_fails "a record torn by an interrupted append is not a time" "$?"
+
+printf '%s\n' '{"run_id":"20260907-040000","started_at_epoch":"soon"}' \
+  >"${RUNS_JSONL}"
+last_run_started_epoch >/dev/null 2>&1
+t_fails "and neither is a record whose epoch is not a number" "$?"
+
+# What makes the gap a gap between runs rather than between wake-ups: a run
+# stopped at a gate exits before the record is written, so a skipped slot does
+# not push the next one further out.
+t_eq "the skip path writes no run record" \
+  0 "$(awk '/^skip\(\) \{/,/^\}/' "${TEST_ROOT}/bin/hzl-run" | grep -c 'RUNS_JSONL')"
+
+# And the gate is not applied to a run a person asked for: `hzl run-now` means
+# now. Structural, because the suite does not drive `bin/hzl-run` end to end.
+t_eq "both schedule gates let a manual run through" \
+  2 "$(grep -c '\[ "${TRIGGER}" != manual \]' "${TEST_ROOT}/bin/hzl-run")"
+
+RUNS_JSONL=${SC_RUNS_SAVED}
+unset SC_ROOT SC_ERR SC_RUNS_SAVED
+
 group 'schema constants'
 
 # Each of the three is handed straight to `jq --argjson`, where an unset or

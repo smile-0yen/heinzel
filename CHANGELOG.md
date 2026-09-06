@@ -6,6 +6,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.18] - 2026-09-07
+
+A session that is on can be allowed to work at any hour, not only in the
+overnight window. A patch bump and not a minor one: the minor is reserved for
+the task that completes a phase of `docs/RUNTIME-BACKENDS.md`, and this
+completes none.
+
+### Added
+- **`HEINZEL_HOURS="all"`.** Every hour, expanded in one place — `hours_normalised`
+  — so the LaunchAgent's calendar, the runner's own window guard and the count of
+  slots left before a session expires cannot drift apart. It is the word `all`,
+  never `*`: the value is read with an unquoted expansion, and a `*` in it would
+  become the names of the files in whatever directory the reader happened to be
+  in. `hzl_validate_conf` refuses `*` by name and says which spelling works,
+  rather than letting it fail later as "'CHANGELOG.md' is not an integer".
+  `hours_display` is what a person is shown, because twenty-four numbers on one
+  line is a worse answer to "when does this run" than three words.
+- **Gate 2b, a minimum gap between runs** (`HEINZEL_MIN_RUN_GAP_SEC`, default
+  3000). It is what is left of the window guard when the window is every hour.
+  Gate 2 exists because launchd replays the calendar events it missed while the
+  machine was asleep; with `all` every one of those replays is inside the window,
+  so opening the lid at nine would fire every hour slept through, one after
+  another. The gap is measured from the last run that **actually ran** — a run
+  stopped at a gate writes no `runs.jsonl` record, so a closed gate never pushes
+  the next slot out — which means an hourly schedule never reaches the default
+  and a replay of six missed slots runs one of them. `hzl run-now` is not gated
+  by it, as it is not gated by the window. A record whose epoch is in the future
+  is treated as long enough ago: a clock that moved must not stop the machine
+  working until it catches up.
+
+`docs/SPEC.md` §3.2 and §7 carry the contract, `docs/RUNBOOK.md` a section on
+what "every hour" costs — the agent may be writing in the working directory
+while you are. Twenty-four new assertions, mutation-checked.
+
 ## [0.3.17] - 2026-09-07
 
 The last of the review findings against h-0020, closed. The third of them had

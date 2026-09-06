@@ -292,6 +292,34 @@ The one thing its prompt must say, and does, is that **exit 10 is not a
 failure**: `hzl report` exits 10 exactly when something is blocked, which is the
 morning it matters most.
 
+## When it runs
+
+`HEINZEL_HOURS` in `etc/heinzel.conf` is the schedule, and `hzl install` writes
+it into the LaunchAgent:
+
+```sh
+HEINZEL_HOURS="1 2 3 4 5"   # 01:00 to 05:00, on the hour
+HEINZEL_HOURS="all"         # every hour, whenever the session is on
+```
+
+`all` is the word, not `*`: the value is split by the shell, and `*` would
+become the names of whatever files were nearby. Run `hzl install` after changing
+it — the plist is generated from this value, and so is the runner's own guard.
+
+Every hour means the agent may work while you are at the machine. Nothing else
+changes: it still runs only while a session is on, still refuses on battery,
+still refuses while the posture is `travel`, and still stops at the session
+budget. What it does mean is that it may be writing in the working directory
+while you are, so `all` suits a checkout the agent owns better than one you are
+also editing.
+
+`HEINZEL_MIN_RUN_GAP_SEC` (default 3000) is the least time between two runs,
+measured from when the last one **started**. An hourly schedule never reaches
+it. What it is for is the wake-up: launchd replays the calendar events it missed
+while the machine was asleep, and with `all` every one of them is inside the
+window — without a gap, opening the lid at nine would fire every hour you slept
+through, one after another. `hzl run-now` is never gated by it.
+
 ## The budget
 
 Three ceilings, all independent:
