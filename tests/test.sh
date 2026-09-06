@@ -1050,6 +1050,25 @@ t_fails "and engine_run fails rather than quietly running it here" "$?"
 [ -e "${RT_OUT}/result.json" ]
 t_fails "leaving no result.json to be mistaken for a run" "$?"
 
+# The same refusal, in a directory a previous run already succeeded in. The
+# records of that run are cleared before anything is launched, so a launch that
+# never reaches the backend cannot be read as the old run happening again.
+RT_REUSE=${TMPROOT}/runtime-reused
+fake_reset
+FAKE_OUT_FILE=${CLAUDE_OK_RAW}
+engine_run claude executor "${RUN_WORK}" "${RUN_PROMPT}" "${RT_REUSE}" 60
+t_status "the first run in the directory succeeds" 0 "$?"
+t_eq "and leaves a collected.json behind" \
+  ok "$(jq -r '.verdict' "${RT_REUSE}/result.json")"
+
+HEINZEL_RUNTIME=herdr engine_run claude executor "${RUN_WORK}" \
+  "${RUN_PROMPT}" "${RT_REUSE}" 60 2>/dev/null
+t_fails "a second run that never starts fails" "$?"
+[ -e "${RT_REUSE}/collected.json" ]
+t_fails "the previous run's collected.json is gone, not waiting to be reread" "$?"
+[ -e "${RT_REUSE}/result.json" ]
+t_fails "and no result.json survives to report the old run as this one" "$?"
+
 # The launch spec and the run spec are separate files because they answer
 # separate questions: what to start, and where and for how long.
 RT_RUN=${TMPROOT}/runtime-run.json

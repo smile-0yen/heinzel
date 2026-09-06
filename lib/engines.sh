@@ -427,6 +427,12 @@ engine_run() {
   : >"${outdir}/raw"
   : >"${outdir}/last.txt"
 
+  # These two are removed rather than truncated. An outdir can be reused, and a
+  # launch that fails before the backend writes anything would otherwise leave
+  # the previous run's collected.json in place to be normalised into this run's
+  # result.json — a success that nobody ran. Absent is the honest state.
+  rm -f "${outdir}/collected.json" "${outdir}/result.json"
+
   spec=${outdir}/launch.json
   run=${outdir}/run.json
   collected=${outdir}/collected.json

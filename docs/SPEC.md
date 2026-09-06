@@ -624,6 +624,15 @@ Driver normalising what came back (`docs/RUNTIME-BACKENDS.md` §7, §8.4).
 `HEINZEL_DRY_RUN=1` a NUL-separated `dry-run.cmd` (NUL, so a multi-line
 argument survives as one argument).
 
+> **Normative: an outdir carries no record of an earlier run.** Before it
+> builds a launch, `engine_run` empties `raw`, `last.txt` and `stderr` and
+> *removes* `collected.json` and `result.json`. The two removed files are the
+> ones that assert a run happened, and an `<outdir>` may be reused; were they
+> left in place, a launch that failed before the backend observed anything
+> would find the previous `collected.json` still readable and normalise it into
+> this run's `result.json` — reporting, as this attempt's outcome, a success
+> from an attempt that is over. Absent is the honest state.
+
 ### 9.0 The runtime seam
 
 ```

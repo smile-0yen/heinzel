@@ -6,6 +6,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-09-06
+
+The review finding left open against h-0006, closed.
+
+### Fixed
+- **A run that never starts can no longer report the previous run's success.**
+  `engine_run` emptied `raw`, `last.txt` and `stderr` before each launch but
+  left `collected.json` and `result.json` where they were. An `<outdir>` may be
+  reused, and the launch can fail before the backend observes anything at all —
+  an unregistered `HEINZEL_RUNTIME`, a launch spec with no executable or an
+  empty argv, a `cwd` that cannot be entered. In that case the readability
+  check on `collected.json` found the *previous* run's record, normalised it,
+  and wrote this attempt a `result.json` saying `verdict: ok` for a process
+  that was never started. Both files are now removed before anything is built,
+  so the honest state — nothing collected — is the one a reader finds
+  (`docs/SPEC.md` §9). Three new assertions run a clean run and a refused one
+  in the same directory and check that nothing of the first survives.
+
 ## [0.3.6] - 2026-09-06
 
 The revise the reviewer asked for on 0.3.5, and the gap it listed closed.
