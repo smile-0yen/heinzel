@@ -903,9 +903,11 @@ cmd_take() {
     else
       printf '\nThis was blocked by an unattended run, which means it needed a\n'
       printf 'judgement call, a privilege, or an irreversible action it would not take\n'
-      printf 'on its own. It left no instructions, so work out what it needs, do it\n'
-      printf 'with me, and write down what you did in %s\n' "${steps}"
-      printf 'so that the next person - or the next block - starts from it.\n'
+      printf 'on its own. It left no instructions. Start them with\n\n'
+      printf '    hzl steps %s\n\n' "${id}"
+      printf 'which writes a form to fill in at %s\n' "${steps}"
+      printf 'Then work out what the task needs, do it with me, and put what you did\n'
+      printf 'in that form, so that the next person - or the next block - starts from it.\n'
     fi
   fi
   printf '\nWhen it is finished, close it out with:  hzl done %s "<what changed>"\n' "${id}"
@@ -1036,6 +1038,14 @@ cmd_steps() {
 
   reason=$(printf '%s' "${row}" | cut -f3)
   steps=$(ledger_steps_file "${b}" "${id}") || die "could not name a steps file for ${id}"
+  # The row above says "no steps" when the file is not *readable*; a file that
+  # is there and cannot be read - wrong mode after a hand edit, written under
+  # another account - is still somebody's, and is not written over.
+  if [ -e "${steps}" ]; then
+    err "${id} has a steps file that cannot be read: ${steps}"
+    err "  fix its permissions rather than writing over it"
+    exit 1
+  fi
   mkdir -p "$(dirname "${steps}")" || die "could not create $(dirname "${steps}")"
   # shellcheck disable=SC2059
   printf "${STEPS_TEMPLATE}" "${id}" "${reason}" "${id}" "${id}" >"${steps}" ||

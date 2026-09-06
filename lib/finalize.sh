@@ -212,6 +212,20 @@ finalize_intent() { # run-id worksheet backlog legacy-run-id allowed [identity]
 # where a moved ledger goes.
 _finalize_moved_file() { local d; d=$(runstore_dir "$1") || return 1; printf '%s/finalize.moved' "${d}"; }
 
+# Where a run's trap put the steps when it stopped: `stash_steps` in the runner
+# copies `<workdir>/.heinzel/blocked/*.md` into the run's exec directory before
+# it takes them out of the working directory, and the run's snapshot says where
+# that directory is. Recovery reads the intent's source first and this second,
+# so that a run stopped by SIGTERM - the deadline, `hzl off`, a closed lid - is
+# finished with its instructions just as a run stopped by SIGKILL is.
+_finalize_kept_steps() { # run-id id
+  local exec_dir ref
+  exec_dir=$(runstore_read "$1" 2>/dev/null | jq -r '.exec_dir // ""' 2>/dev/null)
+  [ -n "${exec_dir}" ] || return 1
+  ref=$(ledger_steps_ref "$2") || return 1
+  printf '%s/%s' "${exec_dir}" "${ref}"
+}
+
 finalize_apply() { # run-id worksheet backlog legacy-run-id allowed
   lock_with "${LOCK_BACKLOG}" "${FINALIZE_LOCK_WAIT}" \
     _finalize_apply_locked "$1" "$2" "$3" "$4" "$5"
@@ -327,7 +341,7 @@ EOF
 # reached its own counter, so nothing it did has been counted (§14.1).
 finalize_recover() { # run-id backlog
   local run=$1 backlog=$2 f state expected now legacy applied_done=0
-  local n_done=0 n_blocked=0 n_new=0 n_total i id reason steps prio text marker
+  local n_done=0 n_blocked=0 n_new=0 n_total i id reason steps kept prio text marker
   state=$(finalize_state "${run}")
   [ "${state}" = intent ] || { printf '0 0 0 0\n'; return 1; }
   f=$(_finalize_intent_file "${run}") || { printf '0 0 0 0\n'; return 1; }
@@ -359,10 +373,16 @@ EOF
     [ -n "${reason}" ] || reason="not stated"
     # Independently of the marker: the interrupted run may have moved the marker
     # and died before the steps landed, and a `[!]` whose instructions are
-    # missing is the state this file exists to prevent. The working directory is
-    # usually still there - the worksheet is removed at the end of a run, the
-    # directory beside it is not - and when it is not, the reason stands alone.
+    # missing is the state this file exists to prevent. The source the intent
+    # recorded is in the working directory, and it is there only if the run was
+    # killed outright: a run that got to run its trap has already moved it to
+    # the exec directory, which is read second. When neither is there, the
+    # reason stands alone.
     steps=$(jq -r --arg i "${id}" '.blocked[]? | select(.id == $i) | .steps // ""' "${f}" 2>/dev/null | head -1)
+    if [ -n "${steps}" ] && ! [ -r "${steps}" ]; then
+      kept=$(_finalize_kept_steps "${run}" "${id}" 2>/dev/null)
+      [ -n "${kept}" ] && [ -r "${kept}" ] && steps=${kept}
+    fi
     [ -n "${steps}" ] && ledger_steps_install "${backlog}" "${id}" "${steps}" >/dev/null 2>&1
     marker=$(ledger_marker_of_id "${backlog}" "${id}")
     if [ "${marker}" != "!" ]; then

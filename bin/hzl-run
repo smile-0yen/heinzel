@@ -153,8 +153,13 @@ stash_steps() { # [exec-dir]
   [ -n "${dest}" ] && mkdir -p "${dest}" 2>/dev/null
   for f in "${d}"/*.md; do
     [ -f "${f}" ] || continue
+    # Kept before it is removed, and removed only once it is kept: this may be
+    # the only copy of instructions a person has not read yet - a run stopped
+    # between its intent and its merge is finished by the next run, and that
+    # run's recovery reads the copy kept here when the working directory's is
+    # gone. A run with nowhere to keep it leaves it where it is.
     [ -n "${dest}" ] && [ -d "${dest}" ] &&
-      cp "${f}" "${dest}/$(basename "${f}")" 2>/dev/null
+      cp "${f}" "${dest}/$(basename "${f}")" 2>/dev/null || continue
     rm -f "${f}"
   done
   rmdir "${d}" 2>/dev/null

@@ -2040,7 +2040,42 @@ t_ok "and installs the steps the killed run never carried out" \
 t_eq "with the content the agent wrote" \
   "$(cat "${ST_WSDIR}/blocked/h-0201.md")" "$(cat "${ST_HOME}/blocked/h-0201.md")"
 
-unset ST_DIR ST_WSDIR ST_HOME ST_B ST_WS ST_IDS ST_LINE ST_ST ST_CANDS ST_RUN ST_LED2
+# The other way a run stops. SIGKILL leaves the working directory as it was;
+# SIGTERM - the deadline, `hzl off` - runs the trap, and the trap moves the
+# steps to the run's exec directory before the merge ever reached them. The
+# intent still names the working-directory path; recovery must find the copy
+# the run kept, or a run stopped politely loses what a run stopped violently
+# keeps.
+ST_LED3=${ST_HOME}/backlog-3.md
+cat >"${ST_LED3}" <<'FIXTURE'
+# Backlog
+
+## P1
+- [~] (id:h-0201) needs a person <!-- run:20260906-171500 -->
+- [~] (id:h-0202) needs a person too <!-- run:20260906-171500 -->
+FIXTURE
+printf '# h-0201: the same ask, second run\n' >"${ST_WSDIR}/blocked/h-0201.md"
+ST_RUN2=r-20260906T171500-stp002
+ST_EXEC=${ST_DIR}/exec-171500
+runstore_init "${ST_RUN2}"
+finalize_intent "${ST_RUN2}" "${ST_WS}" "${ST_LED3}" 20260906-171500 "${ST_IDS}"
+runstore_snapshot "${ST_RUN2}" "$(jq -n --arg r "${ST_RUN2}" --arg e "${ST_EXEC}" \
+  '{schema_version: 1, run_id: $r, runner_state: "interrupted", exec_dir: $e}')"
+# What `stash_steps` does in the trap: copy to the exec directory, then remove.
+mkdir -p "${ST_EXEC}/blocked"
+mv "${ST_WSDIR}/blocked/h-0201.md" "${ST_EXEC}/blocked/h-0201.md"
+rmdir "${ST_WSDIR}/blocked"
+rm -f "${ST_HOME}/blocked/h-0201.md"
+t_eq "recovery after the trap ran still applies the block" \
+  "0 2 0 0" "$(finalize_recover "${ST_RUN2}" "${ST_LED3}")"
+t_ok "and installs the steps from the copy the run kept with its record" \
+  "$([ -r "${ST_HOME}/blocked/h-0201.md" ]; echo $?)"
+t_eq "with the content of that copy" \
+  "# h-0201: the same ask, second run" "$(cat "${ST_HOME}/blocked/h-0201.md")"
+t_fails "a run whose snapshot names no exec directory has no kept copy" \
+  "$(runstore_init r-20260906T171600-stp003 && _finalize_kept_steps r-20260906T171600-stp003 h-0201 >/dev/null 2>&1; echo $?)"
+
+unset ST_DIR ST_WSDIR ST_HOME ST_B ST_WS ST_IDS ST_LINE ST_ST ST_CANDS ST_RUN ST_LED2 ST_LED3 ST_RUN2 ST_EXEC
 
 # --- a run that was killed does not settle ----------------------------------
 #

@@ -523,8 +523,8 @@ may not be an engineer. So the instructions get a file:
 | The ledger line | Unchanged by any of this. §8's format is what it was, and `reason:` is still the whole of what the ledger says |
 | Written by | The agent, at `<workdir>/.heinzel/blocked/<id>.md` — the only place it can write — before it moves the marker. Or a person, or `hzl steps <id>` |
 | Carried by | The merge, before the marker moves (§8.1). The worksheet is deleted at the end of a run, and steps that die with it were never for the person |
-| Recovery | `finalize_recover` installs them from the source the intent recorded, whatever the marker already says: a `[!]` whose instructions are missing is the state this file exists to prevent |
-| Afterwards | The run's copy is kept in `exec-*/blocked/` and taken out of the working directory, for the reason the worksheet is: a copy left behind is one the *next* run's block would install as its own |
+| Recovery | `finalize_recover` installs them from the source the intent recorded, and when that is gone from the copy the run kept in `exec-*/blocked/` (the run's snapshot names the directory), whatever the marker already says: a `[!]` whose instructions are missing is the state this file exists to prevent. Both sources exist because a run stopped by a signal runs its trap, and the trap is what moves the copy |
+| Afterwards | The run's copy is kept in `exec-*/blocked/` and only then taken out of the working directory, for the reason the worksheet is: a copy left behind is one the *next* run's block would install as its own. A copy that could not be kept is not removed: it may be the only one |
 | Read by | `hzl report` (the path), `hzl take <id>` (the whole file), `hzl steps` (which tasks have one) |
 | Lifetime | Never deleted by the tool. `hzl unblock` leaves it and says where it is: the ask was answered, not made wrong, and a later block on the same task writes its own file over it |
 | Absent | Not an error anywhere. A blocked task with no steps file is still blocked, and the reason on the line is what is left of the ask |

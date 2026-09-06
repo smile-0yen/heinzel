@@ -6,6 +6,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-09-06
+
+The revise the reviewer asked for on 0.3.5, and the gap it listed closed.
+
+### Fixed
+- **Recovery finds the steps of a run that was stopped politely.** 0.3.5 made
+  it normative that `finalize_recover` installs a blocked task's steps "from
+  the source the intent recorded", and recorded the working-directory copy. But
+  a run stopped by a signal — the deadline, `hzl off`, a closed lid — runs its
+  trap, and the trap's `stash_steps` had already moved that copy to
+  `exec-*/blocked/` and removed it from the working directory. So the guarantee
+  held for a run killed with SIGKILL and failed for one stopped with SIGTERM,
+  which is the one `hzl off` sends. Recovery now reads the intent's source
+  first and the copy the run kept second, found through the `exec_dir` in the
+  run's own snapshot (`docs/SPEC.md` §8.0.2, Recovery). And `stash_steps` no
+  longer removes a copy it could not keep: it may be the only one a person has
+  not read yet. Four new assertions cover the trap-then-recover path.
+- `hzl take <id>` on a task with no steps file now says to start one with
+  `hzl steps <id>` — the command that creates the directory and the form —
+  rather than telling the reader to write into a path that may not exist.
+- `hzl steps <id>` refuses to write over a steps file that exists but cannot
+  be read, instead of treating "unreadable" as "absent" and truncating it with
+  the blank form. The file is somebody's; the fix is its permissions.
+
+### Closed
+- The known gap of 0.3.5 — the tasks already in `backlog.blocked.md` had no
+  steps — is closed the way it said it would be: from an interactive session,
+  one task at a time, with each file written against the reviewer's findings
+  as they stand in this tree, and each `reason:` rewritten as the one thing
+  the reader should do.
+
+  527 pass.
+
 ## [0.3.5] - 2026-09-06
 
 ### Added
