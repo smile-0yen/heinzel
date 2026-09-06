@@ -139,6 +139,28 @@ cleanup_ledger() {
   return 0
 }
 
+# The steps the agent wrote for a person, out of the working directory. By the
+# time this runs the merge has already carried them beside the ledger, where a
+# person reads them; what is left here is a copy, and a copy left behind is one
+# the *next* run's block would install as its own. Kept with the run's record
+# first when there is somewhere to keep it.
+#
+# Named files and `rmdir`, never `rm -r` on a path built from configuration.
+stash_steps() { # [exec-dir]
+  local d=${WS_DIR:-}/blocked dest="" f
+  [ -n "${WS_DIR:-}" ] && [ -d "${d}" ] || return 0
+  [ -n "${1:-}" ] && [ -d "$1" ] && dest=$1/blocked
+  [ -n "${dest}" ] && mkdir -p "${dest}" 2>/dev/null
+  for f in "${d}"/*.md; do
+    [ -f "${f}" ] || continue
+    [ -n "${dest}" ] && [ -d "${dest}" ] &&
+      cp "${f}" "${dest}/$(basename "${f}")" 2>/dev/null
+    rm -f "${f}"
+  done
+  rmdir "${d}" 2>/dev/null
+  return 0
+}
+
 # Roll back an in-progress marker left by an interrupted run, and release the
 # lock, whatever happens from here on.
 cleanup() {
@@ -197,8 +219,10 @@ cleanup() {
     with_backlog_lock cleanup_ledger >/dev/null 2>&1
     # An interrupted run leaves its worksheet in the working directory. It is
     # scaffolding, and a stale one would be merged by nothing and read by
-    # nobody.
+    # nobody. The steps beside it go the same way and for the same reason: the
+    # tasks they were written for have just gone back to `[ ]`.
     if [ -n "${WS_DIR:-}" ]; then
+      stash_steps "${EXEC_DIR:-}"
       rm -f "${WS_DIR}/worksheet.md"
       rmdir "${WS_DIR}" 2>/dev/null
     fi
@@ -780,7 +804,11 @@ with_backlog_lock finish_ledger
 
 # Keep the finished worksheet with the rest of the run's record, then take it
 # out of the working directory: it is the runner's scaffolding, not the user's
-# file. rm -f and rmdir, never rm -r on a path built from configuration.
+# file. rm -f and rmdir, never rm -r on a path built from configuration. The
+# steps the agent wrote for a person go first: the merge has already put them
+# beside the ledger, and `rmdir` on a directory that still holds them would
+# leave the working directory with a `blocked/` in it.
+stash_steps "${EXEC_DIR}"
 cp "${WORKSHEET}" "${EXEC_DIR}/worksheet.md" 2>/dev/null
 rm -f "${WORKSHEET}"
 rmdir "${WS_DIR}" 2>/dev/null

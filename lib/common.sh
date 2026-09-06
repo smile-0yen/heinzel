@@ -11,7 +11,7 @@
 # Multibyte truncation is locale-dependent (DESIGN 6.3). Fix it once, here.
 export LC_CTYPE=UTF-8
 
-HEINZEL_VERSION="0.3.4"
+HEINZEL_VERSION="0.3.5"
 
 # The TTL ceiling is deliberately not configurable. A session that can be
 # created with an unbounded lifetime is not a session, it is a mode.
@@ -866,8 +866,9 @@ so do not renumber or delete them by hand.
 BLOCKED_TEMPLATE='# Blocked
 
 Tasks an unattended run stopped on: each needed a judgement call, a privilege, or
-something irreversible it would not do on its own. The reason is in the comment
-at the end of the line, and `hzl take <id>` writes a prompt for one of them.
+something irreversible it would not do on its own. The comment at the end of the
+line says what to do in one line; the steps are in `blocked/<id>.md` beside this
+file, and `hzl take <id>` reads them back with the task.
 
 This file is live, not a record. Change a `[!]` back to `[ ]` here (or run
 `hzl unblock <id>`) and the task returns to the backlog at the next sweep.
@@ -894,6 +895,94 @@ ledger_blocked_file() {
     *) printf '%s.blocked' "${f}" ;;
   esac
 }
+
+# --- the steps a blocked task asks for -------------------------------------
+#
+# A `[!]` line is addressed to a person, and `reason:` is one line. One line can
+# say what to decide; it cannot say which page to open, what to type, and how to
+# tell it worked - and the person reading it in the morning did not see the run
+# and may not be an engineer. So the instructions get a file of their own:
+#
+#   ~/.heinzel/blocked/h-0009.md    beside the ledger, named for the task
+#
+# and the ledger line stays one line. Nothing points at the file, because the id
+# is the pointer: a name derived from the id cannot drift out of step with the
+# line the way a recorded path can, and `hzl report`, `hzl take` and `hzl steps`
+# all ask the same question - is there a file for this id - and get one answer.
+#
+# The agent writes its copy at `<workdir>/.heinzel/blocked/<id>.md`, the only
+# place it can write, and the merge carries it out here. The worksheet is
+# deleted at the end of a run, and steps that die with the worksheet were never
+# for the person.
+ledger_steps_ref() { # id -> the name the ledger's directory knows it by
+  [ -n "${1:-}" ] || return 1
+  printf 'blocked/%s.md' "$1"
+}
+
+ledger_steps_file() { # backlog id
+  local ref
+  [ -n "${1:-}" ] || return 1
+  ref=$(ledger_steps_ref "${2:-}") || return 1
+  printf '%s/%s' "$(dirname "$1")" "${ref}"
+}
+
+# Where the agent left them, if it left any: the same name under the worksheet's
+# own directory, so the run and the ledger agree without being told.
+worksheet_steps_file() { # worksheet id
+  local ref
+  [ -n "${1:-}" ] || return 1
+  ref=$(ledger_steps_ref "${2:-}") || return 1
+  printf '%s/%s' "$(dirname "$1")" "${ref}"
+}
+
+# Copy one run's steps out of the working directory and beside the ledger.
+# Whole and renamed into place, because a reader that opens this file is reading
+# it to act on it, and half a set of instructions is worse than none.
+#
+# Failure is not fatal to a block: a blocked task with no steps file is still
+# blocked, and the reason on the line is what is left of the ask.
+ledger_steps_install() { # backlog id source
+  local dst dir tmp
+  [ -r "${3:-}" ] || return 1
+  dst=$(ledger_steps_file "$1" "$2") || return 1
+  dir=$(dirname "${dst}")
+  mkdir -p "${dir}" 2>/dev/null || return 1
+  tmp=$(mktemp "${dir}/.steps.XXXXXX") || return 1
+  if cat "$3" >"${tmp}" 2>/dev/null && mv -f "${tmp}" "${dst}"; then
+    printf '%s' "${dst}"
+    return 0
+  fi
+  rm -f "${tmp}"
+  return 1
+}
+
+# What a person gets when they ask for a steps file that nobody wrote: the same
+# shape the prompt asks the agent for, with the parts only they can fill in left
+# blank. An empty file would be a worse answer than a form.
+STEPS_TEMPLATE='# %s: %s
+
+## What I need from you
+
+<one sentence: the decision, the permission, or the account>
+
+## Why it stopped here
+
+<two sentences at most, in plain words>
+
+## What to do
+
+1. <the first step - a command to copy, or a page to open>
+2. <the next one>
+
+## How to tell it worked
+
+<what you should see when the step above has worked>
+
+## When you are done
+
+Run `hzl unblock %s` to put the task back in the queue, or
+`hzl done %s "<what changed>"` if you finished it yourself.
+'
 
 # Created on the first sweep that has something to put there, never before: a
 # machine that has closed nothing and blocked nothing has a one-file ledger, and
@@ -1226,7 +1315,7 @@ $(ledger_files "$1")
 EOF
 }
 
-# TSV: date, id, reason, text. The live files only: a blocked task is live work,
+# TSV: date, id, reason, text, steps. The live files only: a blocked task is live work,
 # and the archive holds nothing but completions. Both of them, because a `[!]`
 # written by this run is still in the backlog until the next sweep moves it - the
 # report has to read the same set the sweep moves between.
@@ -1272,6 +1361,26 @@ ledger_blocked() { # backlog
     ' "${lf}"
   done <<EOF
 $(ledger_live_files "$1")
+EOF
+}
+
+# The same read, with a fifth field: the steps file when there is one, empty
+# when there is not. Every human-facing caller wants this one - "is there more
+# to read about this task" is part of what a blocked task is, and leaving the
+# question to each caller is how one caller comes to forget to ask.
+ledger_blocked_rows() { # backlog
+  local row id steps
+  while IFS= read -r row; do
+    [ -n "${row}" ] || continue
+    id=$(printf '%s' "${row}" | cut -f2)
+    steps=""
+    if [ -n "${id}" ]; then
+      steps=$(ledger_steps_file "$1" "${id}" 2>/dev/null)
+      [ -n "${steps}" ] && [ -r "${steps}" ] || steps=""
+    fi
+    printf '%s\t%s\n' "${row}" "${steps}"
+  done <<EOF
+$(ledger_blocked "$1")
 EOF
 }
 
@@ -1472,6 +1581,11 @@ worksheet_merge() {
       "!")
         reason=$(line_meta "${ws}" "${lineno}" | sed -n 's/.*reason:[ 	]*//p')
         [ -n "${reason}" ] || reason="not stated"
+        # The steps go out of the working directory before the marker moves. A
+        # `[!]` a person can see and instructions they cannot open yet is the
+        # one order that reads as "there is nothing more to say".
+        ledger_steps_install "${f}" "${id}" \
+          "$(worksheet_steps_file "${ws}" "${id}")" >/dev/null 2>&1
         backlog_set_state "${f}" "${id}" "!" \
           "blocked:$(iso_at) reason:${reason} run:${run_id}" &&
           n_blocked=$((n_blocked + 1))

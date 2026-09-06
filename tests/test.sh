@@ -1912,6 +1912,136 @@ finalize_recover "${FN_RUN3}" "${FN_LED3}" >/dev/null
 t_fails "and a second recovery is refused here too" "$?"
 t_eq "leaving the total where it was" 1 "$(state_get .tasks_done_total 0)"
 
+# --- the steps a blocked task asks for --------------------------------------
+#
+# `reason:` is one line and a person's next move is usually several. The steps
+# go in `blocked/<id>.md` beside the ledger, written by the agent inside the
+# working directory - the only place it can write - and carried out by the
+# merge. The ledger line does not change shape: the id is the pointer, so a
+# recorded path cannot drift out of step with the line that carries it.
+# SPEC §8.0.2.
+
+group 'the steps a blocked task asks for'
+
+ST_DIR=${TMPROOT}/steps
+ST_WSDIR=${ST_DIR}/work/.heinzel
+ST_HOME=${ST_DIR}/home
+mkdir -p "${ST_WSDIR}" "${ST_HOME}"
+ST_B=${ST_HOME}/backlog.md
+ST_WS=${ST_WSDIR}/worksheet.md
+ST_IDS=${ST_DIR}/ids.txt
+
+t_eq "the ledger knows a steps file by the task's id alone" \
+  "blocked/h-0009.md" "$(ledger_steps_ref h-0009)"
+t_eq "beside the ledger" \
+  "/x/blocked/h-0009.md" "$(ledger_steps_file /x/backlog.md h-0009)"
+t_eq "and beside the worksheet, in the working directory" \
+  "/w/.heinzel/blocked/h-0009.md" "$(worksheet_steps_file /w/.heinzel/worksheet.md h-0009)"
+t_fails "an id nobody gave has no steps file" \
+  "$(ledger_steps_file /x/backlog.md >/dev/null 2>&1; echo $?)"
+t_fails "and steps that were never written are not installed" \
+  "$(ledger_steps_install "${ST_B}" h-0009 "${ST_DIR}/nothing-here.md" >/dev/null 2>&1; echo $?)"
+
+cat >"${ST_B}" <<'FIXTURE'
+# Backlog
+
+## P1
+- [~] (id:h-0201) needs a person <!-- run:20260906-170000 -->
+- [~] (id:h-0202) needs a person too <!-- run:20260906-170000 -->
+FIXTURE
+
+cat >"${ST_WS}" <<'FIXTURE'
+# Worksheet
+
+## P1
+- [!] (id:h-0201) needs a person <!-- reason: log in to the router and read the WAN address -->
+- [!] (id:h-0202) needs a person too <!-- reason: decide which of the two names to keep -->
+FIXTURE
+
+printf 'h-0201\nh-0202\n' >"${ST_IDS}"
+
+mkdir -p "${ST_WSDIR}/blocked"
+cat >"${ST_WSDIR}/blocked/h-0201.md" <<'FIXTURE'
+# h-0201: log in to the router and read the WAN address
+
+## What to do
+
+1. Open http://192.168.1.1 in a browser.
+FIXTURE
+
+t_eq "the merge blocks both tasks" \
+  "0 2 0 0" "$(worksheet_merge "${ST_WS}" "${ST_B}" 20260906-170000 "${ST_IDS}")"
+t_ok "the steps written in the working directory are carried beside the ledger" \
+  "$([ -r "${ST_HOME}/blocked/h-0201.md" ]; echo $?)"
+t_eq "whole, so a person reads what the run wrote" \
+  "$(cat "${ST_WSDIR}/blocked/h-0201.md")" "$(cat "${ST_HOME}/blocked/h-0201.md")"
+t_eq "a block with no steps file leaves none behind" \
+  0 "$(ls "${ST_HOME}/blocked" | grep -c 'h-0202')"
+
+# The ledger line is the assertion that matters: nothing about the steps is
+# recorded on it, so §8's format is the one it always was.
+ST_LINE=$(grep -F '(id:h-0201)' "${ST_B}")
+case ${ST_LINE} in
+  "- [!] (id:h-0201) needs a person <!-- blocked:"*" reason:log in to the router and read the WAN address run:20260906-170000 -->") ST_ST=0 ;;
+  *) ST_ST=1 ;;
+esac
+t_ok "and the ledger line carries the reason and nothing new" "${ST_ST}"
+
+t_eq "the report read still has four fields" \
+  4 "$(ledger_blocked "${ST_B}" | awk -F'\t' '$2 == "h-0201" {print NF}')"
+t_eq "the human read has a fifth: the steps, resolved" \
+  "${ST_HOME}/blocked/h-0201.md" \
+  "$(ledger_blocked_rows "${ST_B}" | awk -F'\t' '$2 == "h-0201" {print $5}')"
+t_eq "and it is empty for a task that has none" \
+  "" "$(ledger_blocked_rows "${ST_B}" | awk -F'\t' '$2 == "h-0202" {print $5}')"
+t_eq "both tasks are still on the read" \
+  2 "$(ledger_blocked_rows "${ST_B}" | grep -c .)"
+
+# A steps file that arrives after the block - `hzl steps <id>`, or a person with
+# an editor - is found by the same read, because existence is the whole record.
+printf '# h-0202\n' >"${ST_HOME}/blocked/h-0202.md"
+t_eq "a steps file written later is found by the same read" \
+  "${ST_HOME}/blocked/h-0202.md" \
+  "$(ledger_blocked_rows "${ST_B}" | awk -F'\t' '$2 == "h-0202" {print $5}')"
+
+# The crash path. A run killed inside the commit is finished by the next run,
+# and the instructions are the useful half of a block: recovery installs them
+# from the source the intent recorded.
+group 'the steps survive an interrupted commit'
+
+ST_LED2=${ST_HOME}/backlog-2.md
+cat >"${ST_LED2}" <<'FIXTURE'
+# Backlog
+
+## P1
+- [~] (id:h-0201) needs a person <!-- run:20260906-171000 -->
+- [~] (id:h-0202) needs a person too <!-- run:20260906-171000 -->
+FIXTURE
+
+ST_CANDS=$(finalize_candidates "${ST_WS}" "${ST_IDS}")
+t_eq "the parse carries the steps the agent wrote" \
+  "${ST_WSDIR}/blocked/h-0201.md" \
+  "$(printf '%s\n' "${ST_CANDS}" | awk -F'\t' '$1 == "blocked" && $2 == "h-0201" {print $3}')"
+t_eq "and nothing where it wrote none" \
+  "" "$(printf '%s\n' "${ST_CANDS}" | awk -F'\t' '$1 == "blocked" && $2 == "h-0202" {print $3}')"
+
+ST_RUN=r-20260906T171000-stp001
+runstore_init "${ST_RUN}"
+finalize_intent "${ST_RUN}" "${ST_WS}" "${ST_LED2}" 20260906-171000 "${ST_IDS}"
+t_eq "the intent records the steps beside the id they belong to" \
+  "${ST_WSDIR}/blocked/h-0201.md" \
+  "$(jq -r '.blocked[] | select(.id == "h-0201") | .steps' \
+     "${HEINZEL_HOME}/runs/${ST_RUN}/finalize.intent.json")"
+
+t_eq "recovery applies the block" \
+  "0 2 0 0" "$(finalize_recover "${ST_RUN}" "${ST_LED2}")"
+t_ok "and installs the steps the killed run never carried out" \
+  "$([ -r "${ST_HOME}/blocked/h-0201.md" ]; echo $?)"
+t_eq "with the content the agent wrote" \
+  "$(cat "${ST_WSDIR}/blocked/h-0201.md")" "$(cat "${ST_HOME}/blocked/h-0201.md")"
+
+unset ST_DIR ST_WSDIR ST_HOME ST_B ST_WS ST_IDS ST_LINE ST_ST ST_CANDS ST_RUN ST_LED2
+
 # --- a run that was killed does not settle ----------------------------------
 #
 # The first of the fault transitions (§21.1): a run interrupted during a task is

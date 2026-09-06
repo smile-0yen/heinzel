@@ -6,6 +6,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-09-06
+
+### Added
+- **The steps a blocked task asks for** (`docs/SPEC.md` §8.0.2). Blocking is
+  how an unattended run hands a task to a person, and almost everything that
+  ends up in `backlog.blocked.md` needs a person to do something. What the
+  ledger said about it was one line, written the wrong way round: *"needs a
+  decision on retention"*, *"permission denied"* — a report on what stopped the
+  run, addressed to nobody, for a reader who did not see the run, did not write
+  the code, and may not be an engineer at all.
+
+  So a block is a request now. The prompt asks for `reason:` in the imperative
+  and addressed to the reader — *"decide how many days of runs to keep, then
+  write the number under the task"* — and for everything that does not fit on
+  one line to go in a file of its own:
+
+  ```
+  ~/.heinzel/blocked/h-0009.md
+  ```
+
+  written to a fixed shape: what is needed from you, why it stopped here, the
+  steps in order with every command written out in full, what you should see
+  when each one worked, and how to hand the task back. The prompt spells out
+  what that register means — absolute paths, no `<placeholders>` inside a
+  command, no jargon that is not explained in the same sentence, and a
+  recommendation whenever there is a choice to make.
+
+  The agent writes its copy at `<workdir>/.heinzel/blocked/<id>.md`, the only
+  place it can write, and the merge carries it out beside the ledger *before*
+  the marker moves: a `[!]` a person can see and instructions they cannot open
+  yet reads as "there is nothing more to say". `finalize_recover` installs them
+  too, from the source the intent now records, so a commit finished by a later
+  run is not finished without them. The run's copy is kept in `exec-*/blocked/`
+  and taken out of the working directory, for the reason the worksheet is: a
+  copy left behind is one the next run's block would install as its own.
+
+  **Nothing about the file is recorded on the task line.** The name follows
+  from the id, so §8's format is exactly what it was and a stored path cannot
+  drift out of step with the line that carries it. Existence is the whole
+  record, which is also why a steps file written days later — by a person, or
+  by `hzl steps <id>` — is found by the same read.
+- `hzl steps` — which blocked tasks have instructions for you and which do not;
+  `hzl steps <id>` starts one from a form for a task that has none. It never
+  writes over a file that exists: once it is there it belongs to whoever wrote
+  it.
+
+### Changed
+- `hzl report` prints the steps path under each blocked task, or the command
+  that starts one. `--json` gains `steps` on each blocked entry, `null` when no
+  file was written.
+- `hzl take <id>` pastes the whole steps file into the prompt rather than a
+  path — what goes into a session has to carry the instructions with it, or the
+  session is left guessing at them the way the run that stopped was.
+- `hzl block` says how to start the steps; `hzl unblock` says where the ones it
+  just answered still are. Nothing deletes them: a later block on the same task
+  writes its own file over it.
+- `ledger_blocked_rows` is the human-facing read (five fields, the steps
+  resolved); `ledger_blocked` is unchanged at four, so every existing reader of
+  it is too.
+
+  21 new assertions; 523 pass.
+
+### Known gap
+- The tasks already sitting in `backlog.blocked.md` have no steps files. They
+  cannot get them from an unattended run: the ledger is outside every run's
+  sandbox by design, and this one could not read it to see what each of them is
+  waiting for. `hzl steps` and `hzl take <id>` are the two commands that close
+  that gap from an interactive session, one task at a time.
+
 ## [0.3.4] - 2026-09-06
 
 ### Added

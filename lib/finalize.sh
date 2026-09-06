@@ -85,17 +85,22 @@ finalize_state() { # run-id
 # would act on:
 #
 #   done<TAB><id><TAB><TAB>
-#   blocked<TAB><id><TAB><TAB><reason>
+#   blocked<TAB><id><TAB><steps><TAB><reason>
 #   reopen<TAB><id><TAB><TAB>
 #   new<TAB><TAB><prio><TAB><text>
 #   ignored<TAB><id><TAB><TAB>
+#
+# `steps` is the file in the working directory the agent wrote its instructions
+# for a person in, when it wrote one. It is carried through the intent so that a
+# recovery has it too: the instructions are the useful half of a block, and a
+# commit finished by a later run must not finish it without them.
 #
 # Nothing here writes. That is the point of separating it: the list of what is
 # about to happen has to exist before any of it happens, or there is nothing to
 # put in the intent. The scope check — an id the run was not given is `ignored`,
 # never applied — is the same one `worksheet_merge` makes, made earlier.
 finalize_candidates() { # worksheet allowed-ids
-  local ws=$1 allowed=$2 rows row allow_list lineno prio marker id text reason
+  local ws=$1 allowed=$2 rows row allow_list lineno prio marker id text reason steps
   [ -r "${ws}" ] && [ -r "${allowed}" ] || return 1
   allow_list=" $(tr '\n' ' ' <"${allowed}") "
   rows=$(backlog_scan "${ws}" 2>/dev/null)
@@ -126,7 +131,9 @@ finalize_candidates() { # worksheet allowed-ids
       "!")
         reason=$(line_meta "${ws}" "${lineno}" | sed -n 's/.*reason:[ 	]*//p')
         [ -n "${reason}" ] || reason="not stated"
-        printf 'blocked\t%s\t\t%s\n' "${id}" "$(oneline "${reason}")"
+        steps=$(worksheet_steps_file "${ws}" "${id}" 2>/dev/null)
+        [ -n "${steps}" ] && [ -r "${steps}" ] || steps=""
+        printf 'blocked\t%s\t%s\t%s\n' "${id}" "${steps}" "$(oneline "${reason}")"
         ;;
       *) printf 'reopen\t%s\t\t\n' "${id}" ;;
     esac
@@ -153,9 +160,10 @@ finalize_intent() { # run-id worksheet backlog legacy-run-id allowed [identity]
   [ -d "${dir}" ] || return 1
   cands=$(finalize_candidates "${ws}" "${allowed}") || return 1
   blocked_json=$(printf '%s\n' "${cands}" |
-    awk -F'\t' '$1 == "blocked" && $2 != "" {printf "%s\t%s\n", $2, $4}' |
+    awk -F'\t' '$1 == "blocked" && $2 != "" {printf "%s\t%s\t%s\n", $2, $4, $3}' |
     jq -R -s -c 'split("\n") | map(select(length > 0)) |
-                 map(split("\t")) | map({id: .[0], reason: (.[1] // "")})')
+                 map(split("\t")) |
+                 map({id: .[0], reason: (.[1] // ""), steps: (.[2] // "")})')
   new_json=$(printf '%s\n' "${cands}" |
     awk -F'\t' '$1 == "new" {printf "%s\t%s\n", $3, $4}' |
     jq -R -s -c 'split("\n") | map(select(length > 0)) |
@@ -319,7 +327,7 @@ EOF
 # reached its own counter, so nothing it did has been counted (§14.1).
 finalize_recover() { # run-id backlog
   local run=$1 backlog=$2 f state expected now legacy applied_done=0
-  local n_done=0 n_blocked=0 n_new=0 n_total i id reason prio text marker
+  local n_done=0 n_blocked=0 n_new=0 n_total i id reason steps prio text marker
   state=$(finalize_state "${run}")
   [ "${state}" = intent ] || { printf '0 0 0 0\n'; return 1; }
   f=$(_finalize_intent_file "${run}") || { printf '0 0 0 0\n'; return 1; }
@@ -349,6 +357,13 @@ EOF
     [ -n "${id}" ] || continue
     reason=$(jq -r --arg i "${id}" '.blocked[]? | select(.id == $i) | .reason' "${f}" 2>/dev/null | head -1)
     [ -n "${reason}" ] || reason="not stated"
+    # Independently of the marker: the interrupted run may have moved the marker
+    # and died before the steps landed, and a `[!]` whose instructions are
+    # missing is the state this file exists to prevent. The working directory is
+    # usually still there - the worksheet is removed at the end of a run, the
+    # directory beside it is not - and when it is not, the reason stands alone.
+    steps=$(jq -r --arg i "${id}" '.blocked[]? | select(.id == $i) | .steps // ""' "${f}" 2>/dev/null | head -1)
+    [ -n "${steps}" ] && ledger_steps_install "${backlog}" "${id}" "${steps}" >/dev/null 2>&1
     marker=$(ledger_marker_of_id "${backlog}" "${id}")
     if [ "${marker}" != "!" ]; then
       backlog_set_state "${backlog}" "${id}" "!" \

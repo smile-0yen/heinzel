@@ -110,6 +110,7 @@ Privileged subcommands escalate internally.
 | `done` | `<id> [note]` | 0 / 1 / **3** |
 | `block` | `<id> <reason>` | 0 / 1 / **3** |
 | `unblock` | `<id>` | 0 / 1 / **3** |
+| `steps` | `[id]` | 0 / 1 / **3** no such id |
 | `archive` | — | 0 / 1 |
 | `report` | `--days N`, `--json`, `--quiet` | **0** nothing blocked, **10** something is, 1 error |
 | `run-now` | `--dry-run` | the runner's exit code |
@@ -500,10 +501,33 @@ and asking only the backlog is a defect:
 
 | Element | Rule |
 |---|---|
-| Blocked | Every `[!]` in the live files, with its `blocked:` date and its `reason:`. The trailing `run:<id>` is stripped — it is a record, not a sentence for a person |
+| Blocked | Every `[!]` in the live files, with its `blocked:` date, its `reason:`, and the path of its steps file (§8.0.2) or the command that starts one. The trailing `run:<id>` is stripped — it is a record, not a sentence for a person |
 | Completed | Every `[x]` across the ledger whose `done:` date is on or after `today − days` (default 1 day) |
 | Exit code | `10` when anything is blocked, `0` otherwise, so that a scheduled `hzl report --quiet \|\| notify` needs no output parsing |
-| `--json` | The same content as `{since, backlog, blocked_file, archive, todo, blocked[], completed[]}` |
+| `--json` | The same content as `{since, backlog, blocked_file, archive, todo, blocked[], completed[]}`; each blocked entry is `{at, id, reason, text, steps}` and `steps` is `null` when no file was written |
+
+### 8.0.2 The steps a blocked task asks for (normative)
+
+A `[!]` line is addressed to a person, and `reason:` is one line. One line can
+say what to decide; it cannot say which page to open, what to type, and how to
+tell it worked — and the reader did not see the run, did not write the code, and
+may not be an engineer. So the instructions get a file:
+
+```
+~/.heinzel/blocked/h-0009.md      beside the ledger, named for the task
+```
+
+| Element | Rule |
+|---|---|
+| Path | `blocked/<id>.md` in the ledger's own directory. Derived from the id, never configured and never recorded on the task line: a name that follows from the id cannot drift out of step with the line, the way a stored path can |
+| The ledger line | Unchanged by any of this. §8's format is what it was, and `reason:` is still the whole of what the ledger says |
+| Written by | The agent, at `<workdir>/.heinzel/blocked/<id>.md` — the only place it can write — before it moves the marker. Or a person, or `hzl steps <id>` |
+| Carried by | The merge, before the marker moves (§8.1). The worksheet is deleted at the end of a run, and steps that die with it were never for the person |
+| Recovery | `finalize_recover` installs them from the source the intent recorded, whatever the marker already says: a `[!]` whose instructions are missing is the state this file exists to prevent |
+| Afterwards | The run's copy is kept in `exec-*/blocked/` and taken out of the working directory, for the reason the worksheet is: a copy left behind is one the *next* run's block would install as its own |
+| Read by | `hzl report` (the path), `hzl take <id>` (the whole file), `hzl steps` (which tasks have one) |
+| Lifetime | Never deleted by the tool. `hzl unblock` leaves it and says where it is: the ask was answered, not made wrong, and a later block on the same task writes its own file over it |
+| Absent | Not an error anywhere. A blocked task with no steps file is still blocked, and the reason on the line is what is left of the ask |
 
 ### 8.1 The worksheet (normative)
 
@@ -528,13 +552,14 @@ or `[!]` appears on it.
 | The id list | `exec-*/worksheet-ids.txt`, in the log tree — **not** under `workdir`. It is what the merge checks the agent's work against, so it is out of the agent's reach |
 | Markers the agent may write | `[x]`, `[!]`. `[~]` is the runner's |
 | Metadata the agent may write | `<!-- reason:… -->` on a `[!]` line, and nothing else. Timestamps and `run:` are written by the merge: an agent has no clock, and `run:` is what lets a reject revert this run's work and nobody else's |
+| Files the agent may write beside it | `blocked/<id>.md`, the steps that block asks of a person (§8.0.2). The directory is the worksheet's own, so the run and the ledger agree on the name without being told |
 
 Merge rules, applied by id:
 
 | Worksheet line | Effect on the ledger |
 |---|---|
 | `[x]`, id on the id list | `[x]` with `done:<ISO8601> run:<RUN_ID>` |
-| `[!]`, id on the id list | `[!]` with `blocked:<ISO8601> reason:<reason> run:<RUN_ID>`; reason `not stated` if absent |
+| `[!]`, id on the id list | `[!]` with `blocked:<ISO8601> reason:<reason> run:<RUN_ID>`; reason `not stated` if absent. Any `blocked/<id>.md` beside the worksheet is installed beside the ledger first (§8.0.2) — a `[!]` a person can see and instructions they cannot open yet reads as "there is nothing more to say" |
 | `[ ]` or `[~]`, id on the id list | back to `[ ]`, metadata cleared |
 | Any marker, id **not** on the id list | **not applied**, counted as ignored |
 | `[ ]` with no id | new task, inserted at the end of its priority section (after that section's last task *and its continuation lines*) |

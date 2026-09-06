@@ -170,10 +170,12 @@ managed for you:
 |---|---|
 | `hzl next` | What would be picked up next, and why. When nothing is free it lists what is in progress and which run holds it, rather than reading as an empty backlog |
 | `hzl take` | Everything blocked, with priorities |
-| `hzl take <id>` | A prompt to paste into an interactive session |
+| `hzl take <id>` | The task and its steps, as a prompt to paste into an interactive session |
 | `hzl done <id> "note"` | Close it out by hand |
 | `hzl block <id> "reason"` | Park it. The reason is required |
 | `hzl unblock <id>` | Put it back in the queue |
+| `hzl steps` | Which blocked tasks have instructions for you, and which do not |
+| `hzl steps <id>` | Start the instructions for one, from a form |
 | `hzl archive` | Run the sweep by hand: closed and blocked out, unblocked back in |
 | `hzl report` | The morning read: what is blocked, what got done |
 
@@ -186,6 +188,35 @@ rather than in the queue, because the queue is what happens next.
 needs a judgement call, a credential, or anything irreversible, the right
 answer is to stop and say why. `hzl report` in the morning is the normal way to
 use this, not an exception.
+
+### A blocked task is a request, and it comes with steps
+
+Blocking is how an unattended run hands a task to you, so the agent is told to
+write the block as a request rather than as a report: `reason:` is one line, in
+the imperative, saying the first thing for you to do. Everything that does not
+fit on one line goes in a file of its own:
+
+```
+~/.heinzel/blocked/h-0009.md
+```
+
+named for the task and sitting beside the ledger. It is written for somebody
+who was not there and is not necessarily an engineer: what is needed from you,
+why it stopped, the steps in order with the commands written out in full, what
+you should see when each one works, and how to hand the task back.
+
+```
+hzl report        every blocked task, its one-line ask, and where its steps are
+hzl take <id>     the task and the whole steps file, ready to paste into a session
+hzl steps         which of them have steps and which do not
+hzl steps <id>    start the steps for one, from a form, and fill it in yourself
+```
+
+Nothing points at the file from inside the ledger: the name follows from the
+id, so a task line and its instructions cannot drift apart. A task blocked
+before any of this — or parked by hand with `hzl block` — has a reason and no
+steps, and `hzl steps <id>` is how it gets some. Unblocking leaves the file
+where it is; it is what was asked of you, not a mistake.
 
 ### What the machine cannot pick up leaves the file
 

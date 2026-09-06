@@ -879,7 +879,7 @@ cmd_take() {
     return 0
   fi
 
-  local f text marker lineno
+  local f text marker lineno steps
   # The file the line is in, so that the notes under it are read from the same
   # place the text was - and so the prompt names the file a person can open.
   f=$(ledger_file_of_id "${b}" "${id}") || { err "no such id: ${id}"; exit 3; }
@@ -893,9 +893,20 @@ cmd_take() {
   printf '  %s\n' "${text}"
   backlog_notes_for_line "${f}" "${lineno}"
   if [ "${marker}" = "!" ]; then
-    printf '\nThis was blocked by an unattended run, which means it needed a\n'
-    printf 'judgement call, a privilege, or an irreversible action it would not take\n'
-    printf 'on its own. Work out what it needs, then do it with me.\n'
+    steps=$(ledger_steps_file "${b}" "${id}")
+    if [ -n "${steps}" ] && [ -r "${steps}" ]; then
+      # The whole file, not a path. What is pasted into a session has to carry
+      # the instructions with it, or the session is being asked to guess at them
+      # the same way the run that stopped was.
+      printf '\nThe run that stopped on this left instructions in %s:\n\n' "${steps}"
+      sed 's/^/  /' "${steps}"
+    else
+      printf '\nThis was blocked by an unattended run, which means it needed a\n'
+      printf 'judgement call, a privilege, or an irreversible action it would not take\n'
+      printf 'on its own. It left no instructions, so work out what it needs, do it\n'
+      printf 'with me, and write down what you did in %s\n' "${steps}"
+      printf 'so that the next person - or the next block - starts from it.\n'
+    fi
   fi
   printf '\nWhen it is finished, close it out with:  hzl done %s "<what changed>"\n' "${id}"
   printf '\n--- end ---\n\n'
@@ -955,13 +966,15 @@ cmd_block() {
   esac
   good "${id} blocked: ${reason}"
   dim "  it is in $(ledger_blocked_file "${b}") now, with the rest of what needs you"
+  dim "  'hzl steps ${id}' starts the instructions, for when one line is not enough"
 }
 
 cmd_unblock() {
   require_not_root
-  local b id=${1:-}
+  local b id=${1:-} steps
   [ -n "${id}" ] || die "usage: hzl unblock <id>"
   b=$(need_backlog) || exit 1
+  steps=$(ledger_steps_file "${b}" "${id}")
   with_backlog_lock set_state_and_sweep "${b}" "${id}" " " ""
   case $? in
     0) ;;
@@ -969,6 +982,69 @@ cmd_unblock() {
     *) die "could not update ${b}" ;;
   esac
   good "${id} is back in the queue."
+  # Left where it is deliberately. The instructions were answered rather than
+  # made wrong, and a run that blocks this task again writes its own file over
+  # this one; nothing reads it while the task is not `[!]`.
+  [ -n "${steps}" ] && [ -r "${steps}" ] &&
+    dim "  what it asked of you is still in ${steps}"
+  return 0
+}
+
+# The instructions a blocked task asks for, for the tasks that have none: a
+# block written by `hzl block`, or by a run from before the steps file existed,
+# carries one line of reason and nothing more. One line can say what to decide.
+# It cannot say which page to open, what to type, or how to tell it worked.
+#
+# With no id this says which blocked tasks are still missing theirs. With an id
+# it creates the file from the skeleton and prints the path. It never writes
+# over a file that is there: once it exists, it belongs to whoever wrote it.
+cmd_steps() {
+  require_not_root
+  local b id=${1:-} rows row n reason steps
+  b=$(need_backlog) || exit 1
+  rows=$(ledger_blocked_rows "${b}")
+
+  if [ -z "${id}" ]; then
+    n=$(printf '%s' "${rows}" | grep -c .)
+    if [ "${n}" -eq 0 ]; then
+      say "nothing is blocked, so nothing is waiting for steps."
+      return 0
+    fi
+    printf '\n'
+    say "what each blocked task asks of you:"
+    printf '\n'
+    printf '%s\n' "${rows}" |
+      awk -F'\t' '{ if ($5 != "") s = $5; else s = "no steps yet - '\''hzl steps " $2 "'\'' starts one"
+                    printf "  %-8s %s\n           %s\n", $2, $4, s }'
+    printf '\n'
+    return 0
+  fi
+
+  row=$(printf '%s\n' "${rows}" | awk -F'\t' -v i="${id}" '$2 == i' | head -1)
+  if [ -z "${row}" ]; then
+    ledger_file_of_id "${b}" "${id}" >/dev/null 2>&1 ||
+      { err "no such id: ${id}"; exit 3; }
+    die "${id} is not blocked - steps are for the tasks that are waiting on you"
+  fi
+
+  steps=$(printf '%s' "${row}" | cut -f5)
+  if [ -n "${steps}" ]; then
+    say "${id} already has steps:"
+    printf '  %s\n' "${steps}"
+    return 0
+  fi
+
+  reason=$(printf '%s' "${row}" | cut -f3)
+  steps=$(ledger_steps_file "${b}" "${id}") || die "could not name a steps file for ${id}"
+  mkdir -p "$(dirname "${steps}")" || die "could not create $(dirname "${steps}")"
+  # shellcheck disable=SC2059
+  printf "${STEPS_TEMPLATE}" "${id}" "${reason}" "${id}" "${id}" >"${steps}" ||
+    die "could not write ${steps}"
+  good "${id}: a form to fill in is waiting at"
+  printf '  %s\n' "${steps}"
+  dim "  replace each <angle bracket> with what a person who was not here should do"
+  dim "  'hzl take ${id}' pastes the task and the steps into an interactive session"
+  return 0
 }
 
 # The same sweep the runner does at the top of a run, on demand. Both halves of
@@ -1026,7 +1102,7 @@ cmd_report() {
   since=$(date -v-"${days}"d +%F 2>/dev/null)
   [ -n "${since}" ] || die "could not compute a date ${days} day(s) ago"
 
-  blocked=$(ledger_blocked "${b}")
+  blocked=$(ledger_blocked_rows "${b}")
   completions=$(ledger_completed_since "${b}" "${since}")
   n_blocked=$(printf '%s' "${blocked}" | grep -c . )
   n_done=$(printf '%s' "${completions}" | grep -c . )
@@ -1039,7 +1115,7 @@ cmd_report() {
       --arg archive "$(ledger_archive "${b}")" \
       --arg blocked_file "$(ledger_blocked_file "${b}")" \
       --argjson todo "${n_todo}" \
-      --argjson blocked "$(printf '%s\n' "${blocked}" | jq -R -s -c 'split("\n") | map(select(length > 0)) | map(split("\t")) | map({at: .[0], id: .[1], reason: .[2], text: .[3]})')" \
+      --argjson blocked "$(printf '%s\n' "${blocked}" | jq -R -s -c 'split("\n") | map(select(length > 0)) | map(split("\t")) | map({at: .[0], id: .[1], reason: .[2], text: .[3], steps: (if (.[4] // "") == "" then null else .[4] end)})')" \
       --argjson completed "$(printf '%s\n' "${completions}" | jq -R -s -c 'split("\n") | map(select(length > 0)) | map(split("\t")) | map({at: .[0], id: .[1], text: .[2]})')" \
       '{since: $since, backlog: $backlog, blocked_file: $blocked_file,
         archive: $archive, todo: $todo, blocked: $blocked, completed: $completed}'
@@ -1058,9 +1134,14 @@ cmd_report() {
   else
     bad "${n_blocked} task(s) blocked, waiting for you:"
     printf '\n'
+    # The reason is the ask, in one line. The steps are the rest of it, and the
+    # path is printed rather than the file: this is a list to triage, and the
+    # one item you decide to do is the one you open.
     printf '%s\n' "${blocked}" |
-      awk -F'\t' '{printf "  %-8s %-11s %s\n           %s\n", $2, $1, $4, $3}'
-    dim "  'hzl take <id>' prints a prompt for an interactive session"
+      awk -F'\t' '{printf "  %-8s %-11s %s\n           %s\n", $2, $1, $4, $3
+                   if ($5 != "") printf "           steps: %s\n", $5
+                   else printf "           steps: none written - '\''hzl steps %s'\'' starts one\n", $2}'
+    dim "  'hzl take <id>' prints the task and its steps for an interactive session"
   fi
 
   printf '\n'
@@ -1510,10 +1591,12 @@ session (unattended work)
 
 backlog
   hzl next                   what would be picked up next
-  hzl take [id]              list blocked tasks, or print a prompt for one
+  hzl take [id]              list blocked tasks, or print one with its steps
   hzl done <id> [note]       close a task out by hand
   hzl block <id> <reason>    park a task; a reason is required
   hzl unblock <id>           put it back in the queue
+  hzl steps [id]             which blocked tasks have instructions for you, or
+                             start the instructions for one
   hzl archive                sweep what is closed and what is blocked out of
                              the backlog, and what is unblocked back into it
   hzl report [options]       the morning read: what is blocked, what got done.
@@ -1555,6 +1638,7 @@ case ${cmd} in
   done) cmd_done "$@" ;;
   block) cmd_block "$@" ;;
   unblock) cmd_unblock "$@" ;;
+  steps) cmd_steps "$@" ;;
   archive) cmd_archive "$@" ;;
   report) cmd_report "$@" ;;
   run-now) cmd_runnow "$@" ;;

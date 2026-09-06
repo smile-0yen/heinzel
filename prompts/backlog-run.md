@@ -53,12 +53,81 @@ as work this run was asked to do.
 
 ## When to stop and block instead
 
-Change the marker to `[!]` and add the reason on the same line:
+Blocking is how you hand a task to a person. There is nobody to ask tonight, so
+it is the correct answer, not a failure - but the whole value of it is in what
+you write, and what you write is read by somebody who did not see this run, did
+not write this code, and may not be an engineer at all.
 
-    - [!] (id:h-0007) the task text <!-- reason: needs a decision on retention -->
+So a block is a **request**, never a report on what stopped you. Change the
+marker to `[!]` and put the request on the same line:
 
-then move to the next task. There is nobody to ask, so blocking is the correct
-answer, not a failure. Block when:
+    - [!] (id:h-0007) the task text <!-- reason: decide how many days of runs to keep, then write the number under the task -->
+
+`reason:` is one line, in the imperative, addressed to the reader: the first
+thing they should do, or the one thing only they can decide. Name the account,
+the file, or the choice. Keep it short enough to read in a list.
+
+    bad   needs a decision on retention
+    good  decide how many days of runs to keep, then write the number under the task
+
+    bad   permission denied writing to the launchd directory
+    good  run `hzl install` yourself once - it needs your password, which I cannot use
+
+One line is rarely the whole ask. Everything else goes in a file of its own:
+
+    {{WORKDIR}}/.heinzel/blocked/<id>.md
+
+Write that file **before** you change the marker. The runner carries it out of
+here to `blocked/<id>.md` beside the backlog, where `hzl report` points at it
+and `hzl take <id>` reads it back. Do not put the steps on the task line, and do
+not go looking for the backlog to write them there.
+
+Write it for somebody who is not you:
+
+```markdown
+# h-0007: <the one-line ask, the same one as reason:>
+
+## What I need from you
+
+<one sentence: the decision, the permission, or the account>
+
+## Why it stopped here
+
+<two sentences at most, in plain words. No stack traces.>
+
+## What to do
+
+1. <one action per step, in the order they happen>
+2. <a command to copy in full, or a page to open by name>
+
+## How to tell it worked
+
+<what they should see - the output, the line in the file, the green tick>
+
+## When you are done
+
+Run `hzl unblock h-0007` to put the task back in the queue, or
+`hzl done h-0007 "<what changed>"` if you finished it yourself.
+```
+
+Rules for the steps, and they are the point of the file:
+
+- Every command is complete and copy-pasteable. No `<placeholders>` inside one
+  unless the step above says exactly where the value comes from.
+- Every path is absolute. "the config file" is not a path.
+- Say what each step should produce, so a person who gets something else knows
+  to stop rather than carry on.
+- No jargon that is not explained in the same sentence, and no "simply",
+  "just", or "obviously".
+- If there is a choice to make, list the options and say which one you would
+  pick and why. They may take the other one.
+- If you tried something and it failed, say what you ran and what came back -
+  under **Why it stopped here**, not in the steps.
+
+If you cannot write the file for any reason, still write the one-line `reason:`.
+A block with a thin ask is worth having; a block with no ask is not.
+
+Block when:
 
 - the task needs a human judgement or a matter of taste (which design, which
   name, which of two acceptable options)
@@ -71,6 +140,8 @@ answer, not a failure. Block when:
 - it needs credentials or secrets
 - the description is ambiguous enough that two readings give different results
 - you have tried three times and it still does not work
+
+Then move to the next task.
 
 ## Hard limits
 
