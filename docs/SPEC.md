@@ -875,6 +875,17 @@ The second-precision `RUN_ID` is unchanged and still what the ledger's `run:`
 provenance and `runs.jsonl` are written in. The store records it as
 `legacy_run_id` rather than replacing it.
 
+> **Normative: a run's directory is created exclusively, never reopened.**
+> `runstore_init` uses `mkdir`, not `mkdir -p`, so an id that has been used
+> before fails there. Reopening would append one run's events to another run's
+> `events.jsonl`, leaving a single audit trail that is a faithful record of
+> neither and says nothing about it. `runstore_new_id` checks the same thing
+> before handing an id out (`runstore_id_free`) and tries again, but that is the
+> cheap half: the exclusive `mkdir` is what holds for a caller that minted its
+> id some other way. A run whose store cannot be created keeps no durable record
+> of itself — which the runner already handles, and which is a state it reports
+> — and writes into no other run's.
+
 ```json
 {
   "schema_version": 1,

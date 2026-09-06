@@ -21,7 +21,8 @@
 #   runstore_new_id                             -> a sortable run id
 #   runstore_dir      <run-id>                  -> the path, or a refusal
 #   runstore_is_run_id <name>                   -> is this a store, or something else
-#   runstore_init     <run-id>                  -> creates it
+#   runstore_id_free  <run-id>                  -> is there nothing under it yet
+#   runstore_init     <run-id>                  -> creates it, or fails if it is there
 #   runstore_snapshot <run-id> <json>           -> replaces workflow.json
 #   runstore_set_state <run-id> <state>         -> moves the state, keeps the rest
 #   runstore_read     <run-id>                  -> the snapshot on stdout
@@ -54,19 +55,44 @@ RUNSTORE_SCHEMA=1
 # existing second-precision `RUN_ID` stays exactly as it is — it is what the
 # ledger's `run:` provenance and `runs.jsonl` are written in, and this store
 # records it rather than replacing it.
+#
+# An id whose store already exists is not handed out. The suffix makes that
+# almost impossible, but a durable record is exactly the thing not to leave to
+# "almost": the fallback suffix below is drawn from `RANDOM`, which two runs
+# started from the same seeded shell would draw alike. This is the cheap half of
+# the guarantee and `runstore_init` is the other half — it creates the directory
+# exclusively, so an id that slips past this check still cannot reopen another
+# run's store. Bounded, because a caller waiting on an id it will not get is
+# worse than a caller told it has no store.
 runstore_new_id() {
-  local stamp suffix
-  stamp=$(date +%Y%m%dT%H%M%S)
-  # tr takes a SIGPIPE when head has had enough, which is why the result is
-  # checked for shape rather than the pipeline for status.
-  suffix=$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom 2>/dev/null | head -c 6)
-  case ${suffix} in
-    [a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9]) ;;
-    # No /dev/urandom, or a tr that gave up early. Still six characters, still
-    # from the same alphabet, and still different between two runs in a second.
-    *) suffix=$(printf '%06x' $(( ((RANDOM * 32768) + RANDOM) % 16777216 ))) ;;
-  esac
-  printf 'r-%s-%s' "${stamp}" "${suffix}"
+  local stamp suffix id tries=0
+  while :; do
+    stamp=$(date +%Y%m%dT%H%M%S)
+    # tr takes a SIGPIPE when head has had enough, which is why the result is
+    # checked for shape rather than the pipeline for status.
+    suffix=$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom 2>/dev/null | head -c 6)
+    case ${suffix} in
+      [a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9]) ;;
+      # No /dev/urandom, or a tr that gave up early. Still six characters, still
+      # from the same alphabet, and still different between two runs in a second.
+      *) suffix=$(printf '%06x' $(( ((RANDOM * 32768) + RANDOM) % 16777216 ))) ;;
+    esac
+    id="r-${stamp}-${suffix}"
+    runstore_id_free "${id}" && break
+    tries=$((tries + 1))
+    [ "${tries}" -ge 8 ] && break
+  done
+  printf '%s' "${id}"
+}
+
+# Is this id still free — is there nothing under it? The check `runstore_new_id`
+# makes before handing an id out. A name that is not a run id is not free
+# either: it has no directory this file would agree to make.
+runstore_id_free() { # id
+  local dir
+  dir=$(runstore_dir "$1" 2>/dev/null) || return 1
+  [ -e "${dir}" ] && return 1
+  return 0
 }
 
 # The directory for a run, and the one place a run id becomes a path. A id that
@@ -95,10 +121,22 @@ runstore_is_run_id() { # name
   esac
 }
 
+# Create a run's directory, and fail if it is already there.
+#
+# `mkdir`, never `mkdir -p`: -p succeeds on a directory that exists, so a run id
+# that had been handed out twice would have reopened the first run's store and
+# appended this run's events to its audit trail. The result is one events.jsonl
+# that is a faithful record of neither run, and nothing in the file says so. A
+# run that cannot have a store of its own is told it has none — the store is
+# best-effort, and being without one is a state the runner already handles.
+#
+# The parent is created with -p because `runs/` is shared by every run, so its
+# existence carries no information at all.
 runstore_init() {
   local id=$1 dir
   dir=$(runstore_dir "${id}") || return 1
-  mkdir -p "${dir}" || return 1
+  mkdir -p "${HEINZEL_HOME}/runs" || return 1
+  mkdir "${dir}" || return 1
   chmod 700 "${dir}" 2>/dev/null
   return 0
 }

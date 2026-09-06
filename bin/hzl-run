@@ -552,7 +552,7 @@ if runstore_init "${STORE_RUN_ID}"; then
   store_event run.queued \
     "${MAX_TASKS} task(s) allowed, ${TODO_BEFORE} todo, trigger ${TRIGGER}"
 else
-  log_event skip "could not create the run store for ${STORE_RUN_ID}"
+  log_event skip "could not create the run store for ${STORE_RUN_ID}; this run keeps no durable record of itself, and writes into no other run's"
 fi
 
 WS_DIR="${WORKDIR}/.heinzel"

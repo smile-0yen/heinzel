@@ -1489,6 +1489,42 @@ RS_DIR=$(runstore_dir "${RS_ID}")
 [ -d "${RS_DIR}" ]
 t_ok "and the directory is really there" "$?"
 
+# The directory is created exclusively. An id handed out twice must not reopen
+# the first run's store: two runs appending to one events.jsonl would leave a
+# single audit trail that is a faithful record of neither, and nothing in the
+# file would say so. A run that cannot have a store of its own is told it has
+# none, which the runner already handles.
+RS_TWICE=r-20260906T090000-twice1
+runstore_init "${RS_TWICE}"
+t_ok "a store is created for an id nothing has used" "$?"
+runstore_event "${RS_TWICE}" run.queued "the first run's line" >/dev/null 2>&1
+runstore_init "${RS_TWICE}" 2>/dev/null
+t_fails "and a second init of the same id is refused, not silently reopened" "$?"
+t_eq "so the first run's audit trail is still only its own" \
+  1 "$(wc -l <"$(runstore_dir "${RS_TWICE}")/events.jsonl" | tr -d ' ')"
+
+# The check `runstore_new_id` makes before handing an id out — the cheap half
+# of the same guarantee, in front of the exclusive mkdir rather than instead
+# of it.
+runstore_id_free "${RS_TWICE}"
+t_fails "an id with a store under it is not free" "$?"
+runstore_id_free r-20260906T090000-never1
+t_ok "and one with nothing under it is" "$?"
+runstore_id_free "../../etc/passwd" 2>/dev/null
+t_fails "a name that could not have a store is not free either" "$?"
+rm -rf "$(runstore_dir "${RS_TWICE}")"
+
+# `runs/` is shared by every run, so its existence carries no information: the
+# first store in a HEINZEL_HOME that has none yet is created all the same.
+RS_FRESH_HOME=${TMPROOT}/runstore-fresh-home
+(
+  HEINZEL_HOME=${RS_FRESH_HOME}
+  runstore_init r-20260906T090000-fresh1
+) 2>/dev/null
+t_ok "the first store in a HEINZEL_HOME with no runs/ yet is created" "$?"
+[ -d "${RS_FRESH_HOME}/runs/r-20260906T090000-fresh1" ]
+t_ok "and it is where runstore_dir would have put it" "$?"
+
 group 'runstore snapshot'
 
 # The failure that produces a half-written file is a write that starts and does

@@ -6,6 +6,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.10] - 2026-09-06
+
+The review finding left open against h-0009, closed.
+
+### Fixed
+- **A run store is created, never reopened.** `runstore_init` made the run's
+  directory with `mkdir -p`, which succeeds on a directory that is already
+  there. A run id handed out twice would therefore have reopened the first
+  run's store and appended this run's lines to its `events.jsonl` — one audit
+  trail that is a faithful record of neither run, with nothing in the file to
+  say so. It now uses plain `mkdir` and fails if the directory exists; only the
+  shared `runs/` parent is still created with `-p`, because every run shares it
+  and its existence carries no information. `runstore_new_id` also checks
+  (`runstore_id_free`, new and exported for that reason) and re-mints before
+  handing an id out, bounded at eight tries — the cheap half of the guarantee,
+  for the case the exclusive `mkdir` would otherwise have to catch. A run whose
+  store cannot be created keeps no durable record of itself, which the runner
+  already handles and reports; the log line now says so, and says it wrote into
+  no other run's. `docs/SPEC.md` §11.1 states it normatively.
+
+  The id is not re-minted at `runstore_init`: by then it has already keyed the
+  workspace writer lease and the run lock, and changing it there would release
+  a lease under a name nothing holds.
+
 ## [0.3.9] - 2026-09-06
 
 The review finding left open against h-0008, closed.
