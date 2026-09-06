@@ -1946,6 +1946,36 @@ with_backlog_lock backlog_set_state "${WB_LEDGER}" h-0001 " " ""
 t_ok "once the holder is gone the mutation goes through" "$?"
 t_eq "and the ledger moved" " " "$(backlog_marker_of_id "${WB_LEDGER}" h-0001)"
 
+# The invariant, checked against the source rather than by running it. The
+# merge is the largest ledger mutation there is - it moves every marker the run
+# touched - and `bin/hzl-run` has two paths to it: the ordinary one through
+# `finalize_commit`, which takes the lock inside itself, and the fallback for a
+# run whose store could not be created, which called `worksheet_merge` bare and
+# so was the one ledger mutation in the program that raced. Losing the receipt
+# is the fallback's whole cost; losing the single writer was not meant to be
+# part of it.
+#
+# Structural because the suite does not drive `bin/hzl-run` end to end, and an
+# unguarded call would otherwise only show itself on the kind of night the
+# fallback exists for - a run store that failed to be created, and a human at
+# the keyboard typing `hzl done`.
+WB_BARE=$(grep -n 'worksheet_merge' "${TEST_ROOT}"/bin/* |
+  grep -v ':[0-9]*:[[:space:]]*#' |
+  grep -v 'with_backlog_lock')
+t_eq "every worksheet_merge in bin/ is spelled under the lock" "" "${WB_BARE}"
+
+# And in the library the only caller is the one that already holds it, so the
+# line above cannot be satisfied by moving an unguarded call out of bin/.
+WB_LIB=$(grep -n 'worksheet_merge' "${TEST_ROOT}"/lib/*.sh |
+  grep -v ':[0-9]*:[[:space:]]*#' |
+  grep -v 'worksheet_merge() {' |
+  grep -v 'finalize.sh')
+t_eq "and the library's only caller is finalize, which takes it" "" "${WB_LIB}"
+t_eq "in the function whose name says the lock is already held" \
+  "_finalize_apply_locked" \
+  "$(awk '/^_?[a-z_]+\(\) \{/ { fn = $1; sub(/\(\).*/, "", fn) }
+          /worksheet_merge "/ { print fn; exit }' "${TEST_ROOT}/lib/finalize.sh")"
+
 group 'the workspace writer lease'
 
 # One writer per checkout (§14.3, invariant 13). Two runs on one working tree
@@ -3186,6 +3216,133 @@ t_eq "the archive sweep empties both live files of completions" \
   2 "$(backlog_archive_done "${BLK_B}")"
 t_has "the one closed while blocked reaches the archive" "${BLK_A}" "(id:h-0002)"
 t_lacks "leaving the blocked file to open questions only" "${BLK_F}" "(id:h-0002)"
+
+# --- closing a task, and saying why ----------------------------------------
+#
+# `hzl done <id> "what changed"` is two mutations and it used to report on one.
+# The note is the whole reason the argument exists: the marker says a task
+# ended, the note says what came of it, and a ledger full of completions nobody
+# can account for is the thing this suite exists to keep from happening quietly.
+
+# --- the window between choosing a task and claiming it --------------------
+#
+# `worksheet_write` reads the ledger without the backlog lock, and the claim
+# that follows takes the lock and writes `[~]`. A human's `hzl done` takes the
+# same lock, so it lands wholly inside that window or wholly outside it - and
+# landing inside it, against an unconditional write, reopened a task somebody
+# had just finished.
+
+group 'a task closed while the worksheet was being built'
+
+WC_B=${TMPROOT}/wc-backlog.md
+cat >"${WC_B}" <<'FIXTURE'
+# Backlog
+
+## P1
+- [ ] (id:h-0001) still open when the claim comes
+- [ ] (id:h-0002) a human closes this one in the window
+- [ ] (id:h-0003) a human blocks this one in the window
+- [~] (id:h-0004) another run already has this
+FIXTURE
+
+t_ok "an open task may be claimed" \
+  "$(worksheet_claim_refusal "${WC_B}" h-0001 >/dev/null; echo $?)"
+t_eq "and it says nothing about it" "" "$(worksheet_claim_refusal "${WC_B}" h-0001)"
+
+# The window: the worksheet named h-0002, and by the time the lock is held the
+# ledger says it is done.
+ledger_set_state "${WC_B}" h-0002 x "done:now by:human"
+t_fails "a task closed in the window may not be claimed" \
+  "$(worksheet_claim_refusal "${WC_B}" h-0002 >/dev/null; echo $?)"
+t_eq "and says which way it went" \
+  "closed since the worksheet was built" "$(worksheet_claim_refusal "${WC_B}" h-0002)"
+
+ledger_set_state "${WC_B}" h-0003 "!" "blocked:now"
+t_fails "so may a task blocked in the window" \
+  "$(worksheet_claim_refusal "${WC_B}" h-0003 >/dev/null; echo $?)"
+t_eq "and it says so" \
+  "blocked since the worksheet was built" "$(worksheet_claim_refusal "${WC_B}" h-0003)"
+
+t_fails "a task already in progress is not claimed a second time" \
+  "$(worksheet_claim_refusal "${WC_B}" h-0004 >/dev/null; echo $?)"
+
+# `hzl block` moves the task out of the backlog entirely, so the id the
+# worksheet is holding resolves to nothing. Not found is refused, not allowed:
+# a task that left the file went somewhere this run has no business following.
+t_fails "an id that is no longer in the backlog is refused" \
+  "$(worksheet_claim_refusal "${WC_B}" h-9999 >/dev/null; echo $?)"
+t_eq "saying it is gone rather than guessing" \
+  "no longer in ${WC_B}" "$(worksheet_claim_refusal "${WC_B}" h-9999)"
+
+# The whole point, stated once: the closed task keeps its `[x]`. This is the
+# assertion the review asked for - a human's completion is not overwritten by a
+# run that chose the task a moment before they closed it.
+WC_CLAIMED=${TMPROOT}/wc-claimed.txt
+: >"${WC_CLAIMED}"
+for wc_id in h-0001 h-0002 h-0003 h-0004; do
+  worksheet_claim_refusal "${WC_B}" "${wc_id}" >/dev/null || continue
+  backlog_set_state "${WC_B}" "${wc_id}" "~" "run:20260906-000001"
+  printf '%s\n' "${wc_id}" >>"${WC_CLAIMED}"
+done
+t_eq "the task the human closed is still closed" x "$(backlog_marker_of_id "${WC_B}" h-0002)"
+t_eq "the task the human blocked is still blocked" "!" "$(backlog_marker_of_id "${WC_B}" h-0003)"
+t_eq "only the still-open task was claimed" "h-0001" "$(cat "${WC_CLAIMED}")"
+t_eq "and it is the one now in progress" "~" "$(backlog_marker_of_id "${WC_B}" h-0001)"
+
+group 'ledger_close_with_note'
+
+CN_B=${TMPROOT}/cn-backlog.md
+cat >"${CN_B}" <<'FIXTURE'
+# Backlog
+
+## P1
+- [ ] (id:h-0001) a task a human closes with a reason
+- [ ] (id:h-0002) a task closed with no reason given
+FIXTURE
+
+ledger_close_with_note "${CN_B}" h-0001 "done:2026-09-06T01:00+09:00 by:human" "what changed"
+t_ok "closing a task with a note succeeds" "$?"
+t_eq "the marker is set" x "$(backlog_marker_of_id "${CN_B}" h-0001)"
+t_has "and the note is under it" "${CN_B}" "note: what changed"
+
+ledger_close_with_note "${CN_B}" h-0002 "done:2026-09-06T01:00+09:00 by:human" ""
+t_ok "a close with no note asked for is still a success" "$?"
+t_eq "and the marker is set" x "$(backlog_marker_of_id "${CN_B}" h-0002)"
+
+ledger_close_with_note "${CN_B}" h-9999 "done:now by:human" "note"
+t_status "an id in no live file is still 3" 3 "$?"
+
+# The regression. A note that was asked for and did not get written reported
+# success, because the `backlog_add_note` call ended a `&&` list whose status
+# an unconditional `return 0` discarded. `hzl done` then printed `done.` over a
+# ledger that had recorded the completion and lost the reason for it.
+#
+# The note half is failed on its own. Breaking something both halves share -
+# TMPDIR, the file's permissions - fails `backlog_set_state` first and never
+# reaches the note, which would test the wrong branch and pass. So the note
+# function itself is shadowed for exactly one call, and put back after.
+cat >"${CN_B}" <<'FIXTURE'
+# Backlog
+
+## P1
+- [ ] (id:h-0003) a task whose note will not be written
+FIXTURE
+t_status "the real note write reports 3 for an id that is not there" \
+  3 "$(backlog_add_note "${CN_B}" h-9999 "probe" >/dev/null 2>&1; echo $?)"
+
+CN_SAVED_ADD=$(declare -f backlog_add_note)
+backlog_add_note() { return 1; }
+ledger_close_with_note "${CN_B}" h-0003 "done:now by:human" "the reason"
+t_status "a note that could not be written is status 4, not success" 4 "$?"
+eval "${CN_SAVED_ADD}"
+t_ok "the real note function is back" \
+  "$(backlog_add_note "${CN_B}" h-0003 "restored" >/dev/null 2>&1; echo $?)"
+
+# The state under test is "closed, and the reason is missing" - not "nothing
+# happened". If the marker had not landed, status 4 would be describing a
+# different failure and the caller's message would be wrong.
+t_eq "the marker landed even so" x "$(backlog_marker_of_id "${CN_B}" h-0003)"
+t_lacks "and the ledger really is missing the reason" "${CN_B}" "note: the reason"
 
 group 'the ledger is three files'
 

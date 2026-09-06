@@ -577,10 +577,19 @@ CLAIMED_IDS="${EXEC_DIR}/claimed-ids.txt"
 # One transaction: the markers this run is about to show a human go into the
 # ledger together, and a reader arriving in the middle of it sees the run before
 # it started or after it claimed, never half way through claiming.
+#
+# Each id is re-read from the ledger before it is claimed, and one that is no
+# longer `[ ]` is dropped rather than overwritten - `worksheet_claim_refusal`
+# holds the rule and the reason it exists. The check is here, inside the lock,
+# because that is the only place the answer stays true long enough to act on.
 claim_worksheet_tasks() {
-  local wid
+  local wid why
   while IFS= read -r wid; do
     [ -n "${wid}" ] || continue
+    if ! why=$(worksheet_claim_refusal "${BACKLOG}" "${wid}"); then
+      log_event skip "task ${wid} is ${why} - leaving it off the worksheet"
+      continue
+    fi
     if [ -n "${CLAIMS_READY}" ] &&
        ! claims_acquire "${WS_IDENTITY}" "${wid}" "${STORE_RUN_ID}"; then
       log_event skip "task ${wid} is claimed by run $(claims_holder "${WS_IDENTITY}" "${wid}") - leaving it off the worksheet"
@@ -605,7 +614,7 @@ with_backlog_lock claim_worksheet_tasks
 # than requested.
 if ! cmp -s "${CLAIMED_IDS}" "${WORKSHEET_IDS}"; then
   [ -s "${CLAIMED_IDS}" ] ||
-    skip "every task on the worksheet is claimed by another run"
+    skip "every task on the worksheet was claimed by another run or closed before this one could claim it"
   # Into a temp file and then into place: the id list is the scope of the run,
   # and a render that failed half-way through must not leave a truncated one
   # behind for the merge to read.
@@ -760,20 +769,33 @@ store_snapshot merging
 # Without a run store there is nowhere to put an intent, so the merge runs on
 # its own and says so: the store is not load-bearing, and a run must not lose
 # its work because its own bookkeeping failed.
+#
+# It still takes the backlog lock. What this path loses is the receipt, not the
+# guarantee that the ledger has one writer: `finalize_commit` takes the lock
+# inside itself, so calling `worksheet_merge` bare here made the fallback the
+# one ledger mutation in the program that raced. A `hzl done` typed in the
+# second it takes would have been read, rewritten and overwritten by whichever
+# of the two wrote last, and the run store failing to be created - which is the
+# only way to get here - is exactly the kind of night when nobody is watching
+# for it. `with_backlog_lock` and not `lock_with` because this is one ordinary
+# mutation, and a refusal to run it should be as loud here as anywhere else.
 if [ -n "${STORE_READY}" ]; then
   MERGE_COUNTS=$(finalize_commit "${STORE_RUN_ID}" "${WORKSHEET}" "${BACKLOG}" \
     "${RUN_ID}" "${WORKSHEET_IDS}" "${WS_IDENTITY}")
   MERGE_RC=$?
 else
   log_event skip "no run store for ${STORE_RUN_ID}; the ledger commit leaves no receipt"
-  MERGE_COUNTS=$(worksheet_merge "${WORKSHEET}" "${BACKLOG}" "${RUN_ID}" "${WORKSHEET_IDS}")
+  MERGE_COUNTS=$(with_backlog_lock worksheet_merge "${WORKSHEET}" "${BACKLOG}" \
+    "${RUN_ID}" "${WORKSHEET_IDS}")
   MERGE_RC=$?
 fi
 MERGED_DONE=$(printf '%s' "${MERGE_COUNTS}" | cut -d' ' -f1)
 MERGED_BLOCKED=$(printf '%s' "${MERGE_COUNTS}" | cut -d' ' -f2)
 MERGED_NEW=$(printf '%s' "${MERGE_COUNTS}" | cut -d' ' -f3)
 MERGED_IGNORED=$(printf '%s' "${MERGE_COUNTS}" | cut -d' ' -f4)
-if [ "${MERGE_RC}" -ne 0 ]; then
+if [ "${MERGE_RC}" -eq 75 ]; then
+  log_event skip "the backlog lock was held at merge time; nothing was applied and this run's work is still on ${WORKSHEET}"
+elif [ "${MERGE_RC}" -ne 0 ]; then
   log_event skip "the worksheet was unreadable at merge time; nothing was applied"
 fi
 # Loud, because it is how a prompt that has drifted out of the format shows

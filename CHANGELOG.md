@@ -6,6 +6,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.13] - 2026-09-06
+
+The three review findings left open against h-0017, closed. All three are
+places where a ledger mutation could be lost, overwritten, or reported as
+having happened when it had not.
+
+### Fixed
+- **The fallback merge takes the backlog lock.** When a run's store cannot be
+  created there is nowhere to put a finalize intent, so `bin/hzl-run` merges the
+  worksheet directly instead of going through `finalize_commit`. That path
+  called `worksheet_merge` bare. `finalize_commit` takes the lock inside itself,
+  so the fallback was the one ledger mutation in the program that raced: a
+  `hzl done` typed while it ran would have been read, rewritten and overwritten
+  by whichever of the two finished last. Losing the receipt is what the fallback
+  is supposed to cost; losing the single writer was not. It is now
+  `with_backlog_lock worksheet_merge`, and a merge that cannot take the lock
+  says so in the run log rather than being reported as an unreadable worksheet.
+  A structural test asserts that every `worksheet_merge` call site in `bin/` is
+  spelled under the lock, and that the library's only caller is the one already
+  holding it — the suite does not drive `bin/hzl-run` end to end, and an
+  unguarded call would otherwise show itself only on exactly the night the
+  fallback exists for.
+
+- **A task closed between being chosen and being claimed is no longer
+  reopened.** `worksheet_write` reads the ledger without the backlog lock — it
+  is choosing what to propose, not writing — and the claim that follows takes
+  the lock and wrote `[~]` unconditionally. `hzl done` and `hzl block` take that
+  same lock, so a human's edit lands wholly inside that window or wholly
+  outside it; landing inside it, their `[x]` was turned back into `[~]`, the
+  finished task was put in front of the agent, and the merge closed it a second
+  time. That is not work lost so much as work reopened, which is worse: the
+  ledger then disagrees with the person who wrote it and nothing says so. The
+  new `worksheet_claim_refusal` re-reads each id inside the lock and refuses any
+  marker that is not `[ ]`, including a task that has left the backlog entirely
+  because `hzl block` moved it. An unrecognised marker is refused rather than
+  allowed, so a marker added later arrives here as a refusal instead of a task
+  silently claimed on a state nobody considered.
+
+- **`hzl done <id> "what changed"` no longer says `done` when the note was
+  lost.** The `backlog_add_note` call ended a `&&` list whose status an
+  unconditional `return 0` discarded, so the command reported success whether or
+  not the reason reached the ledger. The note is the entire point of the
+  argument — the marker says a task ended, not what came of it — and a ledger of
+  completions nobody can account for is what that silence produces. The
+  transition moved to `ledger_close_with_note` in `lib/common.sh`, beside the
+  other ledger mutations and therefore testable, and returns status 4 when the
+  marker was set and the note was not. `cmd_done` reports that state precisely:
+  the task is closed, the reason is not recorded, and here is how to add it. The
+  marker is deliberately not rolled back — the work really was done, and undoing
+  the true half to conceal the missing half would be the worse trade.
+
+### Changed
+- `worksheet_claim_refusal` and `ledger_close_with_note` are new in
+  `lib/common.sh`. Both were lifted out of `bin/hzl-run` and `bin/hzl` so the
+  rules could be tested directly: the suite sources the libraries and never
+  runs the binaries as subprocesses, and it should not start — `hzl_load_conf`
+  reads the operator's real `etc/heinzel.conf`, so a binary driven from a test
+  resolves the real ledger.
+
 ## [0.3.12] - 2026-09-06
 
 The three review findings left open against h-0010, closed. All three are in

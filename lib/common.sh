@@ -11,7 +11,7 @@
 # Multibyte truncation is locale-dependent (DESIGN 6.3). Fix it once, here.
 export LC_CTYPE=UTF-8
 
-HEINZEL_VERSION="0.3.12"
+HEINZEL_VERSION="0.3.13"
 
 # The TTL ceiling is deliberately not configurable. A session that can be
 # created with an unbounded lifetime is not a session, it is a mode.
@@ -1269,6 +1269,33 @@ ledger_set_state() { # backlog id marker [meta]
   backlog_set_state "${f}" "$2" "$3" "${4:-}"
 }
 
+# Closing a task and recording why, as one mutation. Both halves go to the file
+# the task is actually in, resolved once: a task closed while it sits in the
+# blocked file must not have its note land in the backlog, and the sweep takes
+# it to the archive from wherever it was closed.
+#
+# Three statuses, because the two halves fail differently and the caller has
+# something different to say about each:
+#
+#   3  no such id - nothing was written
+#   4  the marker was set and the note was not
+#
+# Status 4 is not a rollback. The work really was finished, and putting the
+# marker back to hide a missing note would discard the true half of the record
+# to avoid reporting the missing half; the caller is told instead, and can say
+# precisely what state the ledger is in. What it replaced was worse than either:
+# the note call ended a `&&` list whose result was thrown away, so a note that
+# never reached the ledger still reported success. The note is the whole reason
+# the argument exists - a marker says a task ended, not what came of it.
+ledger_close_with_note() { # backlog id meta note
+  local f
+  f=$(ledger_file_of_id "$1" "$2") || return 3
+  backlog_set_state "${f}" "$2" x "$3" || return $?
+  [ -n "$4" ] || return 0
+  backlog_add_note "${f}" "$2" "$4" || return 4
+  return 0
+}
+
 # --- reading the ledger for a human ----------------------------------------
 #
 # The two questions the morning after answers: what is waiting on a decision,
@@ -1476,6 +1503,38 @@ worksheet_render() {
 ${rows}
 EOF
   [ "${n}" -gt 0 ]
+}
+
+# Whether a task named on a worksheet may still be claimed. Prints nothing and
+# returns 0 when it may; prints why not and returns 1 when it may not.
+#
+# The question exists because a whole lock sits between the two halves of
+# claiming. `worksheet_write` reads the ledger without the backlog lock — it is
+# choosing what to propose, not writing anything — and the claim that follows
+# takes the lock and writes `[~]`. Every id on the worksheet is therefore a
+# statement about the ledger as it was some moments ago, and a human at the
+# keyboard runs `hzl done` and `hzl block` under that same lock, so their edit
+# lands wholly in that window or wholly outside it. Landing inside it, against
+# an unconditional `backlog_set_state ... "~"`, turned a person's `[x]` back
+# into `[~]` and handed the finished task to the agent: not work lost so much
+# as work reopened, which is worse, because the ledger then disagrees with the
+# person who wrote it and nothing says so.
+#
+# A marker this does not recognise is refused rather than allowed. The set of
+# markers is small and closed, and a new one would arrive here as a task
+# silently claimed on a state nobody considered.
+worksheet_claim_refusal() { # backlog id
+  local marker
+  marker=$(backlog_marker_of_id "$1" "$2")
+  case ${marker} in
+    ' ') return 0 ;;
+    x) printf 'closed since the worksheet was built' ;;
+    '!') printf 'blocked since the worksheet was built' ;;
+    '~') printf 'already in progress' ;;
+    '') printf 'no longer in %s' "$1" ;;
+    *) printf 'marked [%s] since the worksheet was built' "${marker}" ;;
+  esac
+  return 1
 }
 
 # Write the run's slice of the ledger to `out`, and print the ids it contains,

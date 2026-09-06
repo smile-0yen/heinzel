@@ -915,19 +915,12 @@ cmd_take() {
 }
 
 # Closing a task by hand is two mutations, the marker and the note, and they go
-# in together: a run reading the ledger between them would see a completion with
-# nothing saying what changed. `backlog_set_state`'s status 3 - no such id - is
-# passed through, because that is what tells the caller it typed a wrong id.
-#
-# The file is resolved once, under the lock, and both mutations go to it: a task
-# closed while it sits in the blocked file must not have its note land in the
-# backlog. The sweep takes it to the archive from wherever it was closed.
+# in together under one lock: a run reading the ledger between them would see a
+# completion with nothing saying what changed. `ledger_close_with_note` holds
+# the transition and its statuses - 3 for no such id, 4 for a marker that was
+# set while its note was not; what is here is only what makes it `by:human`.
 done_with_note() { # backlog id note
-  local f
-  f=$(ledger_file_of_id "$1" "$2") || return 3
-  backlog_set_state "${f}" "$2" x "done:$(iso_at) by:human" || return $?
-  [ -n "$3" ] && backlog_add_note "${f}" "$2" "$3"
-  return 0
+  ledger_close_with_note "$1" "$2" "done:$(iso_at) by:human" "$3"
 }
 
 # Blocking and unblocking are a marker change and a move, and they are one
@@ -949,6 +942,11 @@ cmd_done() {
   case $? in
     0) ;;
     3) err "no such id: ${id}"; exit 3 ;;
+    4) good "${id} done."
+       err "but the note was not written to $(ledger_file_of_id "${b}" "${id}")"
+       dim "  the task is closed; the reason it closed is not recorded"
+       dim "  add it by hand, or re-run: hzl done ${id} \"${note}\""
+       exit 4 ;;
     *) die "could not update ${b}" ;;
   esac
   good "${id} done."
