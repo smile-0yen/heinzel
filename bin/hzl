@@ -927,9 +927,15 @@ done_with_note() { # backlog id note
 # change: an unblocked task still sitting in the blocked file when `hzl next`
 # looks is an unblock that did not happen. The runner would sweep it at the top
 # of the next run, which is hours away and long after the person went to bed.
+#
+# Which is why a sweep that failed is reported rather than swallowed. Status 5
+# is the half-done state — the marker moved, the task did not — and it is not a
+# rollback, for the same reason `hzl done`'s status 4 is not: the marker is the
+# true half of the record, and putting it back to hide the half that failed
+# would discard both. The caller says which half stands (§8.1).
 set_state_and_sweep() { # backlog id marker meta
   ledger_set_state "$1" "$2" "$3" "${4:-}" || return $?
-  backlog_sweep_blocked "$1" >/dev/null
+  backlog_sweep_blocked "$1" >/dev/null || return 5
   return 0
 }
 
@@ -962,6 +968,11 @@ cmd_block() {
   case $? in
     0) ;;
     3) err "no such id: ${id}"; exit 3 ;;
+    5) good "${id} blocked: ${reason}"
+       err "but it could not be moved to $(ledger_blocked_file "${b}")"
+       dim "  the marker is set; the task is still listed in ${b}"
+       dim "  finish the move with: hzl archive"
+       exit 5 ;;
     *) die "could not update ${b}" ;;
   esac
   good "${id} blocked: ${reason}"
@@ -979,6 +990,10 @@ cmd_unblock() {
   case $? in
     0) ;;
     3) err "no such id: ${id}"; exit 3 ;;
+    5) err "${id} is unblocked, but it is still in $(ledger_blocked_file "${b}")"
+       dim "  nothing picks it up while it is there - the worksheet is built from ${b}"
+       dim "  move it with: hzl archive"
+       exit 5 ;;
     *) die "could not update ${b}" ;;
   esac
   good "${id} is back in the queue."
@@ -1062,9 +1077,14 @@ cmd_archive() {
   require_not_root
   local b n swept out back
   b=$(need_backlog) || exit 1
-  n=$(with_backlog_lock backlog_archive_done "${b}")
+  # The status, not just the shape of the output: both sweeps print a count and
+  # then say separately whether they managed it, and a sweep that failed prints
+  # `0` — which reads exactly like a sweep that found nothing to do.
+  n=$(with_backlog_lock backlog_archive_done "${b}") ||
+    die "could not move completed tasks out of ${b}"
   case ${n} in ""|*[!0-9]*) die "could not sweep ${b}" ;; esac
-  swept=$(with_backlog_lock backlog_sweep_blocked "${b}")
+  swept=$(with_backlog_lock backlog_sweep_blocked "${b}") ||
+    die "could not move blocked tasks out of ${b}"
   out=$(printf '%s' "${swept}" | cut -d' ' -f1)
   back=$(printf '%s' "${swept}" | cut -d' ' -f2)
   case ${out}${back} in ""|*[!0-9]*) die "could not sweep ${b}" ;; esac

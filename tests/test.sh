@@ -2198,6 +2198,53 @@ finalize_recover "${FN_RUN3}" "${FN_LED3}" >/dev/null
 t_fails "and a second recovery is refused here too" "$?"
 t_eq "leaving the total where it was" 1 "$(state_get .tasks_done_total 0)"
 
+group 'finalize: recovering a task that is not in the backlog'
+
+# Recovery looks a task up across all three ledger files and used to write to
+# the backlog whatever it found — so a task the intent completes that is sitting
+# in the blocked file could not be written at all, while the counter and the
+# receipt moved on as if it had been. The state is reachable: a person who saw
+# the run die can block the task by hand and sweep it before the next run comes
+# round to recover the commit.
+FN_LED4=${TMPROOT}/fin-ledger-4.md
+fn_ledger "${FN_LED4}"
+FN_RUN4=r-20260902T043000-fin004
+runstore_init "${FN_RUN4}"
+state_update '.tasks_done_total = 0'
+
+finalize_intent "${FN_RUN4}" "${FN_WS}" "${FN_LED4}" 20260902-043000 "${FN_IDS}"
+backlog_set_state "${FN_LED4}" h-0101 "!" "blocked:2026-09-02T05:00 reason:by hand"
+backlog_sweep_blocked "${FN_LED4}" >/dev/null
+t_eq "the task the intent completes is in the blocked file, not the backlog" \
+  "$(ledger_blocked_file "${FN_LED4}")" "$(ledger_file_of_id "${FN_LED4}" h-0101)"
+
+t_eq "recovery applies the whole intent, wherever each task lives" \
+  "1 1 1 0" "$(finalize_recover "${FN_RUN4}" "${FN_LED4}")"
+t_eq "the completion lands in the file the task is actually in" \
+  x "$(ledger_marker_of_id "${FN_LED4}" h-0101)"
+t_eq "and the backlog is not given a second line for it" \
+  "" "$(backlog_marker_of_id "${FN_LED4}" h-0101)"
+t_eq "the completion is counted, once" 1 "$(state_get .tasks_done_total 0)"
+
+# The other half: a write that could not happen is not counted. An id that is
+# nowhere in the ledger cannot be marked, and the counter and the receipt must
+# say so rather than record a completion the ledger does not have.
+FN_LED5=${TMPROOT}/fin-ledger-5.md
+fn_ledger "${FN_LED5}"
+FN_RUN5=r-20260902T044000-fin005
+runstore_init "${FN_RUN5}"
+state_update '.tasks_done_total = 0'
+
+finalize_intent "${FN_RUN5}" "${FN_WS}" "${FN_LED5}" 20260902-044000 "${FN_IDS}"
+grep -v '(id:h-0101)' "${FN_LED5}" >"${FN_LED5}.next" && mv "${FN_LED5}.next" "${FN_LED5}"
+t_eq "the task the intent completes is gone from the ledger entirely" \
+  "" "$(ledger_marker_of_id "${FN_LED5}" h-0101)"
+t_eq "so recovery reports no completion applied" \
+  "0 1 1 0" "$(finalize_recover "${FN_RUN5}" "${FN_LED5}")"
+t_eq "and counts none either" 0 "$(state_get .tasks_done_total 0)"
+t_eq "and the receipt counts the same number the ledger can show" \
+  0 "$(jq -r '.counted' "${HEINZEL_HOME}/runs/${FN_RUN5}/finalize.receipt.json")"
+
 # --- the steps a blocked task asks for --------------------------------------
 #
 # `reason:` is one line and a person's next move is usually several. The steps
@@ -3183,6 +3230,56 @@ printf -- '- [!] (id:h-0002) needs a decision <!-- blocked:2026-08-02T10:00 reas
 t_eq "a task left in both files is swept again" "1 0" "$(backlog_sweep_blocked "${BLK_B}")"
 t_lacks "out of the backlog" "${BLK_B}" "(id:h-0002)"
 t_eq "and not into the blocked file a second time" 1 "$(grep -c "(id:h-0002)" "${BLK_F}")"
+
+# The residue is a task line and the notes under it, and dropping only the line
+# sends the notes on to the destination alone — where they land under whichever
+# task was written there last and are read as belonging to that one.
+blk_reset
+backlog_sweep_blocked "${BLK_B}" >/dev/null
+{
+  printf -- '- [!] (id:h-0002) needs a decision <!-- blocked:2026-08-02T10:00 reason:needs a name -->\n'
+  printf -- '      note: a continuation line that belongs to h-0002\n'
+  printf -- '- [!] (id:h-0006) a second blocked task, written after the residue\n'
+} >>"${BLK_B}"
+t_eq "the residue and a real block are both swept" "2 0" "$(backlog_sweep_blocked "${BLK_B}")"
+t_eq "the note under a task that was already there is not written twice" \
+  1 "$(grep -c "note: a continuation line that belongs to h-0002" "${BLK_F}")"
+t_lacks "so it cannot be read as a note on the task written after it" \
+  "${BLK_B}" "note: a continuation line that belongs to h-0002"
+t_eq "and the task written after it is still swept, with its own line intact" \
+  1 "$(grep -c "(id:h-0006)" "${BLK_F}")"
+
+# A sweep that failed prints the same `0 0` a sweep with nothing to do prints,
+# so it has to say separately that it failed — every caller of it decides
+# something on the strength of that status.
+BLK_STUCK=${TMPROOT}/blocked-stuck
+mkdir -p "${BLK_STUCK}"
+cp "${BLK_FIXTURE}" "${BLK_STUCK}/backlog.md"
+mkdir -p "${BLK_STUCK}/backlog.blocked.md"
+t_eq "a sweep that cannot write the blocked file still prints a count" \
+  "0 0" "$(backlog_sweep_blocked "${BLK_STUCK}/backlog.md" 2>/dev/null)"
+backlog_sweep_blocked "${BLK_STUCK}/backlog.md" >/dev/null 2>&1
+t_fails "and says, separately from the count, that it did not do it" "$?"
+t_has "so nothing was moved out of the backlog" \
+  "${BLK_STUCK}/backlog.md" "(id:h-0002)"
+
+cp "${BLK_FIXTURE}" "${BLK_STUCK}/backlog.md"
+mkdir -p "${BLK_STUCK}/backlog.completed.md"
+backlog_archive_done "${BLK_STUCK}/backlog.md" >/dev/null 2>&1
+t_fails "the archive sweep says so too" "$?"
+t_eq "while still printing a count that reads like nothing to do" \
+  0 "$(backlog_archive_done "${BLK_STUCK}/backlog.md" 2>/dev/null)"
+rmdir "${BLK_STUCK}/backlog.blocked.md" "${BLK_STUCK}/backlog.completed.md"
+
+# Both callers read that status. Structural, because the suite does not drive
+# `bin/hzl` or `bin/hzl-run` end to end: a call that ignored it would print `0`
+# for a sweep that failed, and the only sign would be a task nobody picks up.
+BLK_UNCHECKED=$(grep -n 'backlog_sweep_blocked\|backlog_archive_done' "${TEST_ROOT}"/bin/* |
+  grep -v ':[0-9]*:[[:space:]]*#' |
+  grep -v '||' |
+  grep -v ':[0-9]*:if ')
+t_eq "every sweep in bin/ is called for its status, not just its count" \
+  "" "${BLK_UNCHECKED}"
 
 group 'the way back'
 

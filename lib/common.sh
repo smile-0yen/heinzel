@@ -11,7 +11,7 @@
 # Multibyte truncation is locale-dependent (DESIGN 6.3). Fix it once, here.
 export LC_CTYPE=UTF-8
 
-HEINZEL_VERSION="0.3.13"
+HEINZEL_VERSION="0.3.14"
 
 # The TTL ceiling is deliberately not configurable. A session that can be
 # created with an unbounded lifetime is not a session, it is a mode.
@@ -1143,11 +1143,14 @@ ledger_move_marked() { # src dst want [template]
       hit = (index(want, marker) > 0)
       if (inv) hit = !hit
       if (hit && id != "") {
-        mode = "archive"
         n++
         # Already there: the residue of a crash between the append and the
-        # rewrite. Dropping it here is the repair.
-        if (id in archived) next
+        # rewrite. Dropping it here is the repair — and the notes under it go
+        # with it. Staying in "archive" mode would send them to the destination
+        # a second time, where they would land under whichever task was written
+        # there last and be read as the notes of that one.
+        if (id in archived) { mode = "drop"; next }
+        mode = "archive"
         if (prio != lastprio) { printf "\n## P%d\n", prio > out_arc; lastprio = prio }
         print > out_arc
         archived[id] = 1
@@ -1155,7 +1158,11 @@ ledger_move_marked() { # src dst want [template]
       }
       mode = "keep"; print > out_keep; next
     }
-    /^[ \t]+[^ \t]/ { if (mode == "archive") print > out_arc; else print > out_keep; next }
+    /^[ \t]+[^ \t]/ {
+      if (mode == "archive") print > out_arc
+      else if (mode != "drop") print > out_keep
+      next
+    }
     { mode = "keep"; print > out_keep; next }
     END { print n + 0 }
   ' "${f}") || { rm -f "${seen}" "${delta}" "${keep}"; printf 0; return 1; }

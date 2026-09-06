@@ -358,11 +358,18 @@ finalize_recover() { # run-id backlog
     # then swept into the archive is still a completion, and re-applying it
     # would put the task back into the backlog as a fresh `[x]`.
     marker=$(ledger_marker_of_id "${backlog}" "${id}")
-    if [ "${marker}" != x ]; then
-      backlog_set_state "${backlog}" "${id}" x \
-        "done:$(iso_at) run:${legacy} recovered:${run}" && n_done=$((n_done + 1))
+    if [ "${marker}" = x ]; then
+      applied_done=$((applied_done + 1))
+    # Across the ledger to write, as well as to read. `backlog_set_state` writes
+    # to the backlog whatever file the id is actually in, so a completion for a
+    # task sitting in the blocked file failed here — and the counter and the
+    # receipt moved on regardless, recording a completion the ledger does not
+    # have. A write that did not happen is not counted.
+    elif ledger_set_state "${backlog}" "${id}" x \
+           "done:$(iso_at) run:${legacy} recovered:${run}"; then
+      n_done=$((n_done + 1))
+      applied_done=$((applied_done + 1))
     fi
-    applied_done=$((applied_done + 1))
   done <<EOF
 $(jq -r '.done[]? // empty' "${f}" 2>/dev/null)
 EOF
@@ -386,7 +393,7 @@ EOF
     [ -n "${steps}" ] && ledger_steps_install "${backlog}" "${id}" "${steps}" >/dev/null 2>&1
     marker=$(ledger_marker_of_id "${backlog}" "${id}")
     if [ "${marker}" != "!" ]; then
-      backlog_set_state "${backlog}" "${id}" "!" \
+      ledger_set_state "${backlog}" "${id}" "!" \
         "blocked:$(iso_at) reason:${reason} run:${legacy} recovered:${run}" &&
         n_blocked=$((n_blocked + 1))
     fi
@@ -396,8 +403,8 @@ EOF
 
   while IFS= read -r id; do
     [ -n "${id}" ] || continue
-    marker=$(backlog_marker_of_id "${backlog}" "${id}")
-    [ "${marker}" = "~" ] && backlog_set_state "${backlog}" "${id}" " " ""
+    marker=$(ledger_marker_of_id "${backlog}" "${id}")
+    [ "${marker}" = "~" ] && ledger_set_state "${backlog}" "${id}" " " ""
   done <<EOF
 $(jq -r '.reopen[]? // empty' "${f}" 2>/dev/null)
 EOF

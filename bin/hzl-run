@@ -496,22 +496,41 @@ fi
 # the moment they are written. What this run closes or blocks is swept by the
 # next one, which is also what keeps the review gate able to find its own
 # completions - and able to move them back to `[!]` in the file it read them in.
-ARCHIVED=$(with_backlog_lock backlog_archive_done "${BACKLOG}")
-case ${ARCHIVED} in ""|*[!0-9]*) ARCHIVED=0 ;; esac
-[ "${ARCHIVED}" -gt 0 ] &&
-  log_event swept "moved ${ARCHIVED} completed task(s) into $(ledger_archive "${BACKLOG}")"
+# A sweep that failed prints `0`, which is also what a sweep with nothing to do
+# prints, so the status is read and not just the number. Neither failure stops
+# the run — the sweep is housekeeping, and a night spent on nothing because the
+# blocked file could not be rewritten would be worse than a night worked from a
+# backlog that still has yesterday's completions in it. It is a skip, which is
+# the class for "this run went ahead without something it wanted" (§12).
+if ARCHIVED=$(with_backlog_lock backlog_archive_done "${BACKLOG}"); then
+  case ${ARCHIVED} in ""|*[!0-9]*) ARCHIVED=0 ;; esac
+  [ "${ARCHIVED}" -gt 0 ] &&
+    log_event swept "moved ${ARCHIVED} completed task(s) into $(ledger_archive "${BACKLOG}")"
+else
+  ARCHIVED=0
+  log_event skip "could not move completed tasks out of ${BACKLOG}; they are still in the queue this run reads"
+fi
 
-SWEPT_BLOCKED=$(with_backlog_lock backlog_sweep_blocked "${BACKLOG}")
-BLOCKED_OUT=$(printf '%s' "${SWEPT_BLOCKED}" | cut -d' ' -f1)
-BLOCKED_BACK=$(printf '%s' "${SWEPT_BLOCKED}" | cut -d' ' -f2)
-case ${BLOCKED_OUT} in ""|*[!0-9]*) BLOCKED_OUT=0 ;; esac
-case ${BLOCKED_BACK} in ""|*[!0-9]*) BLOCKED_BACK=0 ;; esac
-[ "${BLOCKED_OUT}" -gt 0 ] &&
-  log_event swept "moved ${BLOCKED_OUT} blocked task(s) into $(ledger_blocked_file "${BACKLOG}")"
-# The way back. A task somebody unblocked by hand is a task this run may pick up,
-# and it is only pickable once it is in the file the worksheet is built from.
-[ "${BLOCKED_BACK}" -gt 0 ] &&
-  log_event swept "${BLOCKED_BACK} task(s) are no longer blocked and are back in ${BACKLOG}"
+if SWEPT_BLOCKED=$(with_backlog_lock backlog_sweep_blocked "${BACKLOG}"); then
+  BLOCKED_OUT=$(printf '%s' "${SWEPT_BLOCKED}" | cut -d' ' -f1)
+  BLOCKED_BACK=$(printf '%s' "${SWEPT_BLOCKED}" | cut -d' ' -f2)
+  case ${BLOCKED_OUT} in ""|*[!0-9]*) BLOCKED_OUT=0 ;; esac
+  case ${BLOCKED_BACK} in ""|*[!0-9]*) BLOCKED_BACK=0 ;; esac
+  [ "${BLOCKED_OUT}" -gt 0 ] &&
+    log_event swept "moved ${BLOCKED_OUT} blocked task(s) into $(ledger_blocked_file "${BACKLOG}")"
+  # The way back. A task somebody unblocked by hand is a task this run may pick
+  # up, and it is only pickable once it is in the file the worksheet is built
+  # from.
+  [ "${BLOCKED_BACK}" -gt 0 ] &&
+    log_event swept "${BLOCKED_BACK} task(s) are no longer blocked and are back in ${BACKLOG}"
+else
+  BLOCKED_OUT=0
+  BLOCKED_BACK=0
+  # The direction that costs something: a task a person unblocked before going
+  # to bed stays in the blocked file, and the worksheet is built from the
+  # backlog, so this run cannot pick it up however high its priority.
+  log_event skip "could not sweep ${BACKLOG} and $(ledger_blocked_file "${BACKLOG}"); anything unblocked by hand stays out of this run"
+fi
 
 # --- gate 7: is there anything to do? -------------------------------------
 # Last, and immediately before the only expensive thing in this file.

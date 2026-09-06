@@ -6,6 +6,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.14] - 2026-09-06
+
+The four review findings left open against h-0021, closed.
+
+### Fixed
+- **A sweep that failed is no longer reported as a sweep with nothing to do.**
+  `backlog_archive_done` and `backlog_sweep_blocked` print a count *and* return
+  a status, and a failure prints `0` — which is exactly what a sweep with
+  nothing to move prints. Every caller read the number and threw the status
+  away. `hzl block` and `hzl unblock` said the task had moved when it had not;
+  `hzl archive` said "nothing to sweep"; the runner logged nothing at all.
+  `set_state_and_sweep` now returns **5**, the half-done status — the marker is
+  set, the move did not happen — and `hzl block` / `hzl unblock` say which half
+  stands and that `hzl archive` finishes it. `hzl archive` fails outright. The
+  runner records a `skip`, because housekeeping must not cost a night's work,
+  and names the consequence that actually bites: a task somebody unblocked
+  before bed stays in the blocked file, and the worksheet is built from the
+  backlog, so this run cannot pick it up.
+- **The sweep's crash repair no longer duplicates notes onto another task.** A
+  task already at the destination is residue from a crash between the append and
+  the rewrite, and dropping it from the source is the repair. The task line was
+  dropped and the continuation lines under it were not: the awk stayed in
+  `archive` mode, so the notes were written to the destination a second time,
+  where they landed under whichever task had been written there last and read as
+  that one's. The whole task goes now, notes included.
+- **Recovery writes wherever the task is, and counts only what it wrote.**
+  `finalize_recover` resolves every id across the three ledger files with
+  `ledger_marker_of_id` and then wrote with `backlog_set_state`, which only ever
+  writes the backlog. A completion for a task that had reached the blocked file
+  — a person who saw the run die can block it by hand and sweep before the next
+  run recovers — could not be written, while `tasks_done_total` and the receipt
+  moved on as though it had been. All three writes go through
+  `ledger_set_state`, and a completion is counted when it was already applied or
+  when this recovery applied it, never when the write failed.
+
+`docs/SPEC.md` §3 documents statuses 4 and 5, §8 the two sweep rules, and §11.4
+the recovery contract. Ten new assertions, each checked against the unfixed
+code: the note is not written twice and the task after it is unharmed, a sweep
+that cannot write its destination says so while still printing `0 0`, every
+sweep call in `bin/` reads the status, and recovery lands a completion on a task
+in the blocked file while counting nothing for an id the ledger no longer has.
+
 ## [0.3.13] - 2026-09-06
 
 The three review findings left open against h-0017, closed. All three are

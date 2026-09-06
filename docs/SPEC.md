@@ -107,9 +107,9 @@ Privileged subcommands escalate internally.
 | `remote` | `--dry-run` | 0 / 1 |
 | `next` | — | 0 / 1 |
 | `take` | `[id]` | 0 / 1 / **3** no such id |
-| `done` | `<id> [note]` | 0 / 1 / **3** |
-| `block` | `<id> <reason>` | 0 / 1 / **3** |
-| `unblock` | `<id>` | 0 / 1 / **3** |
+| `done` | `<id> [note]` | 0 / 1 / **3** / **4** |
+| `block` | `<id> <reason>` | 0 / 1 / **3** / **5** |
+| `unblock` | `<id>` | 0 / 1 / **3** / **5** |
 | `steps` | `[id]` | 0 / 1 / **3** no such id |
 | `archive` | — | 0 / 1 |
 | `report` | `--days N`, `--json`, `--quiet` | **0** nothing blocked, **10** something is, 1 error |
@@ -117,6 +117,15 @@ Privileged subcommands escalate internally.
 | `logs` | `-f`, `-n N` | 0 / 1 |
 | `doctor` | — | 0 clean, 1 problems found |
 | `install` / `uninstall` | — | 0 / 1 |
+
+**3** is "no such id": nothing was written. **4** and **5** are the half-done
+statuses, and both mean the marker moved and the thing that goes with it did
+not — the note for `done`, the move into or out of the blocked file for `block`
+and `unblock`. Neither is a rollback: the marker is the true half of the record,
+and putting it back to hide the half that failed would discard both. The command
+says which half stands and what to run to finish it. A sweep that failed prints
+the same count as a sweep with nothing to do, so callers read the status and not
+only the number (§8).
 
 `status`'s and `report`'s exit codes are contracts other scripts may branch on;
 `--quiet` produces the code and no output. They answer different questions —
@@ -477,6 +486,20 @@ the source rewritten second. A crash between the two leaves a task in both files
 which the next sweep repairs by dropping it from the source; the other order
 would lose the task. Duplication is visible and self-healing, loss is neither.
 
+> **Normative: the repair drops the task line and the lines under it.** A task
+> already at the destination is residue, and so are its continuation lines. A
+> repair that dropped only the task line would send its notes on alone, where
+> they would land under whichever task was written to the destination last and
+> be read as belonging to that one.
+
+> **Normative: a sweep that failed is not a sweep that found nothing.** Both
+> print `0`, so every caller reads the status as well as the count.
+> `hzl archive` fails; `hzl block` and `hzl unblock` exit **5**, having set the
+> marker; the runner records a `skip` and goes on, because a night spent on
+> nothing would be worse than a night worked from a backlog that still holds
+> yesterday's completions — but a task a person unblocked before bed stays out
+> of that run, and the log line says so.
+
 The blocked sweep runs **both ways**, and this is the one place the two derived
 files differ. `[x]` is terminal; `[!]` is not. A line in the blocked file that is
 no longer `[!]` — `hzl unblock`, or a person with an editor — moves back into the
@@ -494,6 +517,7 @@ and asking only the backlog is a defect:
 | Is this task already closed? | `ledger_marker_of_id` — finalize recovery asks it, and a "no marker" from a swept backlog would re-apply a completion that landed |
 | How many are blocked? | `ledger_count` — counted off the backlog alone it is zero, and "nothing is blocked" is the one answer that must never be wrong |
 | Where do I write this marker? | `ledger_file_of_id`, over the **live** files only. A mutation must never reach the archive: `hzl done` on an id closed last month says "no such id" rather than closing it twice |
+| How do I write it? | `ledger_set_state` — the write that goes with `ledger_marker_of_id`. Reading across three files and writing to one is the defect this pair exists to prevent |
 
 ### 8.0.1 The report (normative)
 
@@ -1131,6 +1155,15 @@ boundary of §9.2 between the third and the fourth:
 > counter is the last thing a run does — so recovery counts every completion in
 > the intent, once, and the receipt records how many. A run that survives counts
 > its own the way it always did, after the review gate.
+
+> **Normative: recovery writes across the ledger, and counts only what it
+> wrote.** It resolves each id with `ledger_set_state`, the same way it reads
+> them with `ledger_marker_of_id` — a task the intent completes may be sitting
+> in the blocked file by the time the next run comes round to recover the
+> commit, and a write aimed at the backlog alone would miss it. A completion
+> counts when it is already applied or when this recovery applied it, never when
+> the write failed: the counter and the receipt would otherwise record a
+> completion the ledger cannot show.
 
 The commit re-checks the expected ledger digest **inside** the lock. A ledger
 that moved is recorded (`ledger_moved` in the receipt) and applied anyway: the
