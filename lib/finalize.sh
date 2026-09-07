@@ -176,7 +176,7 @@ finalize_intent() { # run-id worksheet backlog legacy-run-id allowed [identity]
     --arg workspace_identity "${identity}" \
     --arg worksheet_digest "$(finalize_digest "${ws}")" \
     --arg ledger_digest_before "$(finalize_digest "${backlog}")" \
-    --argjson done "$(_finalize_ids_json "${cands}" done)" \
+    --argjson 'done' "$(_finalize_ids_json "${cands}" 'done')" \
     --argjson blocked "${blocked_json}" \
     --argjson reopen "$(_finalize_ids_json "${cands}" reopen)" \
     --argjson new "${new_json}" \
@@ -262,7 +262,7 @@ finalize_receipt() { # run-id backlog done blocked new ignored [recovered] [coun
     --argjson schema_version "${FINALIZE_SCHEMA}" \
     --arg run_id "${run}" \
     --arg ledger_digest_after "$(finalize_digest "${backlog}")" \
-    --argjson done "${done:-0}" --argjson blocked "${blocked:-0}" \
+    --argjson 'done' "${done:-0}" --argjson blocked "${blocked:-0}" \
     --argjson new "${new:-0}" --argjson ignored "${ignored:-0}" \
     --argjson ledger_moved "${moved}" \
     --argjson recovered "${recovered}" \

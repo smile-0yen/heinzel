@@ -38,6 +38,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `hzl add`. The empty heading is now found and the task written directly under
   it; only a priority with no heading anywhere still gets a new one. A `## P<n>`
   inside a fence is documentation and is never inserted into.
+- **CI is green again.** shellcheck 0.11.0 reports warnings the version before
+  it did not, and the `shell` job had been failing on every push to `main` for
+  some time — which also meant the test step, which runs after it, was never
+  reached. Nothing here changes behaviour. `--argjson done` needed quoting so
+  that shellcheck stops reading the flag's name as the `done` keyword (SC1010);
+  a `h-0900` on the right of an assignment needed quoting so that it is a task
+  id and not `h - 0900` (SC2100); `ls | grep -c` became `find -name` (SC2010);
+  and `_sc`, assigned through an `eval` shellcheck cannot see, is declared
+  (SC2154).
+- **`t_true` and `t_false` in the test suite.** Sixteen assertions were a
+  `[ ... ]` on one line and `$?` on the next. That is the status of the
+  condition above — until somebody inserts a line between the two, when it
+  silently becomes the status of *that*, and an assertion that reads as a check
+  on a file is a check on the last `printf`. shellcheck names the shape
+  (SC2319). The two new helpers take the condition itself, so there is nothing
+  in between to get wrong. Assertion count and outcome are unchanged: 738
+  passed, 0 failed, before and after.
 
 ## [0.3.18] - 2026-09-07
 
