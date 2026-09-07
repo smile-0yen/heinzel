@@ -494,7 +494,7 @@ carries.
 
 | Element | Rule |
 |---|---|
-| Contents | Task lines and their continuation lines, appended in the order they were swept, each run of them under the `## P<n>` heading it came from |
+| Contents | Task lines and their continuation lines, appended in the order they were swept, each run of them under the `## P<n>` heading it came from. The blocked file is tidied back to one heading per priority afterwards; the archive is not (below) |
 | Created | On the first sweep that has something to put there. A ledger that has closed nothing and blocked nothing is one file |
 | Swept by | `hzl archive`, and the runner at the top of a run |
 | Read back | The blocked file, yes — it is live, and a task that stops being `[!]` returns to the backlog. The archive, never: `[x]` is terminal and contributes no todos |
@@ -532,6 +532,31 @@ backlog at the priority it left with. One-way would strand an unblocked task in 
 file no worksheet is built from, which is losing work silently. `hzl block` and
 `hzl unblock` therefore sweep as part of the command rather than leaving the move
 to the next run.
+
+> **Normative: every sweep ends by tidying the live files it may have
+> disturbed.** Appending opens a `## P<n>` at the destination and leaves an
+> emptied one behind at the source, so without this each block and each unblock
+> adds a heading to each live file and removes none. Nothing reads it wrong —
+> priority is the nearest heading above a line, so every repeated heading is
+> still true — but after a few nights the backlog is a run of single-task
+> sections under repeated headings with the empty shells of the original ones
+> stranded above them, and a person can no longer open it and see their queue.
+> Markdown is the format precisely so that they can.
+
+The tidy is presentation and nothing else. It moves no task between files, sets
+no marker, and preserves the order the queue is attacked in.
+
+| Element | Rule |
+|---|---|
+| Applies to | The live files only. **Never the archive**: its repeated headings are the record of when things moved, and merging them would say tasks closed together that closed a month apart |
+| Headings | One per priority, ascending. The heading text is the **first** one the file used for that priority, verbatim: `## P1 - this week` is a person writing to themselves |
+| Empty headings | Kept. A priority a person left as a placeholder is theirs, and the tidy never deletes a line somebody wrote |
+| Task order | Within a priority, the order the tasks appear in the file — which is what `backlog_next_row` breaks ties on, so the order of attack is unchanged |
+| Blank lines | Dropped inside a section, where they are the signature of the sweep; kept above the first heading and inside a fence, where they are a person's text |
+| Fences | A `## P<n>` inside a fence is documentation, not a heading — the same rule the parse uses |
+| When | After the move, so a crash between the two leaves a file that is untidy rather than one that is wrong |
+| Writes | Through the same rename every ledger write uses, and **only when the result differs** — a ledger already tidy is not touched, and its mtime does not move |
+| Status | Not reported. The status of a sweep is about whether the tasks moved; a heading it could not straighten is not a move that failed |
 
 Some questions are therefore about the **ledger**, not about one of its files,
 and asking only the backlog is a defect:
@@ -611,7 +636,7 @@ Merge rules, applied by id:
 | `[!]`, id on the id list | `[!]` with `blocked:<ISO8601> reason:<reason> run:<RUN_ID>`; reason `not stated` if absent. Any `blocked/<id>.md` beside the worksheet is installed beside the ledger first (§8.0.2) — a `[!]` a person can see and instructions they cannot open yet reads as "there is nothing more to say" |
 | `[ ]` or `[~]`, id on the id list | back to `[ ]`, metadata cleared |
 | Any marker, id **not** on the id list | **not applied**, counted as ignored |
-| `[ ]` with no id | new task, inserted at the end of its priority section (after that section's last task *and its continuation lines*) |
+| `[ ]` with no id | new task, inserted at the end of its priority section (after that section's last task *and its continuation lines*). A section that exists but holds nothing takes the task directly under its heading; only a priority with no heading anywhere gets a new one, at the end of the file |
 | `[x]` or `[!]` with no id | not applied, counted as ignored |
 
 The id list is what makes a run's scope structural rather than requested: an id

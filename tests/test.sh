@@ -3375,6 +3375,9 @@ lt_reset() {
 - [ ] (id:h-0002) untouched, and the one a truncate would lose
 - [~] (id:h-0003) in progress
 - [ ] a line with no id yet
+
+## P1
+- [ ] (id:h-0004) in a second section of the same priority, which the tidy folds in
 LTFIX
   chmod 644 "${LT_B}"
   rm -f "${LT_DIR}/backlog.completed.md" "${LT_DIR}/backlog.blocked.md"
@@ -3389,7 +3392,8 @@ for lt_case in \
   "backlog_reset_inprogress|backlog_reset_inprogress \"\${LT_B}\"" \
   "backlog_assign_ids|backlog_assign_ids \"\${LT_B}\"" \
   "backlog_insert_at_priority|backlog_insert_at_priority \"\${LT_B}\" 1 a-new-task" \
-  "ledger_move_marked|ledger_move_marked \"\${LT_B}\" \"\${LT_DIR}/backlog.completed.md\" xX"
+  "ledger_move_marked|ledger_move_marked \"\${LT_B}\" \"\${LT_DIR}/backlog.completed.md\" xX" \
+  "backlog_normalize|backlog_normalize \"\${LT_B}\""
 do
   lt_name=${lt_case%%|*}
   lt_cmd=${lt_case#*|}
@@ -3668,6 +3672,165 @@ t_eq "an in-progress marker stranded there comes back too - it is not blocked" \
   "1 1" "$(backlog_set_state "${BLK_B}" h-0002 "!" "blocked:2026-09-06T01:00 reason:again"
            printf -- '- [~] (id:h-0004) stranded\n' >>"${BLK_F}"
            backlog_sweep_blocked "${BLK_B}")"
+
+# --- the ledger a person has to be able to read ----------------------------
+#
+# The sweep appends, and appending opens a `## P<n>` at the destination and
+# leaves an emptied one behind at the source. Every block and every unblock
+# therefore used to add a heading to each live file and never remove one, so a
+# machine that blocked a few tasks a night turned a backlog into a run of
+# single-task sections under repeated headings, with the empty shells of the
+# original ones stranded above them. It parsed correctly the whole time. It was
+# just no longer a file a person could open and see their queue in - which is
+# the only reason the ledger is Markdown.
+
+group 'the ledger stays readable'
+
+NRM_DIR=${TMPROOT}/normalize
+mkdir -p "${NRM_DIR}"
+NRM_B=${NRM_DIR}/backlog.md
+NRM_F=${NRM_DIR}/backlog.blocked.md
+NRM_A=${NRM_DIR}/backlog.completed.md
+
+cat >"${NRM_B}" <<'FIXTURE'
+# Backlog
+
+```
+## P1
+- [ ] the fenced example that is not a heading
+```
+
+## P1 - this week
+- [ ] (id:h-0001) one
+- [ ] (id:h-0002) two
+      note: a continuation line that belongs to h-0002
+
+## P2
+- [ ] (id:h-0003) three
+
+## P3
+FIXTURE
+cp "${NRM_B}" "${NRM_DIR}/before.md"
+
+# Three tasks blocked one at a time and unblocked one at a time: six sweeps,
+# which is a quiet night. Before the tidy this left eight headings across the
+# two files and no task under the first three of them.
+for NRM_ID in h-0001 h-0002 h-0003; do
+  backlog_set_state "${NRM_B}" "${NRM_ID}" "!" "blocked:2026-09-07T09:00 reason:a person has to decide" >/dev/null
+  backlog_sweep_blocked "${NRM_B}" >/dev/null
+done
+for NRM_ID in h-0001 h-0002 h-0003; do
+  ledger_set_state "${NRM_B}" "${NRM_ID}" " " "" >/dev/null
+  backlog_sweep_blocked "${NRM_B}" >/dev/null
+done
+
+t_eq "a task that went out and came back leaves the backlog exactly as it was" \
+  "" "$(diff "${NRM_DIR}/before.md" "${NRM_B}")"
+t_eq "so a priority has one heading however many sweeps touched it" \
+  "1 1 1" "$(awk '
+    /^[ \t]*(```|~~~)/ { infence = !infence; next }
+    infence { next }
+    /^##[ \t]*[Pp][0-9]+/ { n[$0]++ }
+    END { printf "%d %d %d", n["## P1 - this week"], n["## P2"], n["## P3"] }' "${NRM_B}")"
+t_eq "and the blocked file is not left with a heading per block either" \
+  1 "$(grep -c '^## P1$' "${NRM_F}")"
+t_eq "the order of attack is the one the file was written with" \
+  "h-0001" "$(backlog_next_id "${NRM_B}")"
+t_eq "and every task is still at the priority it was blocked at" \
+  "1 1 2" "$(backlog_scan "${NRM_B}" | awk -F'\t' '$4 != "" {printf "%s%s", sep, $2; sep = " "}')"
+t_has "a heading a person wrote for themselves is kept word for word" \
+  "${NRM_B}" '## P1 - this week'
+t_has "a heading left empty is theirs too, and survives" "${NRM_B}" '## P3'
+t_has "the fenced example is documentation, not a section" \
+  "${NRM_B}" '- [ ] the fenced example that is not a heading'
+t_eq "and is still inside its fence, above the first real heading" \
+  1 "$(awk '/^## P1 - this week/ { exit } /the fenced example/ { n++ } END { print n + 0 }' "${NRM_B}")"
+
+# Idempotence is what makes it safe to run at the end of every sweep: a ledger
+# that is already tidy is not rewritten, so nothing churns the file - or its
+# mtime - on the nights nothing moved.
+cp "${NRM_B}" "${NRM_DIR}/tidy.md"
+backlog_normalize "${NRM_B}"
+t_ok "normalising a tidy ledger succeeds" "$?"
+t_eq "and changes nothing" "" "$(diff "${NRM_DIR}/tidy.md" "${NRM_B}")"
+
+# The order within a priority is the order the tasks were written in, across
+# sections that were separate before the merge - it is what `backlog_next_row`
+# breaks ties on, so getting it wrong would silently reorder the queue.
+printf '\n## P1\n- [ ] (id:h-0009) written last, in a section of its own\n' >>"${NRM_B}"
+backlog_normalize "${NRM_B}"
+t_eq "a merged section keeps its tasks in the order they were written" \
+  "h-0001 h-0002 h-0009" \
+  "$(backlog_scan "${NRM_B}" | awk -F'\t' '$2 == 1 && $4 != "" {printf "%s%s", sep, $4; sep = " "}')"
+
+# The archive is the one ledger file this must not touch. Its repeated headings
+# are the record of when things moved, and folding them together would say that
+# tasks closed on the same night that closed a month apart.
+NRM_ARC_DIR=${TMPROOT}/normalize-archive
+mkdir -p "${NRM_ARC_DIR}"
+printf '# Backlog\n\n## P1\n- [x] (id:h-0004) closed today <!-- done:2026-09-07T10:00+09:00 run:20260907-100000 -->\n\n## P1\n- [ ] (id:h-0005) still open\n' \
+  >"${NRM_ARC_DIR}/backlog.md"
+printf '# Done\n\n## P1\n- [x] (id:h-0101) first night\n\n## P1\n- [x] (id:h-0102) second night\n' \
+  >"${NRM_ARC_DIR}/backlog.completed.md"
+backlog_archive_done "${NRM_ARC_DIR}/backlog.md" >/dev/null
+t_eq "the archive keeps a heading for every night it recorded" \
+  3 "$(grep -c '^## P1$' "${NRM_ARC_DIR}/backlog.completed.md")"
+t_eq "while the file the completion left is tidied like any other live file" \
+  1 "$(grep -c '^## P1$' "${NRM_ARC_DIR}/backlog.md")"
+
+# A file with no heading at all has nothing to group, and is handed back byte
+# for byte rather than reformatted on a guess.
+printf '# Backlog\n\n\n- [ ] (id:h-0201) no heading anywhere\n\n\n' >"${NRM_DIR}/flat.md"
+cp "${NRM_DIR}/flat.md" "${NRM_DIR}/flat-before.md"
+backlog_normalize "${NRM_DIR}/flat.md"
+t_eq "a ledger with no priority heading is left alone" \
+  "" "$(diff "${NRM_DIR}/flat-before.md" "${NRM_DIR}/flat.md")"
+
+# The tidy is presentation, and the sweep's status is about whether the tasks
+# moved. A caller reads that status to decide whether it may go on, so a
+# heading it could not straighten must not be reported as a move that failed.
+NRM_STUCK=${TMPROOT}/normalize-stuck
+mkdir -p "${NRM_STUCK}"
+cp "${NRM_DIR}/before.md" "${NRM_STUCK}/backlog.md"
+backlog_set_state "${NRM_STUCK}/backlog.md" h-0001 "!" "blocked:2026-09-07T09:00 reason:x" >/dev/null
+# A new task goes into the section it belongs to, and a section that exists but
+# holds nothing is a section. It used to get a second heading at the foot of the
+# file, which is the same defect the tidy exists for, arriving by another door -
+# and this one a person sees the moment they type the command.
+NRM_ADD=${TMPROOT}/normalize-add.md
+printf '# Backlog\n\n```\n## P1\n- [ ] the fenced example\n```\n\n## P1\n- [ ] (id:h-0001) one\n      note: belongs to one\n\n## P2\n\n## P3\n' \
+  >"${NRM_ADD}"
+backlog_insert_at_priority "${NRM_ADD}" 2 "a task for the empty section"
+t_eq "a task added to an empty section does not open a second heading for it" \
+  1 "$(grep -c '^## P2$' "${NRM_ADD}")"
+t_eq "and it is at the priority it was added to, not at the foot of the file" \
+  2 "$(backlog_scan "${NRM_ADD}" | awk -F'\t' '$5 == "a task for the empty section" {print $2}')"
+backlog_insert_at_priority "${NRM_ADD}" 1 "a task for a section that has one"
+t_eq "a section that already has a task still takes the new one at its end" \
+  "one a task for a section that has one" \
+  "$(backlog_scan "${NRM_ADD}" | awk -F'\t' '$2 == 1 {printf "%s%s", sep, $5; sep = " "}')"
+t_has "after the notes of the task before it, which are still that task's" \
+  "${NRM_ADD}" 'note: belongs to one'
+t_eq "the fenced example is not a section a task can be added to" \
+  after "$([ "$(line_of "${NRM_ADD}" 'a task for a section that has one')" \
+    -gt "$(line_of "${NRM_ADD}" '- [ ] the fenced example')" ] && echo after || echo inside)"
+t_eq "and the fence still holds only what it was written with" \
+  1 "$(awk '/^[ \t]*```/ { infence = !infence; next } infence && /^- \[/ { n++ } END { print n + 0 }' "${NRM_ADD}")"
+backlog_insert_at_priority "${NRM_ADD}" 5 "a priority the file has never had"
+t_eq "a priority with no heading at all still gets one" \
+  1 "$(grep -c '^## P5$' "${NRM_ADD}")"
+t_eq "and nothing the tidy would move afterwards" \
+  "" "$(cp "${NRM_ADD}" "${NRM_ADD}.was"; backlog_normalize "${NRM_ADD}"; diff "${NRM_ADD}.was" "${NRM_ADD}")"
+
+NRM_SAVED=$(declare -f backlog_normalize)
+backlog_normalize() { return 1; }
+backlog_sweep_blocked "${NRM_STUCK}/backlog.md" >/dev/null
+t_ok "a tidy that failed does not turn a sweep that worked into a failure" "$?"
+t_lacks "and the move it was reporting on really did happen" \
+  "${NRM_STUCK}/backlog.md" "(id:h-0001)"
+eval "${NRM_SAVED}"
+t_ok "the real tidy is back" \
+  "$(backlog_normalize "${NRM_STUCK}/backlog.md" >/dev/null 2>&1; echo $?)"
 
 group 'closing a task where it lies'
 

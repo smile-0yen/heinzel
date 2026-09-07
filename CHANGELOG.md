@@ -6,6 +6,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The live ledger stays readable.** A sweep appends, and appending opens a
+  `## P<n>` heading at the destination and leaves an emptied one behind at the
+  source — so every block and every unblock added a heading to each live file
+  and removed none. Nothing read it wrong: priority is the nearest heading above
+  a line, so each repeated heading was still true. But a machine that blocks a
+  few tasks a night turned `backlog.md` into a run of single-task sections under
+  repeated `## P1`s, with the empty shells of the original sections stranded
+  above them, and a person could no longer open the file and see their own
+  queue — which is the only reason the ledger is Markdown and not a database.
+  Both sweeps now end with `backlog_normalize` over the live files: one heading
+  per priority, ascending, tasks in the order they were written. It is
+  presentation only — no task moves between files, no marker changes, and the
+  order of attack (priority ascending, then position) is exactly what it was.
+  A heading a person wrote is kept word for word (`## P1 - this week`), a
+  priority they left empty stays as their placeholder, a `## P<n>` inside a
+  fence is still documentation, and the file is rewritten through the same
+  rename as every other ledger write and only when the result differs, so a
+  ledger already tidy is not touched at all. The archive is deliberately left
+  alone: its repeated headings are the record of when things moved. The tidy
+  does not report a status — a sweep's status is about whether the tasks moved,
+  and a heading that could not be straightened is not a move that failed.
+- **A new task goes into the section it belongs to, even when that section is
+  empty.** `backlog_insert_at_priority` looked for the priority's last *task*,
+  so `## P3` with nothing under it — a person's placeholder, or a section the
+  sweep had just emptied — counted as a section that did not exist: the task got
+  a second `## P3` at the foot of the file, below every other section, under a
+  heading the reader had already scrolled past. The same defect as above,
+  arriving by another door, and this one a person sees the moment they type
+  `hzl add`. The empty heading is now found and the task written directly under
+  it; only a priority with no heading anywhere still gets a new one. A `## P<n>`
+  inside a fence is documentation and is never inserted into.
+
 ## [0.3.18] - 2026-09-07
 
 A session that is on can be allowed to work at any hour, not only in the
