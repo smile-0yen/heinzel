@@ -1290,6 +1290,109 @@ ledger_move_marked() { # src dst want [template]
   printf '%s' "${n}"
 }
 
+# One heading per priority, ascending, each holding the tasks that belong to it
+# in the order they were written. This is the tidy that keeps a live ledger
+# readable, and without it the two sweeps above make it unreadable:
+# `ledger_move_marked` opens a `## P<n>` at the destination on every run of
+# tasks it appends, and leaves behind whatever heading it just emptied. One
+# block and one unblock of the same task is therefore one duplicated heading in
+# each file, permanently, and a machine that blocks a handful of tasks a night
+# turns a backlog into a list of single-task sections with the empty shells of
+# the original ones stranded above them. Nothing read it wrong - priority is the
+# nearest heading above a line, so every heading was still true - but a person
+# opening the file could no longer see their own queue, which is the whole
+# reason the file is Markdown and not a database.
+#
+# So this is presentation, not meaning: it moves no task between files, changes
+# no marker, and reorders nothing the order of attack depends on. Priority
+# ascending then top-to-bottom within a priority is what `backlog_next_row`
+# sorts by, and merging the sections of one priority in the order they appear
+# preserves exactly that.
+#
+# Not applied to the archive. That file is a record of when things moved, its
+# repeated headings are the shape of that record, and merging them would say
+# tasks closed together that closed a month apart.
+#
+# The heading a priority is printed with is the first one the file used for it,
+# verbatim: `## P1 - this week` is a person writing to themselves, and a tidy
+# that answered with a bare `## P1` would be editing their words.
+#
+# Rewrites through `ledger_tmp` and a rename, like every other rewrite here, and
+# only when the result differs - a ledger that is already tidy is not touched at
+# all, so this cannot churn the mtime of a file nothing happened to.
+backlog_normalize() { # file
+  local f=$1 tmp
+  [ -r "${f}" ] && [ -w "${f}" ] || return 1
+  tmp=$(ledger_tmp "${f}") || return 1
+  # The parse is backlog_scan's in the part that matters - fences are
+  # documentation, so a `## P1` inside one is not a heading. It is the example
+  # in the backlog's own header, and treating it as a heading would hoist the
+  # rest of that header into a section.
+  awk '
+    function keep(l) {
+      if (pre) { prel[npre] = l; npre++ }
+      else { line[cur SUBSEP cnt[cur]] = l; cnt[cur]++ }
+    }
+    BEGIN { np = 0; npre = 0; pre = 1; infence = 0 }
+    /^[ \t]*(```|~~~)/ { infence = !infence; keep($0); next }
+    infence { keep($0); next }
+    /^##[ \t]*[Pp][0-9]+/ {
+      h = $0
+      sub(/^##[ \t]*[Pp]/, "", h)
+      sub(/[^0-9].*$/, "", h)
+      p = h + 0
+      if (!(p in cnt)) { cnt[p] = 0; head[p] = $0; ps[np] = p; np++ }
+      cur = p; pre = 0
+      next
+    }
+    # A blank line inside a section is the signature of the sweep - every run of
+    # tasks it appends is preceded by one - and inside a section this format has
+    # no use for it: a section is task lines with their notes indented under
+    # them, which is what `worksheet_render` writes too. Dropped here rather
+    # than collapsed, so that the tidy is the same file however many sweeps
+    # produced it. Blank lines in the header above the first heading, and inside
+    # a fence, are text a person wrote and are left alone.
+    { if (!pre && $0 ~ /^[ \t]*$/) next; keep($0) }
+    END {
+      # A file with no heading at all is printed back byte for byte: there is
+      # nothing to group, and trimming its blank lines would be a change made
+      # for no reason.
+      if (np == 0) { for (i = 0; i < npre; i++) print prel[i]; exit }
+      while (npre > 0 && prel[npre - 1] ~ /^[ \t]*$/) npre--
+      for (i = 0; i < npre; i++) print prel[i]
+      for (i = 1; i < np; i++) {
+        v = ps[i]
+        for (j = i - 1; j >= 0 && ps[j] > v; j--) ps[j + 1] = ps[j]
+        ps[j + 1] = v
+      }
+      for (i = 0; i < np; i++) {
+        p = ps[i]
+        print ""
+        print head[p]
+        for (j = 0; j < cnt[p]; j++) print line[p SUBSEP j]
+      }
+    }
+  ' "${f}" >"${tmp}" || { rm -f "${tmp}"; return 1; }
+  if cmp -s "${tmp}" "${f}"; then
+    rm -f "${tmp}"
+    return 0
+  fi
+  mv -f "${tmp}" "${f}" || { rm -f "${tmp}"; return 1; }
+}
+
+# The tidy across the files a sweep may have disturbed. The archive is not one
+# of them, on purpose (see above).
+ledger_normalize_live() { # backlog
+  local f rc=0
+  while IFS= read -r f; do
+    [ -n "${f}" ] || continue
+    backlog_normalize "${f}" || rc=1
+  done <<EOF
+$(ledger_live_files "$1")
+EOF
+  return ${rc}
+}
+
 # Everything closed anywhere in the live ledger moves to the archive. Both live
 # files, because `hzl done` closes a blocked task where it lies, and a `[x]` left
 # in the blocked file is a completion in the file that is supposed to be nothing
@@ -1307,6 +1410,10 @@ backlog_archive_done() { # backlog
   done <<EOF
 $(ledger_live_files "${f}")
 EOF
+  # The tidy, which deliberately does not touch `rc`. The status this prints is
+  # about whether the completions moved, and a caller reads it to decide whether
+  # to go on; a heading left untidied is not a reason to say the sweep failed.
+  ledger_normalize_live "${f}" || :
   printf '%s' "${total}"
   return ${rc}
 }
@@ -1323,7 +1430,10 @@ EOF
 # spliced into the section it came from. Appending is the operation the crash
 # argument above is built on, and a repeated heading is legal in this format:
 # priority is the nearest heading above a line, so the task lands back at exactly
-# the priority it left with.
+# the priority it left with. Legal, and unreadable by the tenth time it happens,
+# which is why `backlog_normalize` runs at the end and folds them back into one
+# section per priority - after the move, so a crash between the two leaves a
+# file that is untidy rather than one that is wrong.
 #
 # Caller holds the backlog lock.
 backlog_sweep_blocked() { # backlog
@@ -1335,6 +1445,7 @@ backlog_sweep_blocked() { # backlog
     back=$(ledger_move_marked "${b}" "${f}" '^!' "${BACKLOG_TEMPLATE}") || rc=1
     case ${back} in ""|*[!0-9]*) back=0 ;; esac
   fi
+  ledger_normalize_live "${f}" || :
   printf '%s %s' "${out}" "${back}"
   return ${rc}
 }
@@ -1686,6 +1797,14 @@ worksheet_write() {
 # task *and its continuation lines* - inserting between a task and its notes
 # would silently reassign the notes to the new task. A section that no longer
 # exists gets one at the end of the file, rather than the task dropping into P99.
+#
+# A section that exists but holds nothing is the third case, and it used to fall
+# into the second: `## P3` written by a person as a placeholder, or left behind
+# by the sweep that emptied it, got a *second* `## P3` at the foot of the file
+# and the task landed there - below every other section, under a heading the
+# reader had already seen. So the empty heading is looked for before the file is
+# appended to, and the task goes directly under it. Same reason as
+# `backlog_normalize`: the file is Markdown so that a person can read it.
 backlog_insert_at_priority() {
   local f=$1 prio=$2 text=$3 last after tmp
   text=$(oneline "${text}")
@@ -1693,6 +1812,23 @@ backlog_insert_at_priority() {
   case ${prio} in ""|*[!0-9]*) prio=99 ;; esac
   last=$(backlog_scan "${f}" 2>/dev/null |
     awk -F'\t' -v p="${prio}" '$2 == p {n = $1} END {if (n) print n}')
+  if [ -z "${last}" ]; then
+    # The heading of an empty section, if the file has one. Fences are skipped
+    # for the reason they always are: the example in the backlog's own header is
+    # a `## P1`, and inserting a real task under it would put the task inside
+    # the documentation.
+    last=$(awk -v p="${prio}" '
+      /^[ \t]*(```|~~~)/ { infence = !infence; next }
+      infence { next }
+      /^##[ \t]*[Pp][0-9]+/ {
+        h = $0
+        sub(/^##[ \t]*[Pp]/, "", h)
+        sub(/[^0-9].*$/, "", h)
+        if (h + 0 == p && !n) n = NR
+      }
+      END { if (n) print n }
+    ' "${f}")
+  fi
   if [ -z "${last}" ]; then
     printf '\n## P%s\n- [ ] %s\n' "${prio}" "${text}" >>"${f}"
     return 0
