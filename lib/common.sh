@@ -11,7 +11,7 @@
 # Multibyte truncation is locale-dependent (DESIGN 6.3). Fix it once, here.
 export LC_CTYPE=UTF-8
 
-HEINZEL_VERSION="0.3.18"
+HEINZEL_VERSION="0.3.19"
 
 # The TTL ceiling is deliberately not configurable. A session that can be
 # created with an unbounded lifetime is not a session, it is a mode.
@@ -463,6 +463,54 @@ slots_within() {
     done
   done
   printf '%s' "${n}"
+}
+
+# The next scheduled slot at or after the top of the hour following ${1:-now},
+# as an epoch second. Slots are on the hour, so the search starts at the next
+# top of the hour and steps forward one hour at a time; the schedule repeats
+# daily, so twenty-four steps either find a slot or there is none. There is
+# none only when the hour list is empty, which `hzl_validate_conf` has already
+# refused - so the failure return is a bug's exit, not a state to design for.
+#
+# The top of the next hour is found by subtracting the minutes and seconds the
+# current one has already spent, and not by rounding the epoch down to a
+# multiple of 3600: epoch seconds align to UTC, so that rounding lands on :30
+# in a zone offset by half an hour. Stepping by an hour and re-reading `%H`
+# also keeps a DST change honest, which arithmetic on the epoch would not.
+next_slot_epoch() {
+  local from probe mm ss h hh i=0
+  from=${1:-$(now_epoch)}
+  mm=$(date -r "${from}" +%M); mm=${mm#0}; [ -z "${mm}" ] && mm=0
+  ss=$(date -r "${from}" +%S); ss=${ss#0}; [ -z "${ss}" ] && ss=0
+  probe=$((from - mm * 60 - ss + 3600))
+  while [ "${i}" -lt 24 ]; do
+    hh=$(date -r "${probe}" +%H); hh=${hh#0}; [ -z "${hh}" ] && hh=0
+    for h in $(hours_normalised); do
+      if [ "${h}" -eq "${hh}" ]; then
+        printf '%s' "${probe}"
+        return 0
+      fi
+    done
+    probe=$((probe + 3600))
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# A distance in seconds, as a person reads one: "in 3h 47m". Rounded down to
+# the minute, and anything under a minute is said in words rather than as
+# "in 0m", which reads like a schedule that has stopped.
+rel_dur() {
+  local s=$1 d h m
+  [ "${s}" -lt 60 ] && { printf 'in under a minute'; return 0; }
+  d=$((s / 86400)); h=$((s % 86400 / 3600)); m=$((s % 3600 / 60))
+  if [ "${d}" -gt 0 ]; then
+    printf 'in %dd %dh' "${d}" "${h}"
+  elif [ "${h}" -gt 0 ]; then
+    printf 'in %dh %dm' "${h}" "${m}"
+  else
+    printf 'in %dm' "${m}"
+  fi
 }
 
 # --- session state ---------------------------------------------------------

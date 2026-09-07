@@ -6,6 +6,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.19] - 2026-09-08
+
+"When does this next run?" had no command behind it. `HEINZEL_HOURS` is the
+shape of the schedule, not a time; `hzl install` printed the hours once, at
+install; and whether a slot would actually do anything was spread across seven
+gates in the runner. `hzl schedule` answers all of it in one screen, and `hzl
+status` carries the next slot on one line. Cuts the three fixes that had been
+sitting unreleased since v0.3.18 along with it. A patch bump and not a minor
+one: the minor is reserved for the task that completes a phase of
+`docs/RUNTIME-BACKENDS.md`, and this completes none.
+
+### Added
+- **`hzl schedule`.** The next slot as a clock time and the four after it, the
+  hours, the minimum gap, launchd's throttle, the label, the plist, the runner,
+  and the budget, timeouts, paths and engines a run would use — the settings of
+  a live session when there is one, and the defaults the next `hzl on` would
+  start with when there is not. Two of those lines are asked of the system
+  rather than read out of the configuration, because they are the ones that go
+  wrong: `launchctl` says whether the agent is really loaded, and the installed
+  plist is diffed against what this configuration generates, so a schedule
+  edited and never installed is named as such instead of being reported back as
+  fact. The line to read first is `will it run`, which walks the runner's gates
+  in the runner's own order and names the first one that is shut — no agent, no
+  session, a slot past the session's expiry, **a slot inside the session with
+  less than one wall clock left before it** (gate 5 refuses a run it cannot
+  finish, and this is the case that reading an hours list by eye gets wrong
+  every time), a spent budget, or battery. When none of them is shut it says so
+  and says what is still unknowable until the slot arrives: an empty backlog, a
+  sleeping machine.
+- **`next run` in `hzl status`, and `next_run` in `hzl status --json`.** One
+  line, in the command people already run. It is the schedule's answer, so it
+  is printed whether or not a session is live — with the reason nothing will
+  come of it when that is true: `nothing runs until 'hzl on'` outside a session,
+  `too little session left to run` when the slot falls past the expiry or too
+  close to it. The JSON field is ISO 8601 with an offset, like `expires_at`
+  beside it, and is null only when the schedule names no hour at all.
+- **`next_slot_epoch` and `rel_dur` (`lib/common.sh`).** The next firing is
+  derived from `hours_normalised` — the same function `StartCalendarInterval`
+  is generated from — so there is still one source of truth for the schedule
+  and the plist is never parsed back. The search starts at the top of the hour
+  following its argument and steps an hour at a time, re-reading the local hour
+  each step: rounding an epoch down to a multiple of 3600 would land on `:30`
+  in a zone offset by half an hour, and would carry a DST change into a wrong
+  answer. The minutes and seconds already spent are subtracted rather than
+  rounded away, which is why the tests pin `09:09:09` — a leading zero read as
+  octal fails silently, on eight minutes of every hour.
+
 ### Fixed
 - **The live ledger stays readable.** A sweep appends, and appending opens a
   `## P<n>` heading at the destination and leaves an emptied one behind at the

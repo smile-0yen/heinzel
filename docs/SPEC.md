@@ -99,6 +99,7 @@ Privileged subcommands escalate internally.
 | Command | Arguments | Exit |
 |---|---|---|
 | `status` | `--json`, `--quiet` | **0** no session, **10** session live, 1 error |
+| `schedule` | — | 0 / 1 |
 | `on` | `--duration --max-tasks --max-total --timeout --backlog --workdir --no-sudo --force --no-kick --dry-run` | 0 / 1 |
 | `off` | `--unload --no-sudo` | 0 / 1 |
 | `resume` | — | 0 / 1 |
@@ -126,6 +127,13 @@ and putting it back to hide the half that failed would discard both. The command
 says which half stands and what to run to finish it. A sweep that failed prints
 the same count as a sweep with nothing to do, so callers read the status and not
 only the number (§8).
+
+`schedule` answers "when does this next run, and will that run do anything",
+and is read-only: it asks `launchctl` whether the agent is loaded and diffs the
+installed plist against what the current configuration generates, but installs
+nothing and repairs nothing. Its exit status is 0 whenever it could print an
+answer, including one that is entirely bad news — the answer is the output, not
+the code. `status --json` carries the same next-slot time as `next_run`.
 
 `status`'s and `report`'s exit codes are contracts other scripts may branch on;
 `--quiet` produces the code and no output. They answer different questions —
@@ -1386,6 +1394,17 @@ with no session, because the alternative is keeping launchd's load state and
 
 launchd replays calendar events missed while asleep, all at once on wake, which
 is why gate 3 exists in the runner as well.
+
+`next_slot_epoch` derives the next firing from `hours_normalised` — the same
+function `StartCalendarInterval` is generated from — rather than by parsing the
+installed plist, so it describes the schedule as configured. `hzl schedule`
+reports the difference between the two separately, by diffing the generated
+plist against the installed one, because a schedule edited and not installed is
+the failure a next-run time computed from configuration would otherwise hide.
+The search starts at the top of the hour following the given time and steps an
+hour at a time, re-reading the local hour on each step: epoch arithmetic alone
+would land on `:30` in a zone offset by half an hour, and would carry a DST
+change into a wrong answer.
 
 ## §15 Verification status
 

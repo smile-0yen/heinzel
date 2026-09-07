@@ -19,6 +19,7 @@ hzl remote                # open it up:   screen sharing on, wake-on-LAN, read-o
 hzl on --duration 10h     # start an unattended session (expires by itself)
 hzl off                   # stop it, and restore what it changed
 hzl status                # what is actually true right now
+hzl schedule              # when the next run is, and whether it will do anything
 hzl report                # the morning read: what is blocked, what got done
 ```
 

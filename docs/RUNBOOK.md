@@ -294,6 +294,20 @@ morning it matters most.
 
 ## When it runs
 
+```sh
+hzl schedule
+```
+
+The whole answer in one screen: the next slot as a clock time, the four after
+it, whether the launch agent is actually loaded, whether the plist installed
+matches the configuration on disk, and — the line worth reading first —
+`will it run`, which walks the runner's gates in order and names the first one
+that is shut. A slot inside a session that has less than one wall clock left
+before it expires is a slot that fires and does nothing; that is the case
+reading `HEINZEL_HOURS` by eye gets wrong every time, and it is the case this
+line is for. `hzl status` carries the next slot on one line, and `hzl status
+--json` as `next_run`.
+
 `HEINZEL_HOURS` in `etc/heinzel.conf` is the schedule, and `hzl install` writes
 it into the LaunchAgent:
 
@@ -353,6 +367,8 @@ rather than by task count, set `HEINZEL_MAX_BUDGET_USD`.
 
 **"It did nothing all night."** `hzl status` first. Most likely the session
 expired, the machine went onto battery, or the backlog had no `[ ]` lines.
+`hzl schedule` would have said so the evening before: its `will it run` line
+answers for the next slot, and the same gates decided every slot overnight.
 Scheduled runs skip on battery deliberately; `hzl run-now` does not, so it is
 the way to check whether anything else is wrong.
 `grep skip ~/.heinzel/logs/runner.log` shows which gate closed and when.

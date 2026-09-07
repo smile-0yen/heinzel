@@ -150,9 +150,13 @@ cmd_status() {
     # Reported, never repaired: a v1 file reads as v1 here and stays a v1 file.
     # `status` is the command a script runs in a loop, and the one command that
     # must be safe to run against a state file written by another build.
-    local schema backend=""
+    local schema backend="" nxt next_run=""
     schema=$(state_schema_json)
     [ -r "${STATE_FILE}" ] && backend=$(state_runtime_backend)
+    # The next slot, whether or not a session is live: a script asking when the
+    # machine next wakes is asking about the schedule, and the schedule does
+    # not depend on the session.
+    nxt=$(next_slot_epoch) && next_run=$(iso_at "${nxt}")
     jq -n \
       --arg mode "${mode}" \
       --argjson schema_version "${schema}" \
@@ -165,6 +169,7 @@ cmd_status() {
       --argjson tasks_done "$(state_get .tasks_done_total 0)" \
       --argjson max_total "$(state_get .max_tasks_total 0)" \
       --arg expires_at "$(state_get .expires_at "")" \
+      --arg next_run "${next_run}" \
       --arg halt "$(state_get .halt_reason "")" \
       '{mode: $mode, reason: $reason, posture: $posture,
         schema_version: $schema_version,
@@ -172,6 +177,7 @@ cmd_status() {
         sleep_disabled: $sleep_disabled, backlog: $backlog,
         tasks_done_total: $tasks_done, max_tasks_total: $max_total,
         expires_at: $expires_at, halt_reason: (if $halt == "" then null else $halt end),
+        next_run: (if $next_run == "" then null else $next_run end),
         last_run: $last_run}'
     return ${rc}
   fi
@@ -189,6 +195,28 @@ cmd_status() {
     field "workdir" "$(state_get .workdir "")"
   else
     field "session" "off - ${HZ_REASON}"
+  fi
+
+  # The other half of "is this doing the right thing". A session that is on
+  # says nothing about when the next run starts, and `HEINZEL_HOURS` is the
+  # shape of the schedule rather than a time - so the question was answerable
+  # only by reading a config file and doing the arithmetic by hand. One line
+  # here; `hzl schedule` is the whole picture.
+  local nxt exp_at when
+  if nxt=$(next_slot_epoch); then
+    when="$(short_at "${nxt}") ($(rel_dur $((nxt - $(now_epoch)))))"
+    exp_at=$(state_get .expires_at_epoch 0)
+    if [ "${mode}" != heinzel ]; then
+      field "next run" "${when} - nothing runs until 'hzl on'"
+    elif [ "${exp_at}" -gt 0 ] &&
+         [ $((exp_at - nxt)) -lt "$(state_get .run_timeout_sec "${DEFAULT_RUN_TIMEOUT}")" ]; then
+      # Both shapes of the same miss: the slot falls after the session ends, or
+      # it falls inside it with less than one wall clock to spare, which the
+      # runner refuses just as flatly. `hzl schedule` says which.
+      field "next run" "${when} - $(bad "too little session left to run")"
+    else
+      field "next run" "${when}"
+    fi
   fi
 
   case ${posture} in
@@ -1600,6 +1628,146 @@ cmd_uninstall() {
   good "removed ${HEINZEL_LABEL}"
 }
 
+# --- schedule --------------------------------------------------------------
+
+# "When does this run, and with what settings?"
+#
+# Both halves of that question had answers before this command and neither was
+# reachable: the schedule was a line `hzl install` printed once and an hours
+# list in a file the runner reads but nobody opens at nine in the morning, and
+# the hour it would next fire was nowhere at all - `hours` is the shape of the
+# schedule, not a time. So this prints the next slot as a clock time, and with
+# it every setting that decides whether that slot does anything, in the order
+# the runner consults them. A slot that will fire and do nothing says so the
+# evening before rather than the morning after.
+#
+# Configuration is not the whole answer and is not printed as though it were:
+# `launchctl` is asked whether the agent is actually loaded, and the installed
+# plist is diffed against what this configuration generates, because a
+# schedule that has been edited but not installed is exactly the failure this
+# command exists to catch.
+cmd_schedule() {
+  [ $# -eq 0 ] || die "schedule: unknown option $1"
+
+  hzl_eval_mode
+  local live=0
+  [ "${HZ_MODE}" = heinzel ] && live=1
+
+  local now next expires pl loaded=0 throttle
+  now=$(now_epoch)
+  expires=$(state_get .expires_at_epoch 0)
+  next=$(next_slot_epoch "${now}") || next=""
+  pl=$(plist_path)
+  launchctl print "gui/$(id -u)/${HEINZEL_LABEL}" >/dev/null 2>&1 && loaded=1
+  # Read back out of the generated plist rather than written here as well:
+  # ThrottleInterval is launchd's floor on re-firing and it belongs to the
+  # template, and a second copy of it in this function would be the one that
+  # went stale.
+  throttle=$(generate_plist |
+    awk '/<key>ThrottleInterval<\/key>/ { getline; gsub(/[^0-9]/, ""); print; exit }')
+
+  printf '\nwhen\n'
+  field "hours" "$(hours_display) (on the hour)"
+  if [ "${HEINZEL_MIN_RUN_GAP_SEC}" -gt 0 ]; then
+    field "minimum gap" "${HEINZEL_MIN_RUN_GAP_SEC}s since the last run that ran"
+  else
+    field "minimum gap" "off (HEINZEL_MIN_RUN_GAP_SEC=0)"
+  fi
+  field "launchd throttle" "${throttle:-unknown}s between firings"
+  field "at load" "does not run - only the schedule starts a run"
+
+  printf '\nthe launch agent\n'
+  field "label" "${HEINZEL_LABEL}"
+  if [ "${loaded}" = 1 ]; then
+    field "loaded" "$(good yes)"
+  else
+    field "loaded" "$(bad no) - nothing will fire until 'hzl install'"
+  fi
+  field "plist" "${pl}"
+  if [ ! -f "${pl}" ]; then
+    field "matches this config" "$(bad "no plist installed") - run 'hzl install'"
+  elif generate_plist | diff -q - "${pl}" >/dev/null 2>&1; then
+    field "matches this config" "$(good yes)"
+  else
+    field "matches this config" "$(bad no) - the installed schedule is not this one; run 'hzl install'"
+  fi
+  field "runner" "${RUNNER}"
+
+  printf '\nnext runs\n'
+  if [ -n "${next}" ]; then
+    field "next run" "$(short_at "${next}") ($(rel_dur $((next - now))))"
+    # The four after it on one line: the left column is a label, and four
+    # identical labels would say the same thing four times.
+    local more="" e=${next} i=0
+    while [ "${i}" -lt 4 ]; do
+      e=$(next_slot_epoch "${e}") || break
+      more="${more}${more:+, }$(short_at "${e}")"
+      i=$((i + 1))
+    done
+    [ -n "${more}" ] && field "then" "${more}"
+  else
+    field "next run" "$(bad "no scheduled hour") - check HEINZEL_HOURS"
+  fi
+
+  # The gates, asked in the runner's order, so that this is a reading of the
+  # same facts and not a second opinion about them.
+  local verdict to
+  to=$(state_get .run_timeout_sec "${DEFAULT_RUN_TIMEOUT}")
+  if [ "${loaded}" != 1 ]; then
+    verdict="$(bad no) - the launch agent is not loaded; run 'hzl install'"
+  elif [ "${live}" != 1 ]; then
+    verdict="$(bad no) - ${HZ_REASON}; start a session with 'hzl on'"
+  elif [ -n "${next}" ] && [ "${expires}" -gt 0 ] && [ "${next}" -ge "${expires}" ]; then
+    verdict="$(bad no) - the session expires $(short_at "${expires}"), before that slot"
+  elif [ -n "${next}" ] && [ "${expires}" -gt 0 ] && [ $((expires - next)) -lt "${to}" ]; then
+    # Gate 5, not a rounding of it: the runner refuses to start a run it cannot
+    # finish, so a slot inside the session is still a slot that does nothing
+    # when less than one wall clock remains. This is the case a schedule read
+    # by eye gets wrong every time.
+    verdict="$(bad no) - only $((expires - next))s of session left at that slot, and a run is given ${to}s"
+  elif [ "$(state_get .tasks_done_total 0)" -ge "$(state_get .max_tasks_total 0)" ]; then
+    verdict="$(bad no) - the session budget is spent ($(budget_line))"
+  elif ! on_ac_power; then
+    verdict="$(bad "not while on battery") ($(battery_pct)) - scheduled runs skip; 'hzl run-now' does not"
+  else
+    # Everything knowable now is open. What is left is knowable only then: an
+    # empty backlog, a sleeping machine, a run still holding the lease.
+    verdict="$(good yes), unless the backlog is empty or the machine is asleep"
+  fi
+  field "will it run" "${verdict}"
+
+  if [ "${live}" = 1 ]; then
+    printf '\nwhat a run will use (this session)\n'
+    field "session expires" "$(short_at "${expires}")"
+    field "budget" "$(budget_line)"
+    field "tasks per run" "$(state_get .max_tasks_per_run 0)"
+    field "wall clock per run" "$(state_get .run_timeout_sec 0)s"
+    field "workdir" "$(state_get .workdir "")"
+    field "backlog" "$(state_get .backlog "")"
+  else
+    # The defaults, labelled as defaults: outside a session these are what the
+    # next `hzl on` would start with, not what anything is running under.
+    printf '\nwhat the next session will start with\n'
+    field "session length" "${DEFAULT_DURATION}"
+    field "tasks per session" "${DEFAULT_MAX_TASKS_TOTAL}"
+    field "tasks per run" "${DEFAULT_MAX_TASKS}"
+    field "wall clock per run" "${DEFAULT_RUN_TIMEOUT}s"
+    field "workdir" "${DEFAULT_WORKDIR:-unset}"
+    field "backlog" "${DEFAULT_BACKLOG:-unset}"
+  fi
+
+  printf '\nengines\n'
+  field "executor" "${HEINZEL_EXECUTOR_ENGINE} (${HEINZEL_MODEL}, ${HEINZEL_EFFORT})"
+  if [ "${HEINZEL_REVIEW}" = 1 ]; then
+    field "review" "on - ${HEINZEL_REVIEWER_ENGINE}, on revise: ${HEINZEL_REVIEW_ON_REVISE}"
+  else
+    field "review" "off (HEINZEL_REVIEW=0)"
+  fi
+
+  printf '\n'
+  return 0
+}
+
 # --- dispatch --------------------------------------------------------------
 
 usage() {
@@ -1648,6 +1816,8 @@ backlog
 
 everything else
   hzl status [--json|--quiet]  what is actually true right now
+  hzl schedule                 when the next run is, and every setting that
+                               decides whether it does anything
   hzl doctor                   check the whole setup
   hzl logs [-f] [-n N]         recent run logs
   hzl install / uninstall      the launchd agent
@@ -1667,6 +1837,7 @@ cmd=${1:-}
 [ $# -gt 0 ] && shift
 case ${cmd} in
   status) cmd_status "$@" ;;
+  schedule) cmd_schedule "$@" ;;
   on) cmd_on "$@" ;;
   off) cmd_off "$@" ;;
   resume) cmd_resume "$@" ;;

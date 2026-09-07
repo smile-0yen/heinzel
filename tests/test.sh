@@ -1433,6 +1433,71 @@ t_ok "and zero is, because zero turns it off" "$?"
 
 unset HEINZEL_HOURS
 
+# --- the next slot, as a time ----------------------------------------------
+#
+# `hours_normalised` is the shape of the schedule; `next_slot_epoch` is the
+# question a person actually asks, and `hzl schedule` and `hzl status` both
+# print its answer. The two properties worth pinning are that the slot it
+# names is one the schedule names, and that asking again from a slot moves
+# forward - the "then" list in `hzl schedule` walks it in a loop and would not
+# terminate otherwise.
+
+group 'the next slot'
+
+HEINZEL_HOURS="2 9 17"
+NS_NOW=$(now_epoch)
+NS=$(next_slot_epoch "${NS_NOW}")
+t_ok "a slot is found" "$?"
+NS_H=$(date -r "${NS}" +%H | sed 's/^0//;s/^$/0/')
+ns_scheduled() { # hour -> 0 when the schedule names it
+  local h
+  for h in $(hours_normalised); do
+    [ "${h}" -eq "$1" ] && return 0
+  done
+  return 1
+}
+t_true "and it falls on an hour the schedule names" ns_scheduled "${NS_H}"
+t_eq "on the hour itself, because that is when launchd fires" \
+  "00" "$(date -r "${NS}" +%M)"
+t_true "it is in the future" [ "${NS}" -gt "${NS_NOW}" ]
+t_true "and inside the next day, because the schedule repeats daily" \
+  [ $((NS - NS_NOW)) -le 86400 ]
+
+NS2=$(next_slot_epoch "${NS}")
+t_true "asking again from a slot gives a later one, never that same slot" \
+  [ "${NS2}" -gt "${NS}" ]
+
+HEINZEL_HOURS="all"
+NS_NOW=$(now_epoch)
+NS=$(next_slot_epoch "${NS_NOW}")
+t_eq "with every hour scheduled the next slot is the top of the next hour" \
+  "00:00" "$(date -r "${NS}" +%M:%S)"
+t_true "which is at most an hour away" [ $((NS - NS_NOW)) -le 3600 ]
+
+# The minutes and seconds already spent are subtracted with arithmetic, so a
+# leading zero must not be read as octal - 09:09:09 is the shape that breaks a
+# `$((10#))`-less implementation, and it breaks it silently, on eight minutes
+# of every hour.
+HEINZEL_HOURS="10"
+NS_ODD=$(date -j -f '%Y-%m-%d %H:%M:%S' "$(date +%Y-%m-%d) 09:09:09" +%s)
+t_eq "a from-time with leading-zero minutes and seconds is arithmetic, not octal" \
+  "10:00:00" "$(date -r "$(next_slot_epoch "${NS_ODD}")" +%H:%M:%S)"
+
+unset HEINZEL_HOURS
+
+# --- how long until then ---------------------------------------------------
+
+group 'a distance a person reads'
+
+t_eq "under a minute is said in words - 'in 0m' reads like a stopped clock" \
+  "in under a minute" "$(rel_dur 59)"
+t_eq "a minute is a minute" "in 1m" "$(rel_dur 60)"
+t_eq "minutes alone, below the hour" "in 5m" "$(rel_dur 300)"
+t_eq "hours and minutes, rounded down to the minute" \
+  "in 3h 47m" "$(rel_dur $((3 * 3600 + 47 * 60 + 59)))"
+t_eq "days and hours, and no minutes: nobody reads the third unit" \
+  "in 2d 3h" "$(rel_dur $((2 * 86400 + 3 * 3600 + 59 * 60)))"
+
 # --- the minimum gap between runs ------------------------------------------
 #
 # What is left of the window guard when the window is every hour: `all` makes
