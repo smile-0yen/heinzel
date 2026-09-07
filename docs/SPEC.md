@@ -377,7 +377,7 @@ engine call.
 | 3 | session budget remaining > 0 | `skip` |
 | 4 | on AC power **or** `--from manual` | `skip` |
 | 5 | time to expiry ≥ `run_timeout_sec` | `skip` |
-| 6 | **every** workspace, backlog, engine, and **valid settings JSON** | `abort` |
+| 6 | **every** workspace, backlog, engine, and **valid settings JSON** — plus, when `HEINZEL_SAFE_MODE=1`, that the settings file actually carries the safe-mode denials (§13.1) | `abort` |
 | 7 | at least one `[ ]` task | `skip` |
 
 `--from manual` bypasses gates 2, 2b and 4. The other five apply unchanged.
@@ -1485,6 +1485,7 @@ the review and model keys, which are environment > conf > default so that
 | `HEINZEL_REVIEW_TIMEOUT` | `900` | ≥ 1 |
 | `HEINZEL_REVIEW_MAX_PATCH_BYTES` | `200000` | ≥ 1 |
 | `HEINZEL_POSTURE` | `0` | `0\|1` |
+| `HEINZEL_SAFE_MODE` | `1` | `0\|1`. The one opt-**out** switch here (§13.1). `1` generates a deny rule per command in `hzl_safe_mode_commands` into the agent's permission file; `0` generates none of them. Conf only — no environment override, because the setting is a claim about a *generated file* and an environment variable could not change what that file already says. Changing it needs `hzl install` again |
 | `HEINZEL_LABEL` | `local.heinzel` | launchd label |
 | `LOG_RETENTION_DAYS` | `14` | ≥ 1. The day directories under `logs/` **and** the per-run stores under `runs/` (§11.1) — one window, because the two are halves of one record |
 
@@ -1495,6 +1496,57 @@ no-ops), `HEINZEL_DRY_RUN=1` (record the command, do not run it),
 An invalid value **stops the tool at startup**. Effort typos are rejected here
 because they degrade differently per engine: claude warns and completes at its
 default, invisibly; codex gets a 400.
+
+### 13.1 Safe mode (normative)
+
+`HEINZEL_SAFE_MODE=1` (the default) denies the commands that reach something
+which is neither this machine nor a file: a cluster, a cloud account, a
+registry, a package index, another host. The list is
+`hzl_safe_mode_commands` in `lib/common.sh` — `gcloud`, `gsutil`, `bq`, `aws`,
+`az`, `doctl`, `kubectl`, `kubeadm`, `eksctl`, `helm`, `oc`, `terraform`,
+`terragrunt`, `tofu`, `pulumi`, `ansible`, `ansible-playbook`, `salt`,
+`serverless`, `flyctl`, `fly`, `heroku`, `vercel`, `netlify`, `wrangler`,
+`railway`, `firebase`, `supabase`, `ssh`, `scp`, `sftp`, `rsync`,
+`docker push`, `docker login`, `podman push`, `npm publish`, `pnpm publish`,
+`yarn publish`, `cargo publish`, `gem push`, `twine upload`, `poetry publish`,
+`mvn deploy`, `gradle publish`.
+
+Normative points, in the order they bite:
+
+1. **Two rules per command**, `Bash(x *)` and `Bash(x:*)`. A rule in one syntax
+   only is accepted and never consulted (§ the template's own comment).
+2. **`generate_settings` merges them** into `.permissions.deny`, ahead of the
+   template's rules. They are built in `bin/hzl` rather than written into
+   `etc/heinzel-settings.json.in` because `etc/` is denied to the unattended
+   agent, so a run improving Heinzel can change the list and cannot change the
+   template. The generated file is the same either way.
+3. **The default holds with no configuration at all.** `generate_settings`
+   reads `${HEINZEL_SAFE_MODE:-1}`, so a conf file written before this existed,
+   or none, still generates a confined file.
+4. **The runner aborts on a mismatch.** With the setting at `1`, gate 6
+   (§7) calls `safe_mode_missing_rules` against the installed permission file
+   and aborts naming what is missing. A control believed to be on and absent is
+   the failure this project treats as worst; the opposite mismatch — setting
+   `0`, file still carrying the rules — costs nothing and is a `hzl doctor`
+   remark.
+5. **`git push` is not on the list.** The release ritual is built on it and the
+   sandbox allows exactly `github.com`; `--force`, `--mirror` and `--delete`
+   stay denied by the template. Closing it too means removing `github.com` from
+   `sandbox.network.allowedDomains` in the template and re-running
+   `hzl install`.
+6. **The prompt says which mode it is in** (`{{SAFE_MODE_NOTE}}`), both ways.
+   The deny list is what enforces; the sentence is what lets a run *block with a
+   usable request* instead of discovering the refusal mid-task.
+7. **It is a permission-layer control, not a sandbox.** It governs the agent's
+   own Bash tool. A subprocess that invokes `kubectl` itself is stopped by the
+   sandbox and its domain allowlist, not by this. `SECURITY.md` records the
+   boundary.
+
+Not on the list, deliberately: `curl`/`wget` (the sandbox's domain allowlist is
+the control, and denying them would deny testing a local server), `psql`/
+`mysql`/`redis-cli` (a rule cannot tell a local test database from a production
+one; the prompt already makes a database write a block), and `docker build`/
+`docker run` (local — only the commands that move something *out* are listed).
 
 ## §14 LaunchAgent
 

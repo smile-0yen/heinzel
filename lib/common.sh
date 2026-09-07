@@ -11,7 +11,7 @@
 # Multibyte truncation is locale-dependent (DESIGN 6.3). Fix it once, here.
 export LC_CTYPE=UTF-8
 
-HEINZEL_VERSION="0.3.23"
+HEINZEL_VERSION="0.3.24"
 
 # The TTL ceiling is deliberately not configurable. A session that can be
 # created with an unbounded lifetime is not a session, it is a mode.
@@ -287,6 +287,11 @@ hzl_load_conf() {
   HEINZEL_REVIEW_TIMEOUT=900
   HEINZEL_REVIEW_MAX_PATCH_BYTES=200000
   HEINZEL_CODEX_IGNORE_USER_CONFIG=0
+  # Safe mode is opt-OUT, which is the opposite of every other switch here and
+  # deliberately so: the unattended lane is where a `terraform apply` would run
+  # with nobody watching, so the default has to be the safe one and turning it
+  # off has to be a sentence somebody wrote.
+  HEINZEL_SAFE_MODE=1
   # Posture is opt-in: with no configuration we refuse rather than guess at
   # someone else's firewall (DESIGN 8).
   HEINZEL_POSTURE=0
@@ -365,6 +370,12 @@ hzl_validate_conf() {
   case ${HEINZEL_POSTURE} in
     0|1) ;;
     *) err "HEINZEL_POSTURE must be 0 or 1 (got '${HEINZEL_POSTURE}')"; return 1 ;;
+  esac
+  # A typo here would read as 0 in a `[ = 1 ]` test - that is, as safe mode off,
+  # which is the one value nobody types by accident.
+  case ${HEINZEL_SAFE_MODE} in
+    0|1) ;;
+    *) err "HEINZEL_SAFE_MODE must be 0 or 1 (got '${HEINZEL_SAFE_MODE}')"; return 1 ;;
   esac
   case ${HEINZEL_CODEX_IGNORE_USER_CONFIG} in
     0|1) ;;
@@ -476,6 +487,122 @@ hours_display() {
   else
     hours_normalised
   fi
+}
+
+# --- safe mode -------------------------------------------------------------
+
+# The commands that reach something which is not this machine and not a file:
+# a cluster, a cloud account, a registry, a package index, another host. Safe
+# mode denies them in the agent's permission file, so an unattended run that
+# needs one is stopped by a refusal and blocks the task rather than deploying
+# at three in the morning with nobody watching.
+#
+# One command per line. Each becomes two deny rules, `Bash(x *)` and `Bash(x:*)`,
+# because both pattern syntaxes are current and a rule written in only one of
+# them is accepted and then never consulted.
+#
+# What is deliberately NOT here, and why - this list is a boundary, and a
+# boundary nobody can state is a boundary nobody can rely on:
+#
+#   git push        the release ritual (docs/RELEASING.md) is built on it and
+#                   the sandbox already allows exactly github.com. `--force`,
+#                   `--mirror` and `--delete` are denied in the template. If you
+#                   want this closed too, take github.com out of
+#                   `sandbox.network.allowedDomains` in
+#                   etc/heinzel-settings.json.in and re-run `hzl install`
+#   curl, wget      the general outward channel, and the sandbox's domain
+#                   allowlist is what stands there. Denying them here would also
+#                   deny testing a local server on 127.0.0.1, which is ordinary
+#                   work
+#   psql, mysql,    a rule cannot tell a local test database from a production
+#   redis-cli       one, and local ones are ordinary development. The prompt
+#                   already tells the agent that writing to a database is a
+#                   block, and that is where this stays until a rule can be
+#                   written that means what it says
+#   docker build,   local; only the commands that move an image or a package
+#   docker run      OUT of this machine are here
+#
+# Adding to this list costs nothing but a re-run of `hzl install`. Removing from
+# it is a decision, so make it in etc/heinzel.conf with HEINZEL_SAFE_MODE=0 and
+# know that it is all of them at once.
+hzl_safe_mode_commands() {
+  cat <<'EOF'
+gcloud
+gsutil
+bq
+aws
+az
+doctl
+kubectl
+kubeadm
+eksctl
+helm
+oc
+terraform
+terragrunt
+tofu
+pulumi
+ansible
+ansible-playbook
+salt
+serverless
+flyctl
+fly
+heroku
+vercel
+netlify
+wrangler
+railway
+firebase
+supabase
+ssh
+scp
+sftp
+rsync
+docker push
+docker login
+podman push
+npm publish
+pnpm publish
+yarn publish
+cargo publish
+gem push
+twine upload
+poetry publish
+mvn deploy
+gradle publish
+EOF
+}
+
+# Which of those the installed permission file does not actually deny, one per
+# line. Empty output means the file carries safe mode; anything else names what
+# is missing, which is a file generated before the setting changed.
+#
+# Asked of the file rather than of the configuration on purpose: the deny list
+# is what confines the agent, and `HEINZEL_SAFE_MODE=1` sitting in a conf file
+# above a permission file generated when it was 0 is precisely the shape of
+# failure this project treats as the worst available - a control that is
+# believed to be on and is not. Returns non-zero only if the file cannot be
+# read as JSON at all; a caller that has not already checked that should.
+# The same answer as a phrase for a person, read from stdin: how many, and the
+# first three. The whole list is forty-odd names, and a log line carrying all of
+# them is read as noise rather than as the one instruction it ends with.
+safe_mode_missing_summary() {
+  awk 'NF { n++; if (n <= 3) s = (s == "" ? $0 : s ", " $0) }
+       END { if (n == 0) exit 1
+             printf "%d of them (%s%s)", n, s, (n > 3 ? ", ..." : "") }'
+}
+
+safe_mode_missing_rules() {
+  local settings=$1 deny
+  deny=$(jq -c '.permissions.deny // []' "${settings}" 2>/dev/null) || return 1
+  [ -n "${deny}" ] || return 1
+  hzl_safe_mode_commands |
+    jq -Rr --argjson deny "${deny}" '
+      select(length > 0) as $c
+      | ("Bash(" + $c + " *)") as $rule
+      | select(($deny | index($rule)) == null)
+      | $c'
 }
 
 # --- workspaces ------------------------------------------------------------

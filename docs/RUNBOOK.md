@@ -437,6 +437,38 @@ and zero tokens.
 Actual spend per run is in `runs.jsonl` as `cost_usd`. To cap it directly
 rather than by task count, set `HEINZEL_MAX_BUDGET_USD`.
 
+## Safe mode: what a run may not touch
+
+On unless you turn it off. It denies the commands that reach something which is
+not this machine and not a file — `gcloud`, `kubectl`, `terraform`, `helm`,
+`ssh`, `rsync`, `docker push`, `npm publish` and the rest of the list in
+`docs/SPEC.md` §13.1 — so a run that would have deployed instead blocks the
+task and leaves you a request. `git push origin` is not on the list: the
+release ritual needs it, and the sandbox already admits only `github.com`.
+
+The run log says which mode it was in, on the `safe` line of the header, and
+`hzl doctor` section 2 says whether the installed permission file agrees with
+your configuration. If they disagree with the setting on, a run **aborts** — a
+control believed to be on and absent is worse than one that was never claimed.
+
+To turn it off, in `etc/heinzel.conf`:
+
+```sh
+HEINZEL_SAFE_MODE=0      # then: hzl install
+```
+
+`hzl install` is not optional there. The rules live in the generated permission
+file, so until it is regenerated the setting says one thing and the run gets the
+other: the commands stay denied and `hzl doctor` remarks on the disagreement.
+The reverse — turning safe mode back on and not reinstalling — is the one that
+**aborts** the next run, because that is the direction where a control is
+believed to be on and is not.
+
+It is all of them or none of them. If you want a run that may reach exactly one
+cluster and nothing else, safe mode is the wrong tool: leave it on, do that
+task with `hzl take <id>` in an interactive session, and close it with
+`hzl done`.
+
 ## Common situations
 
 **"It did nothing all night."** `hzl status` first. Most likely the session

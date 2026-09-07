@@ -6,6 +6,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.24] - 2026-09-08
+
+Safe mode: an unattended run may not call the commands that reach a cluster, a
+cloud account, a registry, a package index or another host. On by default,
+because the unattended lane is exactly where a `terraform apply` would happen
+with nobody there to take it back.
+
+**Upgrading takes one command.** The rules live in the *generated* permission
+file, and nothing regenerates it on its own, so on an existing install the
+setting says `1` and the file does not carry it - which is the mismatch the
+runner aborts on. Run `hzl install` once and `hzl doctor` section 2 goes green.
+Until you do, every scheduled run aborts at gate 6 and says why in
+`~/.heinzel/logs/runner.log`.
+
+### Added
+- **`HEINZEL_SAFE_MODE`, default `1`** - the only opt-*out* switch in the
+  configuration, the others all being off until asked for. `1` generates two
+  deny rules per command in `hzl_safe_mode_commands` (`lib/common.sh`) into
+  `etc/heinzel-settings.json`: `gcloud`, `gsutil`, `bq`, `aws`, `az`, `doctl`,
+  `kubectl`, `kubeadm`, `eksctl`, `helm`, `oc`, `terraform`, `terragrunt`,
+  `tofu`, `pulumi`, `ansible`, `salt`, `serverless`, `flyctl`, `heroku`,
+  `vercel`, `netlify`, `wrangler`, `railway`, `firebase`, `supabase`, `ssh`,
+  `scp`, `sftp`, `rsync`, `docker push`, `docker login`, `podman push`, and the
+  publish commands of npm, pnpm, yarn, cargo, gem, twine, poetry, maven and
+  gradle. Both `Bash(x *)` and `Bash(x:*)`, because a rule in one syntax only is
+  accepted and then never consulted. A run that needs one of them is refused and
+  blocks the task, which is the intended outcome.
+- **The runner aborts when the setting and the file disagree** (gate 6), naming
+  how many rules are missing and the first three. A control believed to be on
+  and absent is the worst shape available, so this direction stops the run; the
+  opposite one - the setting off, the file still carrying the rules - is a
+  `hzl doctor` remark and nothing more.
+- **`hzl doctor` section 2 reports safe mode**, and the run log's header carries
+  a `safe` line on every run, including the runs where it is on: "was safe mode
+  on that night?" is asked of a log after the fact, and the answer has to be in
+  it rather than inferred from a missing line.
+- **The prompt is told which mode it is in**, both ways
+  (`{{SAFE_MODE_NOTE}}`). Not because a sentence enforces anything - the deny
+  list does - but because an agent that knows a command will be refused blocks
+  with a request a person can act on, where one that finds out by being refused
+  writes a worse one. With the mode off the instruction stands and the
+  enforcement does not, and the prompt says exactly that.
+- **28 assertions**, including the two that carry the feature: the rules are
+  generated with `HEINZEL_SAFE_MODE` *unset*, which is what an existing
+  configuration looks like, and `git push` is not on the list, because the
+  release ritual is built on it. Plus a check that every `{{PLACEHOLDER}}` in
+  the run prompt has a `render` behind it in `bin/hzl-run` - the same failure
+  the settings-template check exists for, in the other generated artefact.
+
+### Notes
+- **`git push origin` is deliberately not denied.** The release ritual needs it,
+  the sandbox already admits only `github.com`, and `--force`/`--mirror`/
+  `--delete` stay denied. `docs/SPEC.md` §13.1 says what else is off the list
+  and why: `curl`/`wget` (the sandbox's domain allowlist is the control there,
+  and denying them would deny testing a local server), the database clients (a
+  rule cannot tell a local test database from a production one), and
+  `docker build`/`run` (local - only what moves something *out* is listed).
+- **The rules are built in `bin/hzl`, not in
+  `etc/heinzel-settings.json.in`.** `etc/` is denied to the unattended agent -
+  every file in it is control surface - so a run improving Heinzel can change
+  the list and cannot change the template. The generated file is identical
+  either way, and a human moving the block into the template later loses
+  nothing.
+- **`etc/heinzel.conf.example` does not document the new key yet**, for the same
+  reason: written by run `20260908-030004`, which could not edit `etc/`. The
+  block to paste is in `docs/RUNBOOK.md` under "Safe mode: what a run may not
+  touch".
+- **It is a permission-layer control, not a sandbox.** It governs the agent's
+  own Bash tool; a subprocess that invokes `kubectl` itself is stopped by the
+  sandbox and its domain allowlist, not by this. `SECURITY.md` states both
+  limits.
+
 ## [0.3.23] - 2026-09-08
 
 A tutorial in the README, below the Quick Start and doing the other half of the

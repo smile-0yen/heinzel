@@ -152,6 +152,7 @@ Do not, under any circumstances:
   exception: `git push origin` (branch and tags, never `--force`) of the
   repository in {{WORKDIR}}, as the release ritual requires
 - change anything outside {{WORKDIR}}
+{{SAFE_MODE_NOTE}}
 - read credentials, key material, or `.env` files
 - create a new background process, cron entry or launchd job
 - look for the backlog this worksheet came from, or edit it if you find it

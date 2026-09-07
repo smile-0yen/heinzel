@@ -444,6 +444,18 @@ jq -e . "${SETTINGS}" >/dev/null 2>&1 ||
 # a `__NAME__` placeholder parses, is accepted, and matches nothing.
 grep -q '__[A-Z_]*__' "${SETTINGS}" &&
   abort "${SETTINGS} still contains placeholders - run 'hzl install'"
+# Safe mode is a claim `etc/heinzel.conf` makes and this file keeps, and they go
+# out of step the moment the setting changes without `hzl install` - the
+# permission file is generated, and nothing regenerates it on its own. A run
+# that believes it cannot reach a cluster and can is the worst shape available,
+# so the mismatch aborts here rather than being warned about at 03:00 into a log
+# nobody reads. The other direction - the setting off, the file still carrying
+# the rules - costs nothing and is left to `hzl doctor` to mention.
+if [ "${HEINZEL_SAFE_MODE}" = 1 ]; then
+  SAFE_MISSING=$(safe_mode_missing_rules "${SETTINGS}")
+  [ -z "${SAFE_MISSING}" ] ||
+    abort "HEINZEL_SAFE_MODE=1 but ${SETTINGS} does not deny $(printf '%s\n' "${SAFE_MISSING}" | safe_mode_missing_summary) - run 'hzl install'"
+fi
 
 # --- ownership: the writer lease and this run's own lock -------------------
 # The working directory takes one writer at a time (§14.3, invariant 13), and
@@ -807,6 +819,14 @@ fi
   printf 'workdir  %s\n' "${WORKDIR}"
   printf 'budget   %s task(s) this run, %s/%s this session\n' "${MAX_TASKS}" "${DONE_TOTAL}" "${MAX_TOTAL}"
   printf 'engine   %s %s effort=%s\n' "${HEINZEL_EXECUTOR_ENGINE}" "${HEINZEL_MODEL}" "${HEINZEL_EFFORT}"
+  # Written on every run, including the runs where it is on, because "was safe
+  # mode on that night?" is a question asked of a log after the fact and the
+  # answer has to be in it rather than inferred from the absence of a line.
+  if [ "${HEINZEL_SAFE_MODE}" = 1 ]; then
+    printf 'safe     on - gcloud, kubectl, terraform, ssh, publish and deploy commands denied\n'
+  else
+    printf 'safe     OFF - nothing refuses a command that reaches a real environment\n'
+  fi
   printf 'power    %s\n' "$(on_ac_power && echo AC || echo "battery $(battery_pct)")"
   printf 'todo     %s\n\n' "${TODO_BEFORE}"
 } >"${RUN_LOG}"
@@ -829,7 +849,25 @@ render() {
 }
 
 PROMPT_FILE="${EXEC_DIR}/prompt.md"
+# The agent is told which mode it is in either way. Not because the sentence is
+# what enforces anything - the deny list is - but because an agent that knows a
+# command will be refused blocks the task with a request a person can act on,
+# where one that finds out by being refused writes a worse one. When the mode is
+# off the instruction stands and the enforcement does not, and saying so is the
+# only honest thing to put in a prompt.
+if [ "${HEINZEL_SAFE_MODE}" = 1 ]; then
+  SAFE_NOTE='- run anything that reaches a real environment: `gcloud`, `kubectl`,
+  `terraform`, `helm`, `ssh`, a `docker push`, an `npm publish`. Safe mode is on
+  for this run and they are denied; a task that needs one is a block, not an
+  attempt'
+else
+  SAFE_NOTE='- reach a real environment on your own initiative. Safe mode is off for this
+  run, so nothing refuses `gcloud`, `kubectl`, `terraform`, `ssh`, a `docker
+  push` or an `npm publish`: run one only where the task text asks for it by
+  name, and block rather than improvise'
+fi
 < "${HEINZEL_ROOT}/prompts/backlog-run.md" \
+  render '{{SAFE_MODE_NOTE}}' "${SAFE_NOTE}" |
   render '{{WORKDIR}}' "${WORKDIR}" |
   render '{{WORKSHEET}}' "${WORKSHEET}" |
   render '{{MAX_TASKS}}' "${MAX_TASKS}" |

@@ -4526,7 +4526,107 @@ done
 t_eq "every placeholder in the template has a substitution behind it" \
   "" "${GS_MISSING}"
 
+# --- safe mode --------------------------------------------------------------
+#
+# The commands that reach a cluster, a cloud account, a registry or another host
+# are denied unless somebody wrote HEINZEL_SAFE_MODE=0. The default is the whole
+# feature: an unattended run is exactly where a `terraform apply` would happen
+# with nobody there to take it back, so "on unless told otherwise" is asserted
+# with the variable *unset*, which is what a configuration file written before
+# this existed looks like.
+
+group 'safe mode'
+
+GS_ROOT_D=${TMPROOT}/gs-safe-default
+mkdir -p "${GS_ROOT_D}/etc"
+cp "${TEST_ROOT}/etc/heinzel-settings.json.in" "${GS_ROOT_D}/etc/"
+GS_OUT_D=${GS_ROOT_D}/etc/heinzel-settings.json
+(
+  HEINZEL_ROOT=${GS_ROOT_D}
+  unset HEINZEL_SAFE_MODE
+  # shellcheck source=/dev/null
+  . "${GS_SRC}"
+  generate_settings "${GS_WORK}" "${GS_BACKLOG}"
+)
+t_ok "settings generate with no HEINZEL_SAFE_MODE set at all" "$?"
+t_eq "and are valid JSON" 0 "$(jq -e . "${GS_OUT_D}" >/dev/null 2>&1; echo $?)"
+
+# Both pattern syntaxes for each, because a rule written in only one of them is
+# accepted and then never consulted - the failure the template's comment names.
+for gs_c in gcloud kubectl terraform helm ssh "docker push" "npm publish"; do
+  for gs_form in " *)" ":*)"; do
+    t_eq "Bash(${gs_c}${gs_form} is denied by default" 1 \
+      "$(jq -r --arg r "Bash(${gs_c}${gs_form}" \
+             '[.permissions.deny[] | select(. == $r)] | length' "${GS_OUT_D}")"
+  done
+done
+
+t_eq "nothing on the safe-mode list is missing from the generated file" \
+  "" "$(safe_mode_missing_rules "${GS_OUT_D}" | tr '\n' ' ' | sed 's/ *$//')"
+
+# The one outward action a run is allowed. The release ritual in
+# docs/RELEASING.md is built on it and the sandbox already allows exactly
+# github.com, so safe mode denying it would mean every completed task ended in a
+# `push pending` - and the deny list would be lying about what it is for.
+t_eq "git push is not on the list - the release ritual still works" 0 \
+  "$(jq -r '[.permissions.deny[] | select(. == "Bash(git push *)")] | length' "${GS_OUT_D}")"
+t_eq "and the force-push denials the template carries are still there" 1 \
+  "$(jq -r '[.permissions.deny[] | select(. == "Bash(git push --force*)")] | length' "${GS_OUT_D}")"
+
+# Off, which is a sentence somebody has to write. The rest of the deny list is
+# untouched by it: safe mode is a block of rules, not the file.
+GS_ROOT_O=${TMPROOT}/gs-safe-off
+mkdir -p "${GS_ROOT_O}/etc"
+cp "${TEST_ROOT}/etc/heinzel-settings.json.in" "${GS_ROOT_O}/etc/"
+GS_OUT_O=${GS_ROOT_O}/etc/heinzel-settings.json
+(
+  HEINZEL_ROOT=${GS_ROOT_O}
+  HEINZEL_SAFE_MODE=0
+  # shellcheck source=/dev/null
+  . "${GS_SRC}"
+  generate_settings "${GS_WORK}" "${GS_BACKLOG}"
+)
+t_ok "settings generate with safe mode off" "$?"
+t_eq "and are still valid JSON" 0 "$(jq -e . "${GS_OUT_O}" >/dev/null 2>&1; echo $?)"
+t_eq "kubectl is not denied when safe mode is off" 0 \
+  "$(jq -r '[.permissions.deny[] | select(. == "Bash(kubectl *)")] | length' "${GS_OUT_O}")"
+t_eq "sudo still is - safe mode is a block of rules, not the file" 1 \
+  "$(jq -r '[.permissions.deny[] | select(. == "Bash(sudo)")] | length' "${GS_OUT_O}")"
+t_eq "the ledger is denied either way" 1 \
+  "$(jq -r --arg r "Edit(//${GS_BACKLOG#/})" \
+         '[.permissions.deny[] | select(. == $r)] | length' "${GS_OUT_O}")"
+
+# What the runner's gate reads. A conf that says 1 over a file generated when it
+# said 0 is a control believed to be on and absent, so this has to name every
+# missing command rather than shrug.
+t_ok "safe_mode_missing_rules names what a file generated without it lacks" \
+  "$(safe_mode_missing_rules "${GS_OUT_O}" | grep -qx kubectl && echo 0 || echo 1)"
+t_eq "and names all of them" \
+  "$(hzl_safe_mode_commands | grep -c .)" \
+  "$(safe_mode_missing_rules "${GS_OUT_O}" | grep -c .)"
+t_eq "the list itself holds no duplicates" \
+  "$(hzl_safe_mode_commands | grep -c .)" \
+  "$(hzl_safe_mode_commands | sort -u | grep -c .)"
+
+unset GS_ROOT_D GS_OUT_D GS_ROOT_O GS_OUT_O gs_c gs_form
 unset GS_SRC GS_ROOT GS_OUT GS_WORK GS_BACKLOG gs_f gs_tool gs_ph GS_MISSING
+
+# --- the run prompt ---------------------------------------------------------
+#
+# The same failure as the settings template, in the other generated artefact: a
+# `{{NAME}}` nobody renders is caught at 03:00 by an abort, which costs a night.
+# Caught here instead, and for the same reason the settings check exists - a
+# placeholder added to the prompt without the substitution behind it is the
+# easiest of all these mistakes to make.
+
+group 'the run prompt'
+
+PR_MISSING=""
+for pr_ph in $(grep -o '{{[A-Z_]*}}' "${TEST_ROOT}/prompts/backlog-run.md" | sort -u); do
+  grep -q -- "render '${pr_ph}'" "${TEST_ROOT}/bin/hzl-run" || PR_MISSING="${PR_MISSING} ${pr_ph}"
+done
+t_eq "every placeholder in the run prompt is rendered by bin/hzl-run" "" "${PR_MISSING}"
+unset PR_MISSING pr_ph
 
 # --- what the web UI is served ---------------------------------------------
 #

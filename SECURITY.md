@@ -32,6 +32,19 @@ rather than opening a public issue. A first response should take a few days; the
 - *Unbounded cost.* Three independent budgets plus a schedule window.
 - *A standing write-capable sudo window during unattended work.* The relaxed sudo ticket that makes
   interactive remote work practical is removed for the duration of a session, and restored after.
+- *An unattended agent touching a real environment.* Safe mode (`HEINZEL_SAFE_MODE`, on by default,
+  `docs/SPEC.md` §13.1) denies the commands that reach a cluster, a cloud account, a registry, a
+  package index or another host — `gcloud`, `kubectl`, `terraform`, `helm`, `ssh`, `docker push`,
+  `npm publish` and the rest of the list in `lib/common.sh`. A run that needs one is refused and
+  blocks the task, which is the intended outcome: a deploy at three in the morning is the action
+  nobody is there to take back. With the setting on, a run whose permission file does not carry the
+  rules **aborts** rather than proceeding believing itself confined.
+
+  Two limits, stated because a control nobody can bound is a control nobody can rely on. It is a
+  permission-layer rule over the agent's own Bash tool, so a *subprocess* that invokes `kubectl`
+  itself is stopped by the sandbox and its domain allowlist, not by this — the case DESIGN §4.5
+  describes. And it is a list of command names: something reachable by another name, or by a
+  script already in the repository, is not on it.
 
 **A deliberate carve-out: `git push origin` (2026-09-01)**
 

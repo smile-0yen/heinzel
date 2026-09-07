@@ -58,6 +58,13 @@ design is about bounding it.
 - **When in doubt, it stops.** A task the agent cannot verify, or that needs a human judgement, a
   destructive action, credentials, or anything that leaves the machine, is marked blocked with a
   reason. Only a human can un-block it.
+- **It cannot touch a real environment, unless you say it may.** Safe mode is on by default and
+  denies the commands that reach a cluster, a cloud account, a registry, a package index or
+  another host — `gcloud`, `kubectl`, `terraform`, `helm`, `ssh`, `docker push`, `npm publish` and
+  the rest. A run that needs one blocks the task instead, which is the point: a deploy at three in
+  the morning is the action nobody is there to take back. `HEINZEL_SAFE_MODE=0` turns it off, all
+  at once and deliberately; with it on, a run whose permission file does not carry the denials
+  aborts rather than proceed believing itself confined.
 - **It never degrades silently.** An invalid permission file aborts the run rather than running
   without the denials. A truncated diff says so. A misspelled effort level is rejected at startup.
 - **Its output gets read back.** Changes made by the executor can be reviewed by a second,
@@ -209,6 +216,12 @@ working, not the exception.
 `hzl travel` and `hzl remote` change your firewall, screen sharing and sudo policy, and they
 refuse to touch anything until you set `HEINZEL_POSTURE=1` deliberately. Review by a second
 engine is off until you set `HEINZEL_REVIEW=1`. Neither is needed for any of the above.
+
+The one switch that is on already is safe mode, and it is on because nobody would think to look
+for it: an unattended run may not call `gcloud`, `kubectl`, `terraform`, `ssh`, `docker push`,
+`npm publish` or anything else that reaches past this machine. It blocks the task instead.
+`HEINZEL_SAFE_MODE=0` in `etc/heinzel.conf`, followed by `hzl install`, turns it off —
+`docs/RUNBOOK.md` says what you are taking on.
 
 `DEFAULT_WORKDIR` also takes several checkouts, one absolute path per line. The queue stays one
 backlog and a task picks its checkout by name — `- [ ] (dir:beta) fix the redirect` — with the

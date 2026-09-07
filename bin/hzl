@@ -1439,6 +1439,22 @@ cmd_doctor() {
           printf '       workdir is %s and etc/** is not denied. Run '"'"'hzl install'"'"'.\n' "${HEINZEL_ROOT}"
         fi
       fi
+      # Safe mode is a claim etc/heinzel.conf makes and this file keeps. The two
+      # go out of step the moment the setting changes without `hzl install`, and
+      # nothing else notices - so it is asked of the file, not of the setting.
+      local sm_missing
+      sm_missing=$(safe_mode_missing_rules "${settings}")
+      if [ "${HEINZEL_SAFE_MODE}" = 1 ]; then
+        if [ -z "${sm_missing}" ]; then
+          doc_ok "safe mode: $(hzl_safe_mode_commands | grep -c .) commands that reach a real environment are denied"
+        else
+          doc_bad "HEINZEL_SAFE_MODE=1 but the permission file does not deny $(printf '%s\n' "${sm_missing}" | safe_mode_missing_summary) - run 'hzl install'"
+        fi
+      elif [ -z "${sm_missing}" ]; then
+        doc_warn "safe mode is off in etc/heinzel.conf, but the installed file still carries it - 'hzl install' to make them agree"
+      else
+        doc_warn "safe mode is OFF - an unattended run may call gcloud, kubectl, terraform and the rest"
+      fi
     else
       # claude --print silently ignores a malformed settings file, which would
       # drop every deny rule without a word.
@@ -1726,6 +1742,32 @@ EOF
   rules=$(printf '%s' "${rules}" | sed -e '$ s/,$//')
   [ -n "${rules}" ] || { err "no workspace to allow - DEFAULT_WORKDIR is empty"; return 1; }
 
+  # Safe mode, on unless `HEINZEL_SAFE_MODE=0` says otherwise: two deny rules
+  # per command that reaches a cluster, a cloud account, a registry, a package
+  # index or another host. The list and the reasoning are in lib/common.sh's
+  # `hzl_safe_mode_commands`; `:-1` is the same default as `hzl_load_conf`, so
+  # this function generates a confined file even when it is called with no
+  # configuration loaded at all.
+  #
+  # Merged into the parsed document rather than substituted into the template
+  # the way the workspace rules are, and that is not a preference: `etc/` is
+  # denied to the unattended agent - every file in it is control surface - so a
+  # run improving Heinzel cannot add a placeholder to the template it would then
+  # fill in. Building the rules here keeps the whole change inside `bin/`, which
+  # is open and reviewed. A human moving this block into
+  # etc/heinzel-settings.json.in later loses nothing: the output is the same
+  # file either way.
+  local safe_json="[]"
+  if [ "${HEINZEL_SAFE_MODE:-1}" = 1 ]; then
+    safe_json=$(hzl_safe_mode_commands |
+      jq -R -s -c 'split("\n") | map(select(length > 0))
+                   | map(["Bash(" + . + " *)", "Bash(" + . + ":*)"]) | add') || {
+      err "could not build the safe-mode deny rules"
+      return 1
+    }
+  fi
+
+  local tmp="${out}.new"
   sed -e "s|__BACKLOG_ABS__|//${backlog#/}|g" \
       -e "s|__BACKLOG_BLOCKED_ABS__|//${blocked#/}|g" \
       -e "s|__BACKLOG_COMPLETED_ABS__|//${completed#/}|g" \
@@ -1734,7 +1776,20 @@ EOF
       "${HEINZEL_ROOT}/etc/heinzel-settings.json.in" |
   HZL_WS_RULES=${rules} awk '
     BEGIN { rules = ENVIRON["HZL_WS_RULES"] }
-    { if ($0 == "__WORKSPACE_RULES__") print rules; else print }' >"${out}" || return 1
+    { if ($0 == "__WORKSPACE_RULES__") print rules; else print }' >"${tmp}" || return 1
+  # First, so that what follows is working on a document and not on a guess.
+  jq -e . "${tmp}" >/dev/null 2>&1 || {
+    err "generated ${tmp} is not valid JSON"
+    return 1
+  }
+  # In front of the template's own denials, so that the file a person opens
+  # leads with what this machine refuses to touch.
+  jq --argjson safe "${safe_json}" \
+     '.permissions.deny = ($safe + (.permissions.deny // []))' "${tmp}" >"${out}" || {
+    err "could not merge the safe-mode rules into ${out}"
+    return 1
+  }
+  rm -f "${tmp}"
   jq -e . "${out}" >/dev/null 2>&1 || {
     err "generated ${out} is not valid JSON"
     return 1
