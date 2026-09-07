@@ -178,7 +178,7 @@ printf 'tests/test.sh — heinzel %s, bash %s\n' \
 
 # --- backlog_scan: the TSV contract ----------------------------------------
 #
-# Every other function in this file is derived from these six fields, so the
+# Every other function in this file is derived from these seven fields, so the
 # shape of a row is asserted directly. The row that matters is the one with no
 # id: reading the TSV with `IFS=<tab> read` collapses its empty field, the text
 # arrives in the id column, and the merge then discards a new task as out of
@@ -196,11 +196,12 @@ cat >"${SCAN_LEDGER}" <<'FIXTURE'
 - [ ] (id:h-0002) (dir:paperclip-ops) a task for another checkout
 - [ ] (dir:heinzel) routed before it has an id
 - [ ] (id:h-0003) a (dir:...) that is not at the front stays in the text
+- [!] (id:h-0005) blocked, with metadata <!-- blocked:2026-09-08T01:00:00+09:00 reason:needs a person run:20260908-010000 -->
 FIXTURE
 
 SCAN_ROW=$(backlog_scan "${SCAN_LEDGER}" | sed -n 2p)
-t_eq "a row has six fields" \
-  6 "$(printf '%s\n' "${SCAN_ROW}" | awk -F'\t' '{print NF}')"
+t_eq "a row has seven fields" \
+  7 "$(printf '%s\n' "${SCAN_ROW}" | awk -F'\t' '{print NF}')"
 t_eq "an id-less row keeps an empty id field rather than shifting left" \
   "" "$(printf '%s' "${SCAN_ROW}" | cut -f4)"
 t_eq "an id-less row keeps its text in field 5" \
@@ -234,6 +235,21 @@ t_eq "a (dir:) that is not at the front is text" \
 t_eq "and stays in the text where it was written" \
   "a (dir:...) that is not at the front stays in the text" \
   "$(printf '%s' "${SCAN_MID}" | cut -f5)"
+
+# The trailing comment is the whole of what a task records about itself, and it
+# is field 7 rather than something every reader re-parses the line for. That
+# second parse is exactly what fell behind: `ledger_blocked` carried its own
+# copy, and when `backlog_scan` learned to take `(dir:)` off the text the copy
+# did not, so the morning report showed a tag the ledger no longer considered
+# part of the task.
+SCAN_META=$(backlog_scan "${SCAN_LEDGER}" | sed -n 6p)
+t_eq "the trailing comment is field 7" \
+  "blocked:2026-09-08T01:00:00+09:00 reason:needs a person run:20260908-010000" \
+  "$(printf '%s' "${SCAN_META}" | cut -f7)"
+t_eq "and is not left in the text" \
+  "blocked, with metadata" "$(printf '%s' "${SCAN_META}" | cut -f5)"
+t_eq "a task with no comment has an empty field 7, not a missing one" \
+  "" "$(printf '%s' "${SCAN_ROW}" | cut -f7)"
 
 # --- backlog_count ---------------------------------------------------------
 #
@@ -1696,6 +1712,47 @@ t_eq "an untagged task lands in the default workspace's worksheet" \
 WS_IDS=$(worksheet_write "${WS_LEDGER}" 9 "${WS_OUT}")
 t_eq "with no workspace named the worksheet is the whole queue" \
   4 "$(printf '%s\n' "${WS_IDS}" | grep -c .)"
+
+# --- when the ledger is not in English -------------------------------------
+#
+# BSD awk under a UTF-8 locale reports two different multibyte strings as
+# equal. Measured 2026-09-08 on this machine:
+#
+#     printf 'a\tログイン\nb\tデフォルト\n' |
+#       awk -F'\t' -v t=デフォルト '$2 == t {print $1}'
+#     a
+#     b            <- both rows, for a value equal to one of them
+#
+# `LC_ALL=C` compares bytes and gets it right, and byte equality is exactly
+# what every comparison in this program wants — nothing here sorts or folds
+# case on task text. The bug is invisible while the ledger is in English,
+# which this one is not, so the regression is pinned on a Japanese workspace
+# name: routing every task to the first checkout in the list is silent, and
+# the run that goes wrong is a night's work in the wrong tree.
+
+JP_LED=${TMPROOT}/jp-backlog.md
+cat >"${JP_LED}" <<'FIXTURE'
+# Backlog
+
+## P1
+- [ ] (id:h-0001) (dir:あかり) 明かりを直す
+- [ ] (id:h-0002) (dir:みどり) 緑を直す
+FIXTURE
+(
+  DEFAULT_WORKDIR="/Users/x/あかり
+/Users/x/みどり"
+  JP_OUT=${TMPROOT}/jp-worksheet.md
+  t_eq "a worksheet for a Japanese workspace name holds only that workspace" \
+    "h-0002" "$(worksheet_write "${JP_LED}" 9 "${JP_OUT}" みどり)"
+  t_eq "and the other name still selects the other task" \
+    "h-0001" "$(worksheet_write "${JP_LED}" 9 "${JP_OUT}" あかり)"
+  printf '%s %s\n' "${PASS}" "${FAIL}" >"${TMPROOT}/jp-counts"
+)
+# The assertions above ran in a subshell so that DEFAULT_WORKDIR could be set
+# without disturbing the group below; the counters they moved have to be
+# carried back out or the run would report two fewer than it made.
+PASS=$(cut -d' ' -f1 "${TMPROOT}/jp-counts")
+FAIL=$(cut -d' ' -f2 "${TMPROOT}/jp-counts")
 
 # --- a task the agent split off ---------------------------------------------
 #
@@ -4470,6 +4527,102 @@ t_eq "every placeholder in the template has a substitution behind it" \
   "" "${GS_MISSING}"
 
 unset GS_SRC GS_ROOT GS_OUT GS_WORK GS_BACKLOG gs_f gs_tool gs_ph GS_MISSING
+
+# --- what the web UI is served ---------------------------------------------
+#
+# `hzl dashboard` is the page's only source, and `hzl add` its only writer.
+# The server in lib/web/server.py parses no ledger on purpose: one parse, in
+# `backlog_scan`, and a second implementation of "what the queue says" written
+# in JavaScript would be the copy that falls behind — the way `ledger_blocked`'s
+# copy did. These assertions are about the contract that makes that possible,
+# so they run the real commands rather than a fixture of what those commands
+# are believed to print.
+#
+# `bin/hzl` finds its root by resolving its own path through every symlink, so
+# a test root needs a real copy of the script; `lib` and `prompts` are linked
+# because nothing here writes to them. The point of the root is `etc`: it is
+# the only way to hand these commands a backlog that is not the machine's own.
+
+group 'the dashboard document'
+
+DB_ROOT=${TMPROOT}/db-root
+DB_HOME=${TMPROOT}/db-home
+DB_WORK=${TMPROOT}/db-work
+DB_BACKLOG=${DB_HOME}/backlog.md
+mkdir -p "${DB_ROOT}/bin" "${DB_ROOT}/etc" "${DB_HOME}" "${DB_WORK}"
+cp "${TEST_ROOT}/bin/hzl" "${DB_ROOT}/bin/hzl"
+ln -sf "${TEST_ROOT}/lib" "${DB_ROOT}/lib"
+ln -sf "${TEST_ROOT}/prompts" "${DB_ROOT}/prompts"
+cat >"${DB_ROOT}/etc/heinzel.conf" <<CONF
+DEFAULT_WORKDIR="${DB_WORK}"
+DEFAULT_BACKLOG="${DB_BACKLOG}"
+HEINZEL_POSTURE=0
+CONF
+hzl_db() { HEINZEL_HOME=${DB_HOME} "${DB_ROOT}/bin/hzl" "$@"; }
+
+cat >"${DB_BACKLOG}" <<'FIXTURE'
+# Backlog
+
+## P1
+- [ ] (id:h-0001) 待っている仕事
+- [!] (id:h-0002) 人を待っている <!-- blocked:2026-09-08T01:00:00+09:00 reason:実機が要る run:20260908-010000 -->
+FIXTURE
+
+# JSON before anything else is worth asking: the server hands this to the page
+# verbatim, and a page that cannot parse it shows nothing at all.
+DB_OUT=${TMPROOT}/dashboard.json
+hzl_db dashboard --days 1 >"${DB_OUT}" 2>/dev/null
+t_eq "hzl dashboard emits JSON" 0 "$(jq -e . "${DB_OUT}" >/dev/null 2>&1; echo $?)"
+for db_k in generated_at host version backlog session schedule workspaces tasks runs log; do
+  t_eq "it carries .${db_k}" 1 \
+    "$(jq --arg k "${db_k}" 'if has($k) then 1 else 0 end' "${DB_OUT}" 2>/dev/null)"
+done
+
+# Markers and routing come from the ledger's own parse, so a task reads the
+# same on the page as it does in `hzl next`.
+t_eq "a todo is in the document with its marker" \
+  "1" "$(jq '[.tasks[] | select(.marker == " ")] | length' "${DB_OUT}" 2>/dev/null)"
+t_eq "and a blocked task carries the reason a person wrote" \
+  "実機が要る" "$(jq -r '[.tasks[] | select(.marker == "!")][0].reason // ""' "${DB_OUT}" 2>/dev/null)"
+t_eq "with the run that blocked it, so a judgement can be traced back" \
+  "20260908-010000" "$(jq -r '[.tasks[] | select(.marker == "!")][0].run // ""' "${DB_OUT}" 2>/dev/null)"
+t_eq "and no task carries its raw comment through to the page" \
+  "0" "$(jq '[.tasks[] | select(has("meta"))] | length' "${DB_OUT}" 2>/dev/null)"
+t_eq "an untagged task is shown in the workspace a run would use" \
+  "$(basename "${DB_WORK}")" "$(jq -r '[.tasks[] | select(.marker == " ")][0].workspace' "${DB_OUT}" 2>/dev/null)"
+
+# `status --json` exits 10 while a session is live. Taken as a failure, the
+# document gained the word `null` after a perfectly good body — valid nowhere,
+# and only when a session was running, which is the case the page is for.
+t_eq "the session object survives status's exit code" \
+  "object" "$(jq -r '.session | type' "${DB_OUT}" 2>/dev/null)"
+
+group 'hzl add'
+
+hzl_db add --priority 2 "フォームから積んだ仕事" >/dev/null 2>&1
+t_ok "a task can be added without an editor" "$?"
+t_has "and lands under the priority it was given" "${DB_BACKLOG}" "## P2"
+t_has "with its text intact" "${DB_BACKLOG}" "フォームから積んだ仕事"
+t_eq "and is given an id, so whoever added it can name it" \
+  1 "$(grep -c 'フォームから積んだ仕事' "${DB_BACKLOG}")"
+t_eq "the id is allocated, not left for the next run" \
+  1 "$(grep -c '(id:[a-z]*-[0-9]*).*フォームから積んだ仕事' "${DB_BACKLOG}")"
+
+# Two identical tasks are worked twice and the second finds nothing to do. A
+# double-submitted form is the ordinary way to produce that pair.
+hzl_db add --priority 2 "フォームから積んだ仕事" >/dev/null 2>&1
+t_eq "the same task word for word is refused, not queued twice" 4 "$?"
+t_eq "and the ledger still holds exactly one of it" \
+  1 "$(grep -c 'フォームから積んだ仕事' "${DB_BACKLOG}")"
+
+hzl_db add --priority 0 "範囲外" >/dev/null 2>&1
+t_fails "a priority outside 1..99 is refused" "$?"
+hzl_db add --dir nosuch "行き先なし" >/dev/null 2>&1
+t_fails "a workspace nobody configured is refused before it is queued" "$?"
+hzl_db add "" >/dev/null 2>&1
+t_fails "and so is an empty task" "$?"
+
+unset DB_ROOT DB_HOME DB_WORK DB_BACKLOG DB_OUT db_k
 
 # --- verdict ---------------------------------------------------------------
 

@@ -264,6 +264,7 @@ hzl_load_conf() {
   # Defaults. Anything a stranger would have to change lives here and in
   # etc/heinzel.conf.example, not scattered through the code.
   HEINZEL_LABEL="local.heinzel"
+  HEINZEL_WEB_PORT=3151
   HEINZEL_HOURS="1 2 3 4 5"
   HEINZEL_MIN_RUN_GAP_SEC=3000
   DEFAULT_MAX_TASKS_TOTAL=3
@@ -392,6 +393,13 @@ hzl_validate_conf() {
     ""|none|minimal|low|medium|high|xhigh|max) ;;
     *) err "HEINZEL_CODEX_EFFORT: '${HEINZEL_CODEX_EFFORT}' is not a valid effort"; return 1 ;;
   esac
+  case ${HEINZEL_WEB_PORT} in
+    ""|*[!0-9]*) err "HEINZEL_WEB_PORT must be a port number"; return 1 ;;
+  esac
+  [ "${HEINZEL_WEB_PORT}" -ge 1024 ] && [ "${HEINZEL_WEB_PORT}" -le 65535 ] || {
+    err "HEINZEL_WEB_PORT must be in 1024..65535 (hzl refuses to run as root)"
+    return 1
+  }
   parse_duration "${DEFAULT_DURATION}" >/dev/null || {
     err "DEFAULT_DURATION: '${DEFAULT_DURATION}' is not a valid duration in [60s, 24h]"
     return 1
@@ -1009,7 +1017,7 @@ backlog_ensure() {
   printf '%s' "${BACKLOG_TEMPLATE}" >"${f}"
 }
 
-# One TSV row per task line: lineno, priority, marker, id, text, workspace.
+# One TSV row per task line: lineno, priority, marker, id, text, workspace, meta.
 # Everything else is derived from this, so the parse exists in exactly one place.
 #
 # The workspace field is the name inside a leading `(dir:<name>)`, and empty
@@ -1061,9 +1069,21 @@ backlog_scan() {
         sub(/\).*$/, "", dir)
         sub(/^\(dir:[^)]*\)[ \t]*/, "", text)
       }
+      # The trailing comment, kept as field 7 rather than only discarded. It is
+      # the whole of what a task records about itself - when it was closed,
+      # which run closed it, why it is blocked - and every reader of it used to
+      # re-parse the line to get at it. Tabs inside it become spaces: this is a
+      # TSV, and a comment nobody expected to contain one would shift every
+      # field after it.
+      meta = ""
+      if (match(text, /<!--.*-->[ \t]*$/)) {
+        meta = substr(text, RSTART + 4, RLENGTH - 7)
+        gsub(/\t/, " ", meta)
+        gsub(/^[ \t]+|[ \t]+$/, "", meta)
+      }
       sub(/[ \t]*<!--.*-->[ \t]*$/, "", text)
 
-      printf "%d\t%d\t%s\t%s\t%s\t%s\n", NR, (prio == 0 ? 99 : prio), marker, id, text, dir
+      printf "%d\t%d\t%s\t%s\t%s\t%s\t%s\n", NR, (prio == 0 ? 99 : prio), marker, id, text, dir, meta
     }
     BEGIN { prio = 99 }
   ' "${f}"
@@ -1935,50 +1955,41 @@ EOF
 # metadata takes the rest of the line and keeps the run id in it, which is right
 # for a record and wrong for a sentence somebody reads over breakfast.
 ledger_blocked() { # backlog
-  local lf
-  while IFS= read -r lf; do
-    [ -n "${lf}" ] || continue
-    awk '
-    /^[ \t]*(```|~~~)/ { infence = !infence; next }
-    infence { next }
-    /^[ \t]*-[ \t]+\[!\][ \t]*/ {
-      meta = $0
-      d = ""; reason = ""
-      if (meta ~ /<!--/) {
-        sub(/^.*<!--[ \t]*/, "", meta)
-        sub(/[ \t]*-->.*$/, "", meta)
-        if (match(meta, /blocked:[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/))
-          d = substr(meta, RSTART + 8, 10)
-        if (match(meta, /reason:/)) {
-          reason = substr(meta, RSTART + 7)
-          sub(/[ \t]*recovered:[^ \t]*[ \t]*$/, "", reason)
-          sub(/[ \t]*run:[^ \t]*[ \t]*$/, "", reason)
-        }
-      }
-      if (reason == "") reason = "not stated"
-      if (d == "") d = "-"
-      rest = $0
-      sub(/^[ \t]*-[ \t]+\[.\][ \t]*/, "", rest)
-      id = ""
-      if (rest ~ /^\(id:[a-zA-Z0-9_-]+\)/) {
-        id = rest
-        sub(/^\(id:/, "", id)
-        sub(/\).*$/, "", id)
-        sub(/^\(id:[a-zA-Z0-9_-]+\)[ \t]*/, "", rest)
-      }
-      sub(/[ \t]*<!--.*-->[ \t]*$/, "", rest)
-      printf "%s\t%s\t%s\t%s\n", d, id, reason, rest
-    }
-    ' "${lf}"
+  # Derived from `backlog_scan` rather than parsed again. This used to carry a
+  # second copy of the task-line parser, and the copy fell behind the moment
+  # the first one learned something: `(dir:)` routing was taken off the text by
+  # `backlog_scan` and left on it here, so the morning report and `hzl take`
+  # showed a tag the ledger no longer considered part of the task. One parse,
+  # and this reads the metadata out of the field that parse now carries.
+  local row meta d reason
+  while IFS= read -r row; do
+    [ -n "${row}" ] || continue
+    [ "$(printf '%s' "${row}" | cut -f3)" = "!" ] || continue
+    meta=$(printf '%s' "${row}" | cut -f7)
+    d=$(printf '%s' "${meta}" |
+      sed -n 's/.*blocked:\([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\).*/\1/p')
+    [ -n "${d}" ] || d="-"
+    # Everything after `reason:` except the provenance that follows it. Both
+    # `run:` and `recovered:` are written after the reason and neither is part
+    # of it; a person asked "why is this waiting on me" is not asking for a run
+    # id.
+    reason=$(printf '%s' "${meta}" |
+      sed -e 's/.*reason:[ \t]*//' \
+          -e 's/[ \t]*recovered:[^ \t]*[ \t]*$//' \
+          -e 's/[ \t]*run:[^ \t]*[ \t]*$//')
+    case ${meta} in
+      *reason:*) ;;
+      *) reason="" ;;
+    esac
+    [ -n "${reason}" ] || reason="not stated"
+    printf '%s\t%s\t%s\t%s\n' "${d}" \
+      "$(printf '%s' "${row}" | cut -f4)" "${reason}" \
+      "$(printf '%s' "${row}" | cut -f5)"
   done <<EOF
-$(ledger_live_files "$1")
+$(ledger_scan_live "$1")
 EOF
 }
 
-# The same read, with a fifth field: the steps file when there is one, empty
-# when there is not. Every human-facing caller wants this one - "is there more
-# to read about this task" is part of what a blocked task is, and leaving the
-# question to each caller is how one caller comes to forget to ask.
 ledger_blocked_rows() { # backlog
   local row id steps
   while IFS= read -r row; do
@@ -2139,8 +2150,15 @@ worksheet_write() {
   # single-workspace configuration means and what every caller before this
   # asked for.
   def=$(workdir_name "$(workdir_default)")
+  # `LC_ALL=C` because this awk compares a workspace *name*, and a name is the
+  # last component of a directory a person chose - which may be Japanese, and
+  # on this platform that is the case string equality gets wrong. BSD awk under
+  # a UTF-8 locale reports two different multibyte strings as equal: measured
+  # 2026-09-08, `awk -v t=デフォルト '''$2 == t'''` matched a row reading
+  # ログイン as well. Byte comparison is exactly what equality wants here, and
+  # nothing in this program compares text for anything but equality.
   ids=$(backlog_scan "${f}" 2>/dev/null |
-    awk -F'\t' -v ws="${ws}" -v def="${def}" '
+    LC_ALL=C awk -F'\t' -v ws="${ws}" -v def="${def}" '
       $3 == " " && $4 != "" {
         d = ($6 == "" ? def : $6)
         if (ws == "" || d == ws) print

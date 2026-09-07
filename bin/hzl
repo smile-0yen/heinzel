@@ -1361,6 +1361,14 @@ doc_bad()  { printf '  %s %s\n' "$(bad XX)" "$*"; DOC_PROBLEMS=$((DOC_PROBLEMS +
 cmd_doctor() {
   printf '\n1. prerequisites\n'
   local c
+  # Reported, not required: `hzl web` is a window a person opens, and every
+  # unattended path in this program runs without it. A machine that never
+  # serves the dashboard is not misconfigured for lacking python3.
+  if have python3; then
+    doc_ok "python3 present ($(python3 -V 2>&1) - only 'hzl web' uses it)"
+  else
+    doc_warn "python3 not found - 'hzl web' will not start (xcode-select --install). Nothing else needs it"
+  fi
   for c in jq caffeinate pmset launchctl lockf; do
     if have "${c}"; then doc_ok "${c}"; else doc_bad "${c} is missing"; fi
   done
@@ -1801,6 +1809,359 @@ cmd_uninstall() {
   good "removed ${HEINZEL_LABEL}"
 }
 
+# --- add -------------------------------------------------------------------
+
+# Put a task in the queue. The one writer the ledger has, reached from a
+# person's hands rather than from a run.
+#
+# Tasks were added by opening `backlog.md` in an editor, which is fine for a
+# person at the machine and impossible for anything else - a form on a page, a
+# script, a phone. This is that same edit, made through the backlog lock and
+# the same insertion the merge uses, so a task added while a run is merging
+# lands cleanly instead of racing a rename.
+#
+# The id is allocated here rather than left to the next run. SPEC §8 says ids
+# are the runner's to allocate and never hand-written, and that still holds:
+# `backlog_assign_ids` is the runner's own allocator, called under the same
+# lock. What it buys is that the person who just added a task is told what it
+# is called, which is what they need to say `hzl take` or `hzl block` about it.
+_add_locked() { # backlog priority text
+  backlog_insert_at_priority "$1" "$2" "$3" || return 1
+  backlog_assign_ids "$1" >/dev/null || return 1
+}
+
+cmd_add() {
+  local b prio=99 dir="" text=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --priority|-p) prio=${2:-}; shift ;;
+      --dir|-d) dir=${2:-}; shift ;;
+      --) shift; break ;;
+      -*) die "add: unknown option $1" ;;
+      *) break ;;
+    esac
+    shift
+  done
+
+  text=$(oneline "$*")
+  [ -n "${text}" ] || die "add: nothing to add. Usage: hzl add [--priority N] [--dir NAME] <text>"
+  case ${prio} in
+    ""|*[!0-9]*) die "add: --priority must be an integer in 1..99" ;;
+  esac
+  [ "${prio}" -ge 1 ] && [ "${prio}" -le 99 ] ||
+    die "add: --priority must be an integer in 1..99"
+
+  # A workspace that does not exist would be accepted by the ledger and refused
+  # by the next run, which would block the task for a reason the person who
+  # typed it could have been told immediately.
+  if [ -n "${dir}" ]; then
+    workdir_path_in "${dir}" "$(cur_workdirs)" >/dev/null || {
+      err "add: no workspace named '${dir}'"
+      err "configured: $(workdir_names_of "$(cur_workdirs)")"
+      exit 1
+    }
+  fi
+
+  b=$(cur_backlog)
+  [ -n "${b}" ] || die "no backlog configured (DEFAULT_BACKLOG in etc/heinzel.conf)"
+  backlog_ensure "${b}" || die "could not create ${b}"
+
+  # A task that is already in the ledger word for word is almost always a
+  # double submit - a form posted twice, a script re-run. Refused rather than
+  # queued twice, because two identical tasks are worked twice and the second
+  # one finds nothing to do.
+  if ledger_has_text "${b}" "${text}"; then
+    err "add: that task is already in the ledger, word for word"
+    exit 4
+  fi
+
+  with_backlog_lock _add_locked "${b}" "${prio}" "${dir:+(dir:${dir}) }${text}" ||
+    die "could not add to ${b}"
+
+  # `LC_ALL=C`: this looks the task up by its own text, which is routinely
+  # Japanese here, and BSD awk under a UTF-8 locale reports two different
+  # multibyte strings as equal - measured 2026-09-08, and it made this print
+  # the id of an unrelated task. Byte comparison is what equality wants.
+  local id
+  id=$(backlog_scan "${b}" 2>/dev/null |
+    LC_ALL=C awk -F'\t' -v t="${text}" '$5 == t {print $4; exit}')
+  printf '\n'
+  field "added" "${id:-(no id allocated)}"
+  field "priority" "P${prio}"
+  field "workspace" "${dir:-$(workdir_name "$(workdir_default)") (default)}"
+  field "backlog" "${b}"
+  printf '\n'
+  return 0
+}
+
+# --- dashboard -------------------------------------------------------------
+
+# One JSON document holding everything a person could ask this tool at a
+# glance: the session, the schedule, the workspaces, every task in the live
+# ledger and the recent archive, and the recent runs with their own event
+# trails.
+#
+# It exists so that the web UI has exactly one thing to fetch and no parser of
+# its own. The rule the rest of this program follows - the ledger is parsed in
+# one place - does not stop being true because the reader is a browser, and a
+# second implementation of "what the backlog says" written in JavaScript would
+# be the copy that falls behind.
+dashboard_tasks_json() { # backlog days
+  local b=$1 days=$2 cutoff def
+  cutoff=$(date -r "$(( $(now_epoch) - days * 86400 ))" +%Y-%m-%d)
+  # The *session's* default workspace, not the configuration's. A session keeps
+  # the workspaces it was started with, so after an edit to `heinzel.conf` the
+  # two disagree - and the one that decides where an untagged task is worked is
+  # the session's. Saying otherwise would put a workspace on the page that the
+  # next run will not use.
+  def=$(workdir_name "$(cur_workdirs | head -1)")
+  {
+    ledger_scan_live "${b}" | awk '{print "live\t" $0}'
+    backlog_scan "$(ledger_archive "${b}")" 2>/dev/null | awk '{print "archive\t" $0}'
+  } |
+  jq -R -s --arg def "${def}" --arg cutoff "${cutoff}" '
+    def after(k): if (.meta | test(k + ":")) then
+        (.meta | sub(".*" + k + ":"; "") | sub("[ ].*"; ""))
+      else null end;
+    split("\n") | map(select(length > 0)) | map(split("\t")) |
+    map({
+      source:    .[0],
+      line:      (.[1] | tonumber),
+      priority:  (.[2] | tonumber),
+      marker:    .[3],
+      id:        (if .[4] == "" then null else .[4] end),
+      text:      .[5],
+      workspace: (if .[6] == "" then $def else .[6] end),
+      meta:      (.[7] // "")
+    })
+    | map(. + {
+        done_at:    after("done"),
+        blocked_at: after("blocked"),
+        run:        after("run"),
+        reason:     (if (.meta | test("reason:")) then
+                       (.meta | capture("reason:(?<r>.*?)(?:[ ](?:run|recovered):|$)").r)
+                     else null end)
+      })
+    # The archive is the record and it only grows; a dashboard that carried all
+    # of it would spend most of its bytes on work finished months ago. The live
+    # files come whole - they are the queue and what is waiting on a person -
+    # and the archive is cut to the window the caller asked for.
+    | map(select(.source == "live" or ((.done_at // "") >= $cutoff)))
+    | map(del(.meta))
+  '
+}
+
+# The scheduled slots either side of now: what launchd will do, whether or not
+# a run came of it. The past ones are what the actual runs are read against -
+# a slot with no run is the thing this page exists to make visible.
+dashboard_slots_json() { # back-hours forward-count
+  local back=$1 want=$2 now probe mm ss h hh out
+  now=$(now_epoch)
+  mm=$(date -r "${now}" +%M); mm=${mm#0}; [ -z "${mm}" ] && mm=0
+  ss=$(date -r "${now}" +%S); ss=${ss#0}; [ -z "${ss}" ] && ss=0
+  probe=$((now - mm * 60 - ss - back * 3600))
+  out=""
+  while [ "${probe}" -lt "$((now + 48 * 3600))" ]; do
+    hh=$(date -r "${probe}" +%H); hh=${hh#0}; [ -z "${hh}" ] && hh=0
+    for h in $(hours_normalised); do
+      if [ "${h}" -eq "${hh}" ]; then
+        out="${out}${probe}
+"
+        break
+      fi
+    done
+    probe=$((probe + 3600))
+  done
+  printf '%s' "${out}" | jq -R -s --argjson now "${now}" --argjson want "${want}" '
+    split("\n") | map(select(length > 0)) | map(tonumber)
+    | (map(select(. <= $now))) as $past
+    | (map(select(. > $now)) | .[0:$want]) as $future
+    | ($past + $future)
+    | map({epoch: ., past: (. <= $now)})'
+}
+
+# The recent runs, each with the event trail it wrote about itself. The trail
+# is passed through rather than summarised: it is what turns a row into a line
+# on the diagram, and deciding here which stages matter would put that decision
+# in the wrong place.
+dashboard_runs_json() { # limit
+  local limit=$1 d n=0
+  {
+    # A glob and not `ls`: run ids are this program's own and hold nothing
+    # exotic, but parsing a directory listing by word is the habit that breaks
+    # on the one name that does. Newest first, which is how the page reads them.
+    while IFS= read -r d; do
+      [ -r "${d}events.jsonl" ] || continue
+      n=$((n + 1))
+      [ "${n}" -gt "${limit}" ] && break
+      jq -s --arg id "$(basename "${d}")" \
+        '{id: $id, events: map({kind, at, message})}' "${d}events.jsonl" 2>/dev/null
+    done <<EOF
+$(printf '%s\n' "${HEINZEL_HOME}"/runs/*/ 2>/dev/null | sort -r)
+EOF
+  } | jq -s 'sort_by(.events[0].at // "") | reverse'
+}
+
+# What the runner said, as classes and not as prose to be grepped. A `skip` is
+# a gate that closed and it is the most common thing in this file; the page
+# shows it against the slot it happened at, which is how "it did nothing all
+# night" becomes "it was on battery at 01:00".
+dashboard_log_json() { # lines
+  tail -n "$1" "${LOG_DIR}/runner.log" 2>/dev/null |
+  jq -R -s '
+    split("\n") | map(select(test("^[0-9]{4}-")))
+    | map(capture("^(?<at>[^ ]+) +(?<class>[A-Za-z]+) +(?<message>.*)$"))'
+}
+
+cmd_dashboard() {
+  local days=3 b
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --json) ;;
+      --days) days=${2:-}; shift ;;
+      *) die "dashboard: unknown option $1" ;;
+    esac
+    shift
+  done
+  case ${days} in ""|*[!0-9]*) die "dashboard: --days must be a positive integer" ;; esac
+
+  b=$(cur_backlog)
+  [ -n "${b}" ] || die "no backlog configured (DEFAULT_BACKLOG in etc/heinzel.conf)"
+
+  local nxt="" nslot session_json
+  nslot=$(next_slot_epoch) && nxt=$(iso_at "${nslot}")
+
+  # `status --json` exits 10 when a session is live - that code is its answer,
+  # not a failure - so the output is taken first and the code ignored. Written
+  # as `$(cmd_status --json || echo null)` it appended the word `null` after a
+  # perfectly good document every time a session was running, which is exactly
+  # the case this page exists for.
+  session_json=$(cmd_status --json 2>/dev/null)
+  [ -n "${session_json}" ] || session_json=null
+
+  local ws_json
+  ws_json=$(printf '%s\n' "$(cur_workdirs)" | jq -R -s '
+    split("\n") | map(select(length > 0))
+    | to_entries | map({
+        path: .value,
+        name: (.value | sub("/$"; "") | split("/") | last),
+        default: (.key == 0)
+      })')
+  # Whether each one is actually there, asked of the filesystem rather than of
+  # the configuration. A checkout that has been moved is a class of tasks that
+  # cannot be worked, and this is the page that should say so.
+  local one exists="["
+  while IFS= read -r one; do
+    [ -n "${one}" ] || continue
+    exists="${exists}$([ -d "${one}" ] && echo true || echo false),"
+  done <<EOF
+$(cur_workdirs)
+EOF
+  exists="${exists%,}]"
+  ws_json=$(jq -n --argjson w "${ws_json}" --argjson e "${exists}" \
+    '[$w, $e] | transpose | map(.[0] + {exists: .[1]})')
+
+  jq -n \
+    --arg generated_at "$(iso_at)" \
+    --argjson generated_at_epoch "$(now_epoch)" \
+    --arg host "$(hostname -s 2>/dev/null || echo localhost)" \
+    --arg version "${HEINZEL_VERSION}" \
+    --arg backlog "${b}" \
+    --argjson session "${session_json}" \
+    --arg hours "$(hours_normalised)" \
+    --arg hours_display "$(hours_display)" \
+    --argjson min_gap_sec "${HEINZEL_MIN_RUN_GAP_SEC}" \
+    --arg next_run "${nxt}" \
+    --argjson agent_loaded "$(launchctl print "gui/$(id -u)/${HEINZEL_LABEL}" >/dev/null 2>&1 && echo true || echo false)" \
+    --argjson slots "$(dashboard_slots_json 30 6)" \
+    --argjson workspaces "${ws_json}" \
+    --argjson tasks "$(dashboard_tasks_json "${b}" "${days}")" \
+    --argjson runs "$(dashboard_runs_json 40)" \
+    --argjson log "$(dashboard_log_json 200)" \
+    --arg review "$([ "${HEINZEL_REVIEW}" = 1 ] && echo "${HEINZEL_REVIEWER_ENGINE}" || echo "")" \
+    --arg executor "${HEINZEL_EXECUTOR_ENGINE}" \
+    --arg model "${HEINZEL_MODEL}" \
+    '{generated_at: $generated_at, generated_at_epoch: $generated_at_epoch,
+      host: $host, version: $version, backlog: $backlog,
+      session: $session,
+      schedule: {hours: $hours, display: $hours_display,
+                 min_gap_sec: $min_gap_sec,
+                 next_run: (if $next_run == "" then null else $next_run end),
+                 agent_loaded: $agent_loaded, slots: $slots},
+      engines: {executor: $executor, model: $model,
+                reviewer: (if $review == "" then null else $review end)},
+      workspaces: $workspaces, tasks: $tasks, runs: $runs, log: $log}'
+}
+
+# --- web -------------------------------------------------------------------
+
+# Serve the dashboard on loopback, for as long as the terminal that started it
+# is willing to hold it.
+#
+# Not a LaunchAgent and deliberately not one. Everything else Heinzel installs
+# runs unattended and is confined for it; this is a window a person opens while
+# they are sitting there, and the moment it becomes a service it is a service
+# that can write the backlog, running all day, whether or not anyone is looking.
+# `hzl travel` closes inbound access to this machine — a resident web server
+# would be the one thing that stayed listening through it.
+#
+# python3 is the only new dependency in the whole program, and it is confined
+# to this command: `bin/hzl-run` and every gate it walks are untouched by it.
+# macOS ships /usr/bin/python3 with the Command Line Tools, so this is a
+# dependency on a machine that already has one, and `hzl doctor` reports it as
+# needed for `hzl web` and nothing else.
+cmd_web() {
+  require_not_root
+  local port=${HEINZEL_WEB_PORT} days=3 open=1
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --port) port=${2:-}; shift ;;
+      --days) days=${2:-}; shift ;;
+      --no-open) open=0 ;;
+      *) die "web: unknown option $1" ;;
+    esac
+    shift
+  done
+  case ${port} in ""|*[!0-9]*) die "web: --port must be a port number" ;; esac
+  [ "${port}" -ge 1024 ] && [ "${port}" -le 65535 ] ||
+    die "web: --port must be in 1024..65535 (a privileged port would need root, and this refuses to run as root)"
+  case ${days} in ""|*[!0-9]*) die "web: --days must be a positive integer" ;; esac
+
+  have python3 || die "web: python3 not found. macOS ships one with the Command Line Tools: xcode-select --install"
+  local ui="${HEINZEL_ROOT}/lib/web"
+  [ -r "${ui}/server.py" ] || die "web: missing ${ui}/server.py"
+
+  # The backlog has to exist before the page offers a form that writes to it,
+  # or the first thing a person does is met with an error about a missing file.
+  local b
+  b=$(cur_backlog)
+  [ -n "${b}" ] || die "no backlog configured (DEFAULT_BACKLOG in etc/heinzel.conf)"
+  backlog_ensure "${b}" || die "could not create ${b}"
+
+  local url="http://127.0.0.1:${port}/"
+  printf '\n'
+  good "serving the dashboard"
+  field "url" "${url}"
+  field "reachable from" "this machine only (127.0.0.1)"
+  field "writes" "the backlog, through 'hzl add', from the form on the page"
+  field "stop it with" "ctrl-c"
+  printf '\n'
+
+  # Opened after the server is up rather than before, so the first request is
+  # not the one that races the bind.
+  if [ "${open}" = 1 ] && have open; then
+    ( sleep 1; open "${url}" >/dev/null 2>&1 ) &
+  fi
+
+  # `exec`, so ctrl-c reaches python rather than this shell, and so there is
+  # one process to stop rather than two.
+  HZL_BIN="${HEINZEL_ROOT}/bin/hzl" \
+  HZL_WEB_UI="${ui}" \
+  HZL_WEB_PORT="${port}" \
+  HZL_WEB_DAYS="${days}" \
+  exec python3 "${ui}/server.py"
+}
+
 # --- schedule --------------------------------------------------------------
 
 # "When does this run, and with what settings?"
@@ -1974,6 +2335,9 @@ session (unattended work)
   hzl run-now [--dry-run]    run once now, ignoring the schedule window
 
 backlog
+  hzl add [options] <text>   put a task in the queue. Options:
+                               --priority N       1..99, default 99
+                               --dir NAME         which checkout it is about
   hzl next                   what would be picked up next
   hzl take [id]              list blocked tasks, or print one with its steps
   hzl done <id> [note]       close a task out by hand
@@ -1994,6 +2358,9 @@ everything else
   hzl status [--json|--quiet]  what is actually true right now
   hzl schedule                 when the next run is, and every setting that
                                decides whether it does anything
+  hzl web [--port N]           serve the dashboard on 127.0.0.1 while you
+                               watch it. ctrl-c stops it
+  hzl dashboard [--days N]     the same thing as one JSON document
   hzl doctor                   check the whole setup
   hzl logs [-f] [-n N]         recent run logs
   hzl install / uninstall      the launchd agent
@@ -2014,6 +2381,9 @@ cmd=${1:-}
 case ${cmd} in
   status) cmd_status "$@" ;;
   schedule) cmd_schedule "$@" ;;
+  add) cmd_add "$@" ;;
+  dashboard) cmd_dashboard "$@" ;;
+  web) cmd_web "$@" ;;
   on) cmd_on "$@" ;;
   off) cmd_off "$@" ;;
   resume) cmd_resume "$@" ;;
