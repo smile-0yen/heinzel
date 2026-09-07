@@ -215,6 +215,236 @@ backlog and a task picks its checkout by name — `- [ ] (dir:beta) fix the redi
 first line of the list as the default for tasks that name none. A run works one checkout per
 night, whichever the highest-priority task names. `docs/RUNBOOK.md` has the details.
 
+## Tutorial: one night, end to end
+
+The Quick Start got it installed. This is the same machine one night later, in full: what to put
+in the queue, what a run does with it, what it leaves behind, and what to do in the morning with
+what you find. Allow about twenty minutes.
+
+Throughout, `~/projects/alpha` is the checkout and `~/.heinzel/backlog.md` is the queue — the two
+paths you put in `etc/heinzel.conf`. Substitute yours.
+
+### 1. Write tasks a run can finish on its own
+
+This is the part that decides whether unattended work is worth anything, and it is entirely on
+your side of the line. A task suits a run that nobody is watching when all four are true:
+
+1. **It is verifiable by running something.** The agent is told that work it cannot verify is not
+   done, and that it must block instead. A task with no way to check it comes back blocked.
+2. **It lives in one checkout.** A run works in a single workspace — the one the highest-priority
+   task names — so a task that spans two is two tasks.
+3. **It needs nothing from outside.** No credential, no account, nothing sent anywhere. Those are
+   block conditions by design, not accidents.
+4. **It has one right answer.** Anything that turns on taste — which name, which of two acceptable
+   designs — is a decision the run will hand back to you rather than take.
+
+| A run can do this | It will block on this |
+| --- | --- |
+| `hzl report --json` is documented but the flag is never parsed — make it work, with a test | make the reporting better |
+| `parse_duration` accepts `25h`; it should refuse anything over the 24h ceiling | tighten up the duration handling |
+| the install note says `~/bin`, the installer uses `~/.local/bin` | fix the docs |
+| drop `lib/ui.sh`'s unused colour helper and its callers | tidy the codebase |
+
+The right-hand column is not a list of bad ideas. It is a list of things to decide first and
+queue second: each one becomes a fine task the moment you say what "better" means.
+
+Two ways in. The command:
+
+```sh
+hzl add --priority 1 "hzl report --json is documented but the flag is never parsed"
+hzl add --dir beta "the login page forgets the redirect after sign-in"
+hzl add "drop lib/ui.sh's unused colour helper and its callers"
+```
+
+`--priority` is 1..99 and defaults to 99, so the first of those is worked first. `--dir` names a
+checkout by its last path component, and matters only if `DEFAULT_WORKDIR` lists several.
+
+Or the file, which is the same thing:
+
+```markdown
+## P1
+- [ ] hzl report --json is documented but the flag is never parsed
+      note: cmd_report in bin/hzl. There is a --json branch; nothing reaches it.
+      note: the exit code must stay 10 when something is blocked.
+```
+
+Indented lines under a task are notes, and they are handed to the agent word for word — this is
+where the context you have and the agent does not goes. Markers, ids and timestamps are the
+runner's; never write them yourself.
+
+Then ask what is next:
+
+```sh
+hzl next
+```
+
+It prints the id (or `(id assigned at the next run)` for a line you typed), the priority, the
+workspace with its absolute path, the task and its notes. If the workspace is one this machine
+does not have configured, it says so here — worth knowing now rather than as a blocked task in the
+morning.
+
+### 2. Do the first run while you are watching
+
+You do not have to wait for 03:00, and for the first one you should not.
+
+```sh
+hzl on --duration 2h --max-tasks 1 --dry-run
+```
+
+Prints the session it would create and changes nothing. When it looks right, drop `--dry-run`:
+
+```sh
+hzl on --duration 2h --max-tasks 1
+```
+
+Starting a session kicks a run immediately (`--no-kick` if you would rather wait for the
+schedule). `--max-tasks 1` is deliberate for a first night: one task is enough to see the whole
+shape of the thing, and the per-run budget is the cheapest of the three ceilings to change later.
+
+To run one on demand at any point, from inside a session:
+
+```sh
+hzl run-now            # ignores the schedule window; the other gates still apply
+hzl run-now --dry-run  # everything up to the engine, then stop
+```
+
+### 3. Watch it
+
+```sh
+hzl logs -f
+```
+
+The log opens with what the run decided before spending anything — run id and what triggered it,
+the working directory, the budget for this run and for the session, the engine, model and effort,
+whether the machine is on AC, and how many tasks were waiting.
+
+Most runs never get that far, and that is the design working. Eight things are asked in order,
+each of them before the engine is called:
+
+| # | The run stops when | Notes |
+| --- | --- | --- |
+| 1 | there is no live session | silent for launchd; `hzl run-now` says so out loud |
+| 2 | the hour is outside `HEINZEL_HOURS` | manual runs are exempt |
+| 3 | the last run started less than `HEINZEL_MIN_RUN_GAP_SEC` ago | this is what stops a wake-up replay firing every slot the machine slept through |
+| 4 | the session's task budget is spent | `hzl set max-total N` raises it mid-session |
+| 5 | the machine is on battery | a manual run warns and carries on; a scheduled one stops |
+| 6 | there is less time left in the session than a run may need | so a run is never started that cannot finish |
+| 7 | a precondition fails | a workspace that is not there, a backlog that is not writable, no engine, or a permission file that is missing, malformed or still holding placeholders |
+| 8 | there is nothing to do | the last gate, immediately before the engine |
+
+Number 7 is the one to read twice. `claude --print` ignores a malformed settings file without a
+word, so a run whose permission file will not parse **aborts** rather than running with no deny
+list at all.
+
+### 4. What a run leaves behind
+
+Four things, in four places:
+
+- **The worksheet**, `~/projects/alpha/.heinzel/worksheet.md` — the tasks this run was given, and
+  only those. The agent never sees the backlog; the runner merges the worksheet back afterwards
+  and is the ledger's only writer, so a run cannot close, revert or reword a task it was not
+  handed.
+- **The run log**, `~/.heinzel/logs/<date>/run-<time>.log`, beside the prompt that was actually
+  sent and the engine's own output.
+- **Commits in your checkout.** The agent is told to finish a task that changed the repository
+  with the release ritual in that repository's `docs/RELEASING.md` — changelog entry, version
+  bump, one commit, `git push origin`, tag. If your project has no such file, you get the commit
+  without the ceremony; if you want a particular ritual, that is the file to write. The push is
+  the *only* thing a run is allowed to send anywhere, and a refused push is recorded as
+  `push pending` rather than treated as failure.
+- **A request, if it stopped.** The agent writes `~/projects/alpha/.heinzel/blocked/<id>.md`, and
+  the runner carries it to `blocked/<id>.md` beside your backlog, where `hzl report` points at it
+  and `hzl take` reads it back.
+
+### 5. The morning
+
+```sh
+hzl report
+```
+
+Blocked tasks first, each with the one-line ask the run wrote for you and the path to its steps;
+then what was completed since yesterday; then how many are still to do. It exits `10` when
+anything is blocked, so it drives a notification without being parsed:
+
+```sh
+hzl report --quiet || osascript -e 'display notification "heinzel needs you"'
+```
+
+For one of them:
+
+```sh
+hzl take h-0007
+```
+
+which prints the `cd` to the right checkout, the task, its notes and the whole of the steps file —
+written to be pasted into an interactive session. If the run left no instructions, `hzl steps
+h-0007` starts a form to fill in as you work, so the next person begins where you finished.
+
+Closing the loop, once you have done it or decided it:
+
+```sh
+hzl done h-0007 "parsed --json in cmd_report; added a test"   # you finished it
+hzl unblock h-0007                                            # it can go back in the queue
+hzl block h-0009 "needs the staging credential"               # park one yourself
+hzl archive                                                   # sweep closed and blocked out of the backlog
+```
+
+`hzl archive` is what keeps the backlog readable: what is done goes to the completed archive, what
+is blocked to the blocked file, and the file you open stays the queue and nothing else. It runs on
+its own at the start of every run; the command is for when you want it now.
+
+Then read the work itself. It is a commit like any other:
+
+```sh
+git -C ~/projects/alpha log --oneline -5
+git -C ~/projects/alpha show <sha>
+```
+
+### 6. Set the pace
+
+Three independent ceilings, and none of them is a suggestion:
+
+```sh
+hzl set                  # what this session's limits are
+hzl set max-tasks 2      # per run
+hzl set max-total 6      # per session
+hzl set timeout 5400     # wall clock per run, seconds
+```
+
+`hzl set` changes the live session; `etc/heinzel.conf` changes the defaults every future session
+starts from. For the schedule:
+
+```sh
+hzl schedule             # when the next run is, and whether it will do anything
+```
+
+`HEINZEL_HOURS` in `etc/heinzel.conf` decides the hours, and **`hzl install` must be re-run after
+changing it** — the plist is generated from that value and nothing else notices it has gone stale.
+The default `1 2 3 4 5` excludes the working day structurally rather than by convention.
+
+When you are done for the night, or want the machine back:
+
+```sh
+hzl off
+```
+
+Stops the session, restores what it changed, and exits non-zero if it could not confirm a run had
+stopped — which is your signal to look, not to shrug.
+
+### 7. When something looks wrong
+
+```sh
+hzl doctor               # eight sections; you are looking for the absence of XX
+hzl status               # exits 0 when no session is running, 10 when one is
+hzl status --json        # the same, for a script
+hzl logs -n 3            # the last three run logs
+hzl resume               # clear a halt, once you know why it halted
+```
+
+`hzl doctor` is the first thing to run and it catches the two mistakes that actually happen: a
+`DEFAULT_WORKDIR` or `DEFAULT_BACKLOG` that moved without `hzl install` being re-run, and a
+permission file that no longer names the backlog it is supposed to keep the agent out of.
+
 ## Prior art
 
 Heinzel merges two personal tools by the same author: `macmode` (the posture switch) and `kobito`
