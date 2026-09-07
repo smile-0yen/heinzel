@@ -25,6 +25,20 @@
     "one line the run cannot proceed without should not depend on a glob that",
     "exists for a different reason and may be tightened later.",
     "",
+    "The allow list ends with that pair of rules once per configured",
+    "workspace, generated from DEFAULT_WORKDIR (the placeholder is a line of",
+    "its own down there, and is replaced whole). A session may have several",
+    "workspaces and",
+    "one installed settings file serves all of them, so this allow list is",
+    "wider than any single run needs: a run works in exactly one of them.",
+    "That is deliberate and it is the sandbox that makes it acceptable - the",
+    "sandbox roots at the run's own working directory, so the rules naming the",
+    "other workspaces are inert for the whole of that run. The layer this does",
+    "cost is the inner one: were the sandbox off, an agent could reach every",
+    "configured workspace rather than one. Which is the argument for listing",
+    "workspaces you are willing to have worked on unattended, and not every",
+    "checkout on the disk.",
+    "",
     "All three ledger files - the backlog, the blocked file and the completed",
     "archive - are denied by name, for the opposite reason: the agent works",
     "from a worksheet the runner merges back, so it has no business in the",
@@ -141,10 +155,7 @@
       "Bash(git status *)", "Bash(git status:*)",
       "Bash(git diff *)", "Bash(git diff:*)",
       "Bash(git log *)", "Bash(git log:*)",
-      "Read(__WORKDIR_ABS__/**)",
-      "Edit(__WORKDIR_ABS__/**)",
-      "Read(__WORKSHEET_ABS__)",
-      "Edit(__WORKSHEET_ABS__)"
+__WORKSPACE_RULES__
     ]
   }
 }

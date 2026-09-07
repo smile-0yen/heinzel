@@ -113,7 +113,14 @@ SNAP_DIR="${RUN_DIR}/snapshot-$(date +%H%M%S)"
 NOTES="${RUN_DIR}/notes.md"
 mkdir -p "${RUN_DIR}" || { log_event abort "cannot create ${RUN_DIR}"; exit 1; }
 
-WORKDIR=$(state_get .workdir "")
+# Every workspace this session may work in. Which one this run works in is not
+# known yet and cannot be: it is the workspace of the highest-priority task
+# still in the queue, and the queue is not swept until further down. `WORKDIR`
+# is set the moment that is decided, and everything past it - the worksheet,
+# the snapshot, the engine's cwd, the reviewer, the changeset - reads that one
+# value exactly as it did when a session had only ever had one.
+WORKDIRS=$(state_get_workdirs)
+WORKDIR=""
 BACKLOG=$(state_get .backlog "")
 RUN_TIMEOUT=$(state_get .run_timeout_sec 3600)
 MAX_PER_RUN=$(state_get .max_tasks_per_run 3)
@@ -123,7 +130,9 @@ DONE_TOTAL=$(state_get .tasks_done_total 0)
 # The ledger half of the cleanup, as one function, so that the whole of it goes
 # under one lock rather than a lock per marker.
 cleanup_ledger() {
-  if [ -n "${CLAIMS_READY:-}" ]; then
+  # Only this run's own claims, and only in the workspace it chose - which it
+  # may never have got as far as choosing, in which case it took none.
+  if [ -n "${CLAIMS_READY:-}" ] && [ -n "${WS_IDENTITY:-}" ]; then
     claims_rollback_run "${WS_IDENTITY}" "${BACKLOG}" "${STORE_RUN_ID}" \
       >/dev/null 2>&1
   fi
@@ -234,8 +243,16 @@ cleanup() {
     # Ownership goes last, and only after the writer has been confirmed gone: a
     # lease released while the engine it stands for is still running would let
     # the next run into a working directory that has one (§14.3, invariant 14).
+    # Every lease, not the one for the workspace this run chose: a run holds
+    # the writer lease on all of the session's workspaces for as long as it
+    # could still choose any of them, and it hands all of them back.
     if [ -n "${LEASE_HELD:-}" ]; then
-      lease_release "${WS_IDENTITY}" "${STORE_RUN_ID}" >/dev/null 2>&1
+      while IFS= read -r released; do
+        [ -n "${released}" ] || continue
+        lease_release "${released}" "${STORE_RUN_ID}" >/dev/null 2>&1
+      done <<EOF
+${LEASE_HELD}
+EOF
     fi
   else
     # `ORPHANED`: not a failure and not a success, but a stop nothing could
@@ -401,7 +418,17 @@ LEFT=$((EXPIRES - $(now_epoch)))
   skip "too close to the deadline (${LEFT}s left, a run may need ${RUN_TIMEOUT}s)"
 
 # --- gate 6: the things that must be true before an agent starts ----------
-[ -n "${WORKDIR}" ] && [ -d "${WORKDIR}" ] || abort "workdir is missing: ${WORKDIR}"
+# Every workspace the session named, not one of them. A checkout that is not
+# there is a night's tasks that cannot be worked, and the run that finds out is
+# the one a task for it reaches - which could be a week later. Said here, once,
+# before anything is spent.
+[ -n "${WORKDIRS}" ] || abort "the session records no workdir"
+while IFS= read -r one_wd; do
+  [ -n "${one_wd}" ] || continue
+  [ -d "${one_wd}" ] || abort "workdir is missing: ${one_wd}"
+done <<EOF
+${WORKDIRS}
+EOF
 [ -n "${BACKLOG}" ] && [ -w "${BACKLOG}" ] || abort "backlog is not writable: ${BACKLOG}"
 engine_available "${HEINZEL_EXECUTOR_ENGINE}" ||
   abort "executor engine not found: ${HEINZEL_EXECUTOR_ENGINE}"
@@ -435,20 +462,62 @@ grep -q '__[A-Z_]*__' "${SETTINGS}" &&
 # mean "no lease, carry on", which was survivable only because the global lock
 # was underneath it; a run that cannot name its workspace cannot take the lease
 # that stands for it, and would be the second writer nothing had refused.
-WS_IDENTITY=$(claims_workspace_identity "${WORKDIR}")
-[ -n "${WS_IDENTITY}" ] ||
-  abort "cannot identify the workspace at ${WORKDIR} - refusing to run without a writer lease"
+#
+# All of the session's workspaces, and here rather than after the one this run
+# will use is known. The order matters and this is the only order available:
+# the choice is made from the queue, the queue is read after the sweep, and the
+# sweep is a ledger write this run must already own the checkouts to make. So a
+# run holds the writer lease on every workspace it could still choose, and
+# hands back the ones it did not use with the one it did.
+#
+# It costs nothing that was previously possible. Two runs never overlapped
+# before - a session had one workspace and one lease - and launchd fires these
+# one at a time. What it buys is that "the checkout takes one writer" stays
+# exactly as true with six checkouts as with one, with no window between
+# choosing a workspace and owning it.
+#
+# Taken in configuration order, which is a fixed order, so two runs racing for
+# the same set contend on the same first entry rather than deadlocking half way
+# into each other's.
+WS_IDENTITIES=""
+while IFS= read -r one_wd; do
+  [ -n "${one_wd}" ] || continue
+  one_id=$(claims_workspace_identity "${one_wd}")
+  [ -n "${one_id}" ] ||
+    abort "cannot identify the workspace at ${one_wd} - refusing to run without a writer lease"
+  WS_IDENTITIES="${WS_IDENTITIES}${one_id}
+"
+done <<EOF
+${WORKDIRS}
+EOF
+
 LEASE_HELD=""
-if [ -n "${WS_IDENTITY}" ]; then
-  RECOVERED=$(lease_reclaim "${WS_IDENTITY}")
+while IFS= read -r one_id; do
+  [ -n "${one_id}" ] || continue
+  RECOVERED=$(lease_reclaim "${one_id}")
   [ -n "${RECOVERED}" ] &&
     log_event skip "recovered the writer lease left by run ${RECOVERED}"
-  if lease_acquire "${WS_IDENTITY}" "${STORE_RUN_ID}"; then
-    LEASE_HELD=1
+  if lease_acquire "${one_id}" "${STORE_RUN_ID}"; then
+    LEASE_HELD="${LEASE_HELD}${one_id}
+"
   else
-    skip "another run holds the writer lease on ${WORKDIR} (run $(lease_holder "${WS_IDENTITY}"))"
+    # Give back what this run has taken before standing down. Without this a
+    # run that lost the race on the third workspace would keep the first two
+    # until its EXIT trap ran, and `skip` exits through that trap - but saying
+    # so here is what makes the release part of the decision rather than a
+    # side effect of it.
+    while IFS= read -r taken; do
+      [ -n "${taken}" ] || continue
+      lease_release "${taken}" "${STORE_RUN_ID}" >/dev/null 2>&1
+    done <<EOF
+${LEASE_HELD}
+EOF
+    LEASE_HELD=""
+    skip "another run holds the writer lease on ${one_id#*:} (run $(lease_holder "${one_id}"))"
   fi
-fi
+done <<EOF
+${WS_IDENTITIES}
+EOF
 
 # One run, one advancer. A run id is new every time, so nothing can be holding
 # this one and the lock cannot be refused by another run — it is refused by a
@@ -500,17 +569,26 @@ REMAINING=$((MAX_TOTAL - DONE_TOTAL))
 # stopped — but each is still released under its own run id, one run at a time.
 # That is what makes a release attributable, and what stays correct when the
 # lock stops covering the whole run (§13.4, §14.3).
+# Every workspace this run holds the lease on, and not only the one it is
+# about to work in. A run killed in workspace B left its claims there, and
+# under one workspace the next run always cleaned them because there was
+# nowhere else to be; under several, waiting for a run that happens to pick B
+# again would leave a task marked `[~]` for as long as nothing needed that
+# checkout. The lease is what makes this safe and this run holds all of them.
 CLAIMS_READY=""
-if [ -n "${WS_IDENTITY}" ]; then
+while IFS= read -r one_id; do
+  [ -n "${one_id}" ] || continue
   CLAIMS_READY=1
   while IFS= read -r stale_run; do
     [ -n "${stale_run}" ] || continue
     [ "${stale_run}" = "${STORE_RUN_ID}" ] && continue
-    log_event skip "released the claims left by run ${stale_run} ($(with_backlog_lock claims_rollback_run "${WS_IDENTITY}" "${BACKLOG}" "${stale_run}") marker(s) reset)"
+    log_event skip "released the claims left by run ${stale_run} in ${one_id#*:} ($(with_backlog_lock claims_rollback_run "${one_id}" "${BACKLOG}" "${stale_run}") marker(s) reset)"
   done <<EOF
-$(claims_runs "${WS_IDENTITY}")
+$(claims_runs "${one_id}")
 EOF
-fi
+done <<EOF
+${WS_IDENTITIES}
+EOF
 
 # --- the sweep -------------------------------------------------------------
 # Everything closed, and everything waiting on a person, leaves the backlog
@@ -574,6 +652,53 @@ MAX_TASKS=${MAX_PER_RUN}
 with_backlog_lock backlog_assign_ids "${BACKLOG}"
 DONE_BEFORE=$(backlog_count "${BACKLOG}" x)
 
+# --- which workspace this run works in ------------------------------------
+# The order of attack picks the task and the workspace follows from it: a
+# session with six checkouts still has one queue, and the highest-priority task
+# left in it decides where the night starts. The run then takes only that
+# workspace's tasks, because an engine launch has one working directory - a
+# worksheet spanning two would list tasks the agent could not reach half of.
+#
+# After `backlog_assign_ids`, deliberately. A task written by hand has no id
+# until that line runs, and the branch below has to be able to name the task it
+# is blocking.
+#
+# A task naming a workspace this session does not have is blocked, not skipped
+# over. Skipping is the quieter failure and by far the worse one: the task
+# stays at the top of the queue, so it is chosen again the next night and every
+# night after, and each of those runs reports "nothing to do" about a backlog
+# with work in it. `[!]` is where a task that needs a person goes, and a
+# `(dir:)` naming no configured workspace needs a person - to fix the spelling,
+# or to add the checkout to `DEFAULT_WORKDIR` and run `hzl install`.
+while :; do
+  RUN_WS=$(backlog_next_workspace "${BACKLOG}") || RUN_WS=""
+  # The queue emptied under us, or every remaining task has just been blocked
+  # by the loop below. Either way there is nothing to work.
+  [ -n "${RUN_WS}" ] || skip "nothing to do (0 todo)"
+
+  WORKDIR=$(workdir_path_in "${RUN_WS}" "${WORKDIRS}") && break
+  WORKDIR=""
+
+  BAD_ID=$(backlog_next_id "${BACKLOG}")
+  [ -n "${BAD_ID}" ] ||
+    abort "the next task names workspace '${RUN_WS}', which this session does not have, and has no id to block it by"
+  if with_backlog_lock ledger_set_state "${BACKLOG}" "${BAD_ID}" "!" \
+       "blocked:$(iso_at) reason:$(oneline "no workspace named '${RUN_WS}' in this session (have: $(printf '%s' "$(workdir_names_of "${WORKDIRS}")"))") run:${RUN_ID}"; then
+    # `skip`, which §12 gives as "a gate closed": this run went ahead without
+    # a task it would otherwise have worked, and said which and why.
+    log_event skip "blocked ${BAD_ID}: it names workspace '${RUN_WS}', which this session does not have"
+  else
+    abort "cannot block ${BAD_ID}, which names workspace '${RUN_WS}' that this session does not have"
+  fi
+done
+
+# The identity of the one workspace this run chose, out of the several it holds
+# leases on. Claims, the quiesce generation and the merge are all about the
+# checkout being worked, so all of them read this one.
+WS_IDENTITY=$(claims_workspace_identity "${WORKDIR}")
+[ -n "${WS_IDENTITY}" ] ||
+  abort "cannot identify the workspace at ${WORKDIR}"
+
 # The agent works from a worksheet, not from the ledger: this run's slice of
 # the queue, carrying the ids it may touch and nothing else. See SPEC §8.1.
 #
@@ -594,7 +719,7 @@ if runstore_init "${STORE_RUN_ID}"; then
   STORE_READY=1
   store_snapshot queued
   store_event run.queued \
-    "${MAX_TASKS} task(s) allowed, ${TODO_BEFORE} todo, trigger ${TRIGGER}"
+    "${MAX_TASKS} task(s) allowed, ${TODO_BEFORE} todo, trigger ${TRIGGER}, workspace ${RUN_WS} (${WORKDIR})"
 else
   log_event skip "could not create the run store for ${STORE_RUN_ID}; this run keeps no durable record of itself, and writes into no other run's"
 fi
@@ -603,10 +728,13 @@ WS_DIR="${WORKDIR}/.heinzel"
 WORKSHEET="${WS_DIR}/worksheet.md"
 WORKSHEET_IDS="${EXEC_DIR}/worksheet-ids.txt"
 mkdir -p "${WS_DIR}" || abort "cannot create ${WS_DIR}"
-worksheet_write "${BACKLOG}" "${MAX_TASKS}" "${WORKSHEET}" >"${WORKSHEET_IDS}" ||
+worksheet_write "${BACKLOG}" "${MAX_TASKS}" "${WORKSHEET}" "${RUN_WS}" >"${WORKSHEET_IDS}" ||
   abort "could not build a worksheet from ${BACKLOG}"
+# `TODO_BEFORE` counts the whole queue and the worksheet is one workspace's
+# slice of it, so the two differ whenever more than one checkout has work. The
+# workspace is named here for that reason: "0 of 7" is a puzzle without it.
 [ -s "${WORKSHEET_IDS}" ] ||
-  abort "the worksheet came out empty with ${TODO_BEFORE} todo(s) waiting"
+  abort "the worksheet came out empty for workspace ${RUN_WS} with ${TODO_BEFORE} todo(s) waiting across the queue"
 
 # Claim them before the engine starts. The claim in HEINZEL_HOME is the record
 # — it names this run and the agent cannot reach it — and the ledger's `[~]` is
@@ -911,7 +1039,10 @@ review_revert_done() { # reason
 # yet, and the allocation that gives it one. Both, or a ledger with a task a
 # human could collide with by adding an id by hand.
 add_review_followup() {
-  printf -- '- [ ] follow up on review findings from run %s\n' "${RUN_ID}" \
+  # Routed to the workspace the review was of. A follow-up on findings in one
+  # checkout queued against another is a task the next run cannot even read.
+  printf -- '- [ ] %sfollow up on review findings from run %s\n' \
+    "$(task_route_prefix "${RUN_WS:-}")" "${RUN_ID}" \
     >>"${BACKLOG}" || return 1
   backlog_assign_ids "${BACKLOG}"
 }

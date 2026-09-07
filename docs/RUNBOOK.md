@@ -292,6 +292,50 @@ The one thing its prompt must say, and does, is that **exit 10 is not a
 failure**: `hzl report` exits 10 exactly when something is blocked, which is the
 morning it matters most.
 
+## Several checkouts
+
+`DEFAULT_WORKDIR` takes more than one, a line each:
+
+```sh
+DEFAULT_WORKDIR="/Users/you/projects/alpha
+/Users/you/projects/beta"
+```
+
+The queue is still one backlog. A task picks its checkout by name — the last
+component of the path — at the front of the line:
+
+```markdown
+## P1
+- [ ] (dir:beta) the login page forgets the redirect
+- [ ] this one has no (dir:), so it goes to alpha
+```
+
+The first line of `DEFAULT_WORKDIR` is the default: a task with no `(dir:)` is
+worked there. `hzl next` prints the workspace of the task it would pick, and
+`hzl take <id>` prints the `cd` for the checkout the task is about.
+
+A run works in **one** checkout — whichever the highest-priority task names —
+and takes only that checkout's tasks. So a night moves through one tree at a
+time, and the per-run limit counts within it. That is not a policy choice: an
+agent runs with one working directory, and the sandbox that confines it is
+rooted there.
+
+Run `hzl install` after adding a checkout. The agent's permission file names
+every configured workspace and is generated from this value; `hzl on` refuses a
+`--workdir` that is not one of them, so the session and the installed rules
+cannot disagree.
+
+Two checkouts may not share a last path component — `~/a/api` and `~/b/api` —
+because `(dir:api)` would then mean either. Every command refuses the pair by
+name rather than picking one.
+
+To run a session against only some of them:
+
+```sh
+hzl on --workdir beta                  # just this one
+hzl on --workdir alpha --workdir beta  # these two, alpha the default
+```
+
 ## When it runs
 
 ```sh

@@ -11,7 +11,7 @@
 # Multibyte truncation is locale-dependent (DESIGN 6.3). Fix it once, here.
 export LC_CTYPE=UTF-8
 
-HEINZEL_VERSION="0.3.19"
+HEINZEL_VERSION="0.3.20"
 
 # The TTL ceiling is deliberately not configurable. A session that can be
 # created with an unbounded lifetime is not a session, it is a mode.
@@ -145,6 +145,24 @@ parse_duration() {
 
 # Absolute path, without requiring the target to exist. launchd runs with
 # cwd=/, so a relative path here is not a latent bug, it is a certain abort.
+# abspath over a newline-separated list, preserving order and dropping blanks.
+# `DEFAULT_WORKDIR` is written by a person and may hold `~/Claude/heinzel`; the
+# rules generated from it and the paths a run compares against are absolute, and
+# they have to be the same absolute.
+abspath_lines() {
+  local one
+  while IFS= read -r one; do
+    [ -n "${one}" ] || continue
+    # `abspath` prints without a trailing newline, because every other caller
+    # takes it in a `$( )`. Here the newline is the separator, so it has to be
+    # put back - without it two workspaces come out as one impossible path,
+    # and the first sign of that is an allow rule matching nothing.
+    printf '%s\n' "$(abspath "${one}")"
+  done <<EOF
+$1
+EOF
+}
+
 abspath() {
   local p=$1 dir base
   [ -n "${p}" ] || return 1
@@ -378,6 +396,42 @@ hzl_validate_conf() {
     err "DEFAULT_DURATION: '${DEFAULT_DURATION}' is not a valid duration in [60s, 24h]"
     return 1
   }
+
+  # Workspaces: shape only, and deliberately not existence. This function runs
+  # before every command, and a checkout that is on an unmounted disk this
+  # morning must not stop `hzl status` from answering questions about the
+  # session. `hzl on` refuses to start without the directory and `hzl doctor`
+  # reports each one; those are the places where a missing directory matters.
+  #
+  # Empty is allowed here too, for the same reason: a fresh install has no
+  # workspace yet, and the commands that need one say so by name.
+  local nm seen=""
+  while IFS= read -r v; do
+    [ -n "${v}" ] || continue
+    case ${v} in
+      /*) ;;
+      *)
+        err "DEFAULT_WORKDIR: '${v}' is not an absolute path - launchd runs with cwd=/"
+        return 1 ;;
+    esac
+    nm=$(workdir_name "${v}")
+    [ -n "${nm}" ] || {
+      err "DEFAULT_WORKDIR: '${v}' has no last path component, so no task can name it"
+      return 1
+    }
+    # Two checkouts with the same last component would make `(dir:${nm})` mean
+    # either of them, and the run would pick whichever came first in the file -
+    # silently, and differently after an edit that reordered the list.
+    case " ${seen} " in
+      *" ${nm} "*)
+        err "DEFAULT_WORKDIR: two workspaces are both named '${nm}'; a task's (dir:${nm}) could mean either"
+        return 1 ;;
+    esac
+    seen="${seen}${nm} "
+  done <<EOF
+$(workdirs_list)
+EOF
+
   return 0
 }
 
@@ -414,6 +468,206 @@ hours_display() {
   else
     hours_normalised
   fi
+}
+
+# --- workspaces ------------------------------------------------------------
+
+# `DEFAULT_WORKDIR` holds one absolute path per line. One line is one
+# workspace - which is what every configuration written before this was - and
+# several lines are several.
+#
+# The separator is a newline and not a space. `HEINZEL_HOURS` is split by the
+# shell because integers cannot contain a space and a path can, and a list that
+# quietly halved a directory name at 03:00 would be found by the run that could
+# not cd into it. A single-line value therefore still means exactly what it
+# always meant, space or no space: no configuration written before this build
+# changes meaning by being read by it.
+#
+# The first line is the default: the workspace a task that names none is worked
+# in. Order is the file's order and nothing sorts it, because "the first one"
+# has to be something a person can see rather than something they have to
+# derive.
+workdirs_list() {
+  # Leading and trailing whitespace goes: a continued value in a shell file is
+  # indented by anyone who reads it as a list, and an invisible trailing space
+  # would otherwise become part of a path.
+  printf '%s\n' "${DEFAULT_WORKDIR}" |
+    sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' |
+    grep -v '^$'
+}
+
+workdirs_count() { workdirs_list | grep -c . ; }
+
+# The default workspace: the first configured, and the whole of the value when
+# only one is.
+workdir_default() { workdirs_list | head -1; }
+
+# The name a task writes in `(dir:<name>)`: the last component of the path,
+# `heinzel` for `~/Claude/heinzel`.
+#
+# There is no second setting mapping names to paths. A name kept in step with a
+# path by hand is a name that goes stale, and the last component is already
+# what a person calls the checkout - it is what their shell prompt says and
+# what `cd` takes. The cost is that two checkouts cannot share a last
+# component; `hzl_validate_conf` refuses that pair rather than letting
+# `(dir:x)` mean either of them.
+workdir_name() { # path -> name
+  local p=$1
+  p=${p%/}
+  printf '%s' "${p##*/}"
+}
+
+# The path of a named workspace within a given set, or nothing and non-zero.
+#
+# The set is passed in rather than read from configuration because the question
+# is almost always about a *session's* workspaces, which are what `hzl on`
+# recorded and not what `heinzel.conf` says this morning. The runner resolves a
+# task's `(dir:)` through this and so does `hzl next`, so the two cannot
+# disagree about which checkout a task is headed for.
+workdir_path_in() { # name newline-separated-paths
+  local want=$1 one
+  [ -n "${want}" ] || return 1
+  while IFS= read -r one; do
+    [ -n "${one}" ] || continue
+    if [ "$(workdir_name "${one}")" = "${want}" ]; then
+      printf '%s' "${one}"
+      return 0
+    fi
+  done <<EOF
+$2
+EOF
+  return 1
+}
+
+# The names of a given set of workspace paths, space-separated, for a message.
+workdir_names_of() { # newline-separated paths
+  local one out=""
+  while IFS= read -r one; do
+    [ -n "${one}" ] || continue
+    out="${out}${out:+ }$(workdir_name "${one}")"
+  done <<EOF
+$1
+EOF
+  printf '%s' "${out}"
+}
+
+# Every configured name, one per line, in configuration order.
+workdir_names() {
+  local p
+  while IFS= read -r p; do
+    [ -n "${p}" ] || continue
+    workdir_name "${p}"
+    printf '\n'
+  done <<EOF
+$(workdirs_list)
+EOF
+}
+
+# name -> the absolute path, or nothing and non-zero. The lookup a task's
+# `(dir:)` goes through, and the one `hzl on --workdir` goes through.
+workdir_of_name() {
+  local want=$1 p
+  [ -n "${want}" ] || return 1
+  while IFS= read -r p; do
+    [ -n "${p}" ] || continue
+    if [ "$(workdir_name "${p}")" = "${want}" ]; then
+      printf '%s' "${p}"
+      return 0
+    fi
+  done <<EOF
+$(workdirs_list)
+EOF
+  return 1
+}
+
+# Is this path one of the configured workspaces? Compared as text, after
+# `abspath`, because a workspace that exists only as a name in a config file
+# still has to be recognisable.
+workdir_is_configured() {
+  local want=$1 p
+  [ -n "${want}" ] || return 1
+  while IFS= read -r p; do
+    [ "${p}" = "${want}" ] && return 0
+  done <<EOF
+$(workdirs_list)
+EOF
+  return 1
+}
+
+# A set of workspaces on one line, for a status field.
+#
+# One is printed as the path it is, because that is what this field has always
+# said and it is what a person checks against their shell. Several are printed
+# as names: two absolute paths do not fit a line, and the name is what a task
+# writes and what `--workdir` takes, so it is the more useful half. The default
+# comes first and says so.
+workdirs_display() { # newline-separated paths
+  local one out="" i=0 n
+  n=$(printf '%s\n' "$1" | grep -c .)
+  [ "${n}" -eq 0 ] && { printf 'unset'; return 0; }
+  if [ "${n}" -le 1 ]; then
+    printf '%s' "$1"
+    return 0
+  fi
+  while IFS= read -r one; do
+    [ -n "${one}" ] || continue
+    i=$((i + 1))
+    if [ "${i}" = 1 ]; then
+      out="$(workdir_name "${one}") (default)"
+    else
+      out="${out}, $(workdir_name "${one}")"
+    fi
+  done <<EOF
+$1
+EOF
+  printf '%s' "${out}"
+}
+
+# The workspace a task belongs to: the name its `(dir:)` carries, or the
+# default's name when it carries none. One place, so that the ledger, the
+# worksheet and the runner cannot disagree about where a task is worked.
+task_workspace_name() { # dir-field -> name
+  if [ -n "${1:-}" ]; then
+    printf '%s' "$1"
+  else
+    workdir_name "$(workdir_default)"
+  fi
+}
+
+# The `(dir:)` a task written inside a given workspace needs in order to come
+# back to it. Prepended to a task the agent split off, so that a follow-up
+# written in one checkout is not queued against another.
+#
+# Nothing for the default workspace: that is already what an untagged task
+# means, and a ledger wearing a redundant tag on every line is one nobody
+# reads. Nothing either for a name no configuration knows - see
+# `worksheet_workspace` for where such a name comes from and why routing a
+# task to it would be worse than not routing it at all.
+task_route_prefix() { # workspace-name
+  local w=${1:-}
+  [ -n "${w}" ] || return 0
+  [ "${w}" = "$(workdir_name "$(workdir_default)")" ] && return 0
+  workdir_of_name "${w}" >/dev/null 2>&1 || return 0
+  printf '(dir:%s) ' "${w}"
+}
+
+# The workspace a worksheet was written in, taken from where it lives:
+# `<workdir>/.heinzel/worksheet.md`.
+#
+# Derived from the path rather than passed in as an argument. The merge is
+# reached through four callers, one of them the recovery path that finishes a
+# commit a dead run left behind - and that path has the files the dead run
+# wrote and nothing else, so an argument would be absent exactly where a
+# follow-up task most needs routing. The path is the one input every caller
+# already has.
+#
+# A worksheet somewhere else - a test fixture, a copy a person made - yields a
+# name no configuration knows, and `task_route_prefix` declines to route on it.
+worksheet_workspace() { # worksheet path -> name
+  local d
+  [ -n "${1:-}" ] || return 1
+  d=$(dirname "$(dirname "$1")")
+  workdir_name "${d}"
 }
 
 in_window() {
@@ -518,6 +772,23 @@ rel_dur() {
 # Read one field, given a jq path. The jq `//` operator must never be used
 # here: `false // $d` yields $d, so every boolean field would silently read as
 # its default.
+# The session's workspaces, one absolute path per line, in the order `hzl on`
+# recorded them.
+#
+# A state file written by a build before this one carries a single `.workdir`
+# and no `.workdirs`, and reads here as the one-workspace list it describes: a
+# session started last night under the old build keeps its working directory
+# when the new build's runner picks it up at 03:00, rather than finding none.
+# This is the same rule as `state_schema_json` - reported, never repaired - so
+# nothing rewrites the file on the way past.
+state_get_workdirs() {
+  [ -r "${STATE_FILE}" ] || return 1
+  jq -r 'if (.workdirs | type) == "array" and (.workdirs | length) > 0
+         then .workdirs[]
+         else (.workdir // empty)
+         end' "${STATE_FILE}" 2>/dev/null
+}
+
 state_get() {
   local path=$1 default=${2:-} v
   [ -r "${STATE_FILE}" ] || { printf '%s' "${default}"; return 1; }
@@ -738,8 +1009,14 @@ backlog_ensure() {
   printf '%s' "${BACKLOG_TEMPLATE}" >"${f}"
 }
 
-# One TSV row per task line: lineno, priority, marker, id, text.
+# One TSV row per task line: lineno, priority, marker, id, text, workspace.
 # Everything else is derived from this, so the parse exists in exactly one place.
+#
+# The workspace field is the name inside a leading `(dir:<name>)`, and empty
+# when the task carries none - which is most of them, and means the default
+# workspace. It is a sixth column and not part of the text so that a task
+# reaches the worksheet, the prompt and the ledger reading the way a person
+# wrote it, with the routing taken off the front exactly as the id is.
 backlog_scan() {
   local f=$1
   [ -r "${f}" ] || return 1
@@ -770,9 +1047,23 @@ backlog_scan() {
         sub(/\).*$/, "", id)
         sub(/^\(id:[a-zA-Z0-9_-]+\)[ \t]*/, "", text)
       }
+
+      # After the id, because the runner writes the id at the front of a line a
+      # person wrote `(dir:x)` on. Anything up to the closing paren is the
+      # name: a workspace is named by the last component of its path, and that
+      # is a directory name, which may hold whatever the filesystem allows -
+      # a character class here would quietly fail to match a checkout with a
+      # Japanese name and route the task to the default instead.
+      dir = ""
+      if (text ~ /^\(dir:[^)]*\)/) {
+        dir = text
+        sub(/^\(dir:/, "", dir)
+        sub(/\).*$/, "", dir)
+        sub(/^\(dir:[^)]*\)[ \t]*/, "", text)
+      }
       sub(/[ \t]*<!--.*-->[ \t]*$/, "", text)
 
-      printf "%d\t%d\t%s\t%s\t%s\n", NR, (prio == 0 ? 99 : prio), marker, id, text
+      printf "%d\t%d\t%s\t%s\t%s\t%s\n", NR, (prio == 0 ? 99 : prio), marker, id, text, dir
     }
     BEGIN { prio = 99 }
   ' "${f}"
@@ -793,6 +1084,19 @@ backlog_next_row() {
 
 backlog_next_id()   { backlog_next_row "$1" | cut -f4; }
 backlog_next_text() { backlog_next_row "$1" | cut -f5; }
+
+# Which checkout the next run will work in. The order of attack picks the task
+# first and the workspace follows from it, rather than the other way round: a
+# session with several workspaces still has one queue, and the highest-priority
+# task decides where the night starts. A run then takes only that workspace's
+# tasks, because an engine launch has one working directory and the writer
+# lease is per workspace.
+backlog_next_workspace() { # backlog -> name
+  local row
+  row=$(backlog_next_row "$1")
+  [ -n "${row}" ] || return 1
+  task_workspace_name "$(printf '%s' "${row}" | cut -f6)"
+}
 
 # A task's indented continuation lines, which carry context the runner must
 # pass through to the prompt verbatim.
@@ -1207,7 +1511,7 @@ ledger_has_text() {
   local f
   while IFS= read -r f; do
     [ -n "${f}" ] || continue
-    backlog_scan "${f}" 2>/dev/null | cut -f5- | grep -qxF -- "$2" && return 0
+    backlog_scan "${f}" 2>/dev/null | cut -f5 | grep -qxF -- "$2" && return 0
   done <<EOF
 $(ledger_files "$1")
 EOF
@@ -1765,7 +2069,7 @@ worksheet_render() {
     lineno=$(printf '%s' "${row}" | cut -f1)
     prio=$(printf '%s' "${row}" | cut -f2)
     id=$(printf '%s' "${row}" | cut -f4)
-    text=$(printf '%s' "${row}" | cut -f5-)
+    text=$(printf '%s' "${row}" | cut -f5)
     [ -n "${id}" ] || continue
     case ${want} in
       *" ${id} "*) ;;
@@ -1819,16 +2123,28 @@ worksheet_claim_refusal() { # backlog id
 
 # Write the run's slice of the ledger to `out`, and print the ids it contains,
 # one per line: that list is what the merge will accept, and nothing else.
-# The slice is the first `max` todos in the order of attack; the writing of it
+# The slice is the first `max` todos in the order of attack, within the
+# workspace named by the fourth argument when there is one; the writing of it
 # is `worksheet_render`, which the runner calls again if the claims it takes
 # turn out to cover fewer tasks than this.
 worksheet_write() {
-  local f=$1 max=$2 out=$3 ids tmp rc
+  local f=$1 max=$2 out=$3 ws=${4:-} ids tmp rc def
   [ -r "${f}" ] || return 1
   case ${max} in ""|*[!0-9]*) return 1 ;; esac
   [ "${max}" -ge 1 ] || return 1
+  # With a workspace named, only that workspace's tasks are eligible, and the
+  # per-run limit counts within it. A run has one working directory, so a
+  # worksheet spanning two would be a list of tasks the agent could not reach
+  # half of. With none named the whole queue is eligible, which is what a
+  # single-workspace configuration means and what every caller before this
+  # asked for.
+  def=$(workdir_name "$(workdir_default)")
   ids=$(backlog_scan "${f}" 2>/dev/null |
-    awk -F'\t' '$3 == " " && $4 != ""' |
+    awk -F'\t' -v ws="${ws}" -v def="${def}" '
+      $3 == " " && $4 != "" {
+        d = ($6 == "" ? def : $6)
+        if (ws == "" || d == ws) print
+      }' |
     sort -t"$(printf '\t')" -k2,2n -k1,1n |
     head -n "${max}" |
     cut -f4)
@@ -1909,11 +2225,15 @@ backlog_insert_at_priority() {
 # guessed at.
 worksheet_merge() {
   local ws=$1 f=$2 run_id=$3 allowed=$4
-  local rows row allow_list lineno prio marker id text reason work
+  local rows row allow_list lineno prio marker id text reason work ws_name
   local n_done=0 n_blocked=0 n_new=0 n_ignored=0
   [ -r "${ws}" ] && [ -r "${allowed}" ] || { printf '0 0 0 0\n'; return 1; }
   [ -r "${f}" ] && [ -w "${f}" ] || { printf '0 0 0 0\n'; return 1; }
   allow_list=" $(tr '\n' ' ' <"${allowed}") "
+  # Where this worksheet was written, so that a task split off inside it comes
+  # back to the same checkout rather than to whichever one happens to be first
+  # in `DEFAULT_WORKDIR`.
+  ws_name=$(worksheet_workspace "${ws}")
   rows=$(backlog_scan "${ws}" 2>/dev/null)
 
   # One transition, not one per candidate (SPEC §11.4). Every marker below is
@@ -1934,13 +2254,14 @@ worksheet_merge() {
     prio=$(printf '%s' "${row}" | cut -f2)
     marker=$(printf '%s' "${row}" | cut -f3)
     id=$(printf '%s' "${row}" | cut -f4)
-    text=$(printf '%s' "${row}" | cut -f5-)
+    text=$(printf '%s' "${row}" | cut -f5)
     if [ -z "${id}" ]; then
       # A task split off from another. Only a todo can arrive without an id: a
       # line marked done that nobody ever queued is not a completion, and the
       # runner has nothing to check it against.
       if [ "${marker}" = " " ]; then
-        backlog_insert_at_priority "${work}" "${prio}" "${text}" &&
+        backlog_insert_at_priority "${work}" "${prio}" \
+          "$(task_route_prefix "${ws_name}")${text}" &&
           n_new=$((n_new + 1))
       else
         n_ignored=$((n_ignored + 1))

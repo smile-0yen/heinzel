@@ -128,6 +128,15 @@ says which half stands and what to run to finish it. A sweep that failed prints
 the same count as a sweep with nothing to do, so callers read the status and not
 only the number (§8).
 
+`on --workdir` is **repeatable** and takes a configured workspace, by name or
+by path; each occurrence adds one and the first is that session's default. It
+**must** name a workspace `DEFAULT_WORKDIR` lists, and is refused otherwise.
+Given none, the session gets every configured workspace. An arbitrary path used
+to be accepted, and was the sharpest edge in the tool: `hzl install` generates
+the agent's permission file from `DEFAULT_WORKDIR`, so a session pointed
+elsewhere started, ran, and had every write refused by rules naming a tree it
+was no longer in.
+
 `schedule` answers "when does this next run, and will that run do anything",
 and is read-only: it asks `launchctl` whether the agent is loaded and diffs the
 installed plist against what the current configuration generates, but installs
@@ -146,10 +155,13 @@ Fail-fast, and anything that fails rolls back what came before it.
 
 1. Refuse if running as root.
 2. Validate arguments. `--duration` ∈ [60s, 24h]; `--max-*` ≥ 1;
-   `--timeout` ≥ 60. `workdir` and `backlog` are made absolute; `workdir` must
-   exist, and **must not be `HEINZEL_HOME` or inside it** — that directory is
+   `--timeout` ≥ 60. Every workspace and the backlog are made absolute; **each**
+   workspace must exist, and **none may be `HEINZEL_HOME` or inside it** — that directory is
    denied to the agent wholesale, so a run there can write nothing, and the
-   failure reads as an incapable agent rather than as a misconfiguration.
+   failure reads as an incapable agent rather than as a misconfiguration. Every
+   one of them, and not only the first: a checkout that has moved is a class of
+   tasks that cannot be worked, and the run that would otherwise find out is
+   whichever one a task naming it eventually reaches, which could be weeks.
 3. **Refuse if posture is `travel`.** No override exists.
 4. Refuse if on battery, unless `--force`.
 5. Warn if a session is already live, including that the task counter resets.
@@ -206,6 +218,7 @@ Mode 0600. Written by validating with `jq` and replacing with `mv`. Writers are
 | `runtime_backend` | string | The backend this session's runs go to, and the one they actually use (§9.0). **Absent means `local`** | on |
 | `mode` | string | `"heinzel"` / `"normal"`. **Alone this does not mean a session is live** (§5) | on / off |
 | `activated_at`, `activated_at_epoch` | string, number | Start time, both forms | on |
+| `workdirs` | array | Every workspace this session may work in, absolute, in the order that makes the first the default. A file written before v0.3.20 has only `workdir`, and reads as the one-workspace list it describes — reported, never repaired, like `schema_version` | on |
 | `expires_at`, `expires_at_epoch` | string, number | TTL. `now >= expires_at_epoch` ⇒ normal | on |
 | `duration` | string | As given, e.g. `"10h"`. Ceiling 24h, not configurable | on |
 | `boot_id` | string | `kern.bootsessionuuid` | on |
@@ -245,13 +258,13 @@ Mode 0600. Written by validating with `jq` and replacing with `mv`. Writers are
 there. A key the registry does not know fails `hzl on`, rather than being
 written into a session whose every run then aborts at 03:00.
 
-> **Normative: `workdir` and `backlog` are read from `state.json` only while a
+> **Normative: `workdirs` and `backlog` are read from `state.json` only while a
 > session is live.** With no session the configuration file is authoritative.
 > `state.json` keeps a finished session's paths, so reading them unconditionally
 > means an edited `heinzel.conf` is ignored with no sign that it was — and
 > `hzl install` then bakes the stale paths into the agent's permission file, so
 > the deny list names a backlog nobody uses. `hzl` reads them through
-> `cur_workdir` / `cur_backlog`; the runner reads `state.json` directly and
+> `cur_workdirs` / `cur_backlog`; the runner reads `state.json` directly and
 > must, because it only ever runs inside a session and `hzl on --backlog X` is
 > a promise for the length of that session.
 
@@ -347,10 +360,25 @@ engine call.
 | 3 | session budget remaining > 0 | `skip` |
 | 4 | on AC power **or** `--from manual` | `skip` |
 | 5 | time to expiry ≥ `run_timeout_sec` | `skip` |
-| 6 | workdir, backlog, engine, and **valid settings JSON** | `abort` |
+| 6 | **every** workspace, backlog, engine, and **valid settings JSON** | `abort` |
 | 7 | at least one `[ ]` task | `skip` |
 
 `--from manual` bypasses gates 2, 2b and 4. The other five apply unchanged.
+
+> **Normative: a run works in exactly one workspace, and the queue chooses it.**
+> Past gate 7 and after `backlog_assign_ids`, the run reads the highest-priority
+> `[ ]` in the order of attack and takes that task's workspace as its own. It
+> then works only that workspace's tasks: the per-run limit counts within the
+> workspace, and the worksheet is that slice. An engine launch has one working
+> directory, so a worksheet spanning two would list tasks the agent could not
+> reach half of.
+>
+> A task naming a workspace the session does not have is moved to `[!]`, not
+> skipped over, and the run picks again. Skipping is the quieter failure and by
+> far the worse one: the task stays at the head of the queue, is chosen again
+> every night after, and each of those runs reports "nothing to do" about a
+> backlog with work in it. A `(dir:)` naming no configured workspace needs a
+> person — to fix the spelling, or to add the checkout and run `hzl install`.
 
 Gate 2 because the operator is present and the schedule exists to keep runs out
 of the working day, not to stop a human. Gate 4 for the same reason: it exists
@@ -380,8 +408,22 @@ logs it anyway.
 > runner is running". Three narrower statements replaced it, each about the thing
 > it is actually protecting: every ledger and session mutation goes under the
 > short backlog lock, the workspace writer lease refuses a second run on the same
-> checkout, and `state.json` holds exactly one workdir. A second runner walks as
-> far as the lease and `skip`s there, before it has claimed or spent anything.
+> checkout, and a run holds the lease on **every** workspace its session has. A
+> second runner walks as far as the lease and `skip`s there, before it has
+> claimed or spent anything.
+
+> **Normative: a run takes the writer lease on every workspace its session has,
+> before it knows which one it will use.** The order is forced and there is no
+> other: the workspace is chosen from the queue, the queue is read after the
+> sweep, and the sweep is a ledger write the run must already own the checkouts
+> to make. Leases are taken in the session's recorded order, which is fixed, so
+> two runners racing for the same set contend on the same first entry rather
+> than half way into each other's; a run that loses gives back what it took
+> before it stands down, and every lease is released together on the way out.
+> This costs nothing that was previously possible — a session had one workspace
+> and one lease — and it buys "the checkout takes one writer" holding with six
+> checkouts exactly as with one, with no window between choosing a workspace and
+> owning it.
 
 > **Normative: `run.pid` is written by the run that holds the writer lease**, and
 > after it holds it. It is the file `hzl off` kills by, so a second runner writing
@@ -449,15 +491,26 @@ engine process group is signalled, and `run.pid` is removed.
 ## P1
 - [ ] (id:h-0007) task text
       note: a continuation line
+- [ ] (id:h-0008) (dir:beta) worked in the `beta` checkout, not the default one
 - [x] (id:h-0003) done <!-- done:<ISO8601> run:<RUN_ID> -->
 - [!] (id:h-0009) blocked <!-- blocked:<ISO8601> reason:<reason> -->
 ```
+
+One queue, whatever the number of workspaces. A task says which checkout it is
+about and a run works one of them per night; the alternative — a backlog per
+checkout — makes "what is next" a question with several answers and priority a
+thing that only orders within a repository.
+
+`backlog_scan` emits one TSV row per task line: **lineno, priority, marker, id,
+text, workspace**. Everything else is derived from it, so the parse exists in
+exactly one place.
 
 | Element | Rule |
 |---|---|
 | Marker | `[ ]` todo, `[~]` in progress, `[x]` (or `[X]`) done, `[!]` blocked |
 | Priority | The nearest preceding `## P<n>`. Lines before any heading are P99 |
 | Id | `(id:<prefix>-NNNN)`, `%04d`. **Allocated by the runner, never hand-written** |
+| Workspace | `(dir:<name>)`, optional, immediately after the id — or at the front of a line that has no id yet, since the runner writes the id in front of it later. `<name>` is a workspace's last path component (§13). Absent means the default workspace, which is the first line of `DEFAULT_WORKDIR`. Only a leading tag routes: one written mid-text is text, or a task *about* the syntax would reroute itself by being written down. Stripped from the text the way the id is, so what reaches the worksheet, the prompt and the ledger reads as a person wrote it |
 | Trailing metadata | One `<!-- ... -->`, replaced wholesale on each transition, never appended to |
 | Continuation lines | Indented lines under a task; passed to the prompt verbatim |
 | Order | Priority ascending, then line number ascending |
@@ -468,6 +521,17 @@ only. The runner can put tasks there and cannot take them out.
 
 Leading zeros are stripped before arithmetic: bash reads `0009` as an invalid
 octal literal.
+
+> **Normative: a task the agent splits off keeps the workspace it was written
+> in.** `worksheet_merge` prepends `(dir:<name>)` to a new task when the
+> worksheet it came from was written in a workspace that is not the default. The
+> name comes from where the worksheet lives — `<workdir>/.heinzel/worksheet.md`
+> — and not from an argument, because the merge is reached through four callers
+> and one of them is the recovery path, which finishes a commit a dead run left
+> and has only the files that run wrote. Nothing is prepended for the default
+> workspace, which is what an untagged task already means, nor for a name no
+> configuration knows: a follow-up routed to a workspace that has never existed
+> is a task blocked for a reason nobody can act on.
 
 **The runner is the ledger's only writer.** The agent never sees this file and
 is denied it by name in the permission list; a ledger kept outside the working
@@ -1355,7 +1419,8 @@ the review and model keys, which are environment > conf > default so that
 | `DEFAULT_MAX_TASKS_TOTAL` / `DEFAULT_MAX_TASKS` | `3` / `3` | ≥ 1 |
 | `DEFAULT_RUN_TIMEOUT` | `3600` | ≥ 1 (`set timeout` ≥ 60) |
 | `DEFAULT_DURATION` | `"10h"` | `10h`/`90m`/`3600`, in [60s, 24h] |
-| `DEFAULT_WORKDIR` / `DEFAULT_BACKLOG` | *(none)* | absolute paths; required. The backlog should sit **outside** the workdir — `hzl doctor` warns if it does not. Both are baked into the generated permission file, so moving either needs `hzl install` again |
+| `DEFAULT_WORKDIR` | *(none)* | one absolute path **per line**; required. One line is one workspace, several lines are several, and the first is the default. The separator is a newline and not a space, because a path may contain a space and this is not a list of integers like `HEINZEL_HOURS` — a single-line value therefore means exactly what it always meant. Validated for shape only: absolute, and no two sharing a last path component, which would make `(dir:x)` ambiguous. Existence is `hzl on`'s and `hzl doctor`'s business, because this is checked before every command and a checkout on an unmounted disk must not stop `hzl status` answering. Every workspace is baked into the generated permission file, so adding or moving one needs `hzl install` again |
+| `DEFAULT_BACKLOG` | *(none)* | absolute path; required. One queue, whatever the number of workspaces. It should sit **outside** every workspace — `hzl doctor` warns if it does not — and is baked into the generated permission file, so moving it needs `hzl install` again |
 | `HEINZEL_MODEL` / `HEINZEL_EFFORT` | `claude-opus-5` / `xhigh` | effort: `low\|medium\|high\|xhigh\|max` |
 | `HEINZEL_EXECUTOR_ENGINE` / `HEINZEL_REVIEWER_ENGINE` | `claude` / `codex` | `claude\|codex` |
 | `HEINZEL_REVIEW` | `0` | `0\|1` |

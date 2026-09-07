@@ -178,7 +178,7 @@ printf 'tests/test.sh — heinzel %s, bash %s\n' \
 
 # --- backlog_scan: the TSV contract ----------------------------------------
 #
-# Every other function in this file is derived from these five fields, so the
+# Every other function in this file is derived from these six fields, so the
 # shape of a row is asserted directly. The row that matters is the one with no
 # id: reading the TSV with `IFS=<tab> read` collapses its empty field, the text
 # arrives in the id column, and the merge then discards a new task as out of
@@ -193,16 +193,47 @@ cat >"${SCAN_LEDGER}" <<'FIXTURE'
 ## P1
 - [ ] (id:h-0001) a task with an id
 - [ ] a task the agent split off, with no id yet
+- [ ] (id:h-0002) (dir:paperclip-ops) a task for another checkout
+- [ ] (dir:heinzel) routed before it has an id
+- [ ] (id:h-0003) a (dir:...) that is not at the front stays in the text
 FIXTURE
 
 SCAN_ROW=$(backlog_scan "${SCAN_LEDGER}" | sed -n 2p)
-t_eq "a row has five fields" \
-  5 "$(printf '%s\n' "${SCAN_ROW}" | awk -F'\t' '{print NF}')"
+t_eq "a row has six fields" \
+  6 "$(printf '%s\n' "${SCAN_ROW}" | awk -F'\t' '{print NF}')"
 t_eq "an id-less row keeps an empty id field rather than shifting left" \
   "" "$(printf '%s' "${SCAN_ROW}" | cut -f4)"
 t_eq "an id-less row keeps its text in field 5" \
   "a task the agent split off, with no id yet" \
   "$(printf '%s' "${SCAN_ROW}" | cut -f5)"
+t_eq "and an empty workspace in field 6, meaning the default one" \
+  "" "$(printf '%s' "${SCAN_ROW}" | cut -f6)"
+
+# The routing comes off the front the way the id does, so what reaches the
+# worksheet, the prompt and the ledger reads the way a person wrote it.
+SCAN_DIR=$(backlog_scan "${SCAN_LEDGER}" | sed -n 3p)
+t_eq "a (dir:) after the id is the workspace" \
+  "paperclip-ops" "$(printf '%s' "${SCAN_DIR}" | cut -f6)"
+t_eq "and is taken off the text, not left in it" \
+  "a task for another checkout" "$(printf '%s' "${SCAN_DIR}" | cut -f5)"
+
+# A person writes `(dir:x)` on a line with no id yet; the runner puts the id in
+# front of it afterwards. Both orders have to parse, or a task routes correctly
+# only after the run that numbered it.
+SCAN_DIR_NOID=$(backlog_scan "${SCAN_LEDGER}" | sed -n 4p)
+t_eq "a (dir:) on a line with no id is still the workspace" \
+  "heinzel" "$(printf '%s' "${SCAN_DIR_NOID}" | cut -f6)"
+t_eq "and that row still has an empty id field" \
+  "" "$(printf '%s' "${SCAN_DIR_NOID}" | cut -f4)"
+
+# Only a leading tag routes. Otherwise a task *about* the syntax reroutes
+# itself by being written down.
+SCAN_MID=$(backlog_scan "${SCAN_LEDGER}" | sed -n 5p)
+t_eq "a (dir:) that is not at the front is text" \
+  "" "$(printf '%s' "${SCAN_MID}" | cut -f6)"
+t_eq "and stays in the text where it was written" \
+  "a (dir:...) that is not at the front stays in the text" \
+  "$(printf '%s' "${SCAN_MID}" | cut -f5)"
 
 # --- backlog_count ---------------------------------------------------------
 #
@@ -1497,6 +1528,239 @@ t_eq "hours and minutes, rounded down to the minute" \
   "in 3h 47m" "$(rel_dur $((3 * 3600 + 47 * 60 + 59)))"
 t_eq "days and hours, and no minutes: nobody reads the third unit" \
   "in 2d 3h" "$(rel_dur $((2 * 86400 + 3 * 3600 + 59 * 60)))"
+
+# --- several working directories -------------------------------------------
+#
+# `DEFAULT_WORKDIR` holds one path per line. One line is one workspace, which
+# is what every configuration written before this was, and several lines are
+# several - so the first thing asserted is that a single-line value has not
+# changed meaning, including one with a space in it. The separator is a newline
+# for exactly that reason: a space-separated list would halve such a path at
+# 03:00 and the run would fail on a directory nobody wrote.
+
+group 'the workspace list'
+
+WS_SAVED=${DEFAULT_WORKDIR:-}
+
+DEFAULT_WORKDIR="/Users/x/Claude/heinzel"
+t_eq "one path is one workspace" 1 "$(workdirs_count)"
+t_eq "and it is the default" "/Users/x/Claude/heinzel" "$(workdir_default)"
+t_eq "named by its last path component" "heinzel" "$(workdir_name "$(workdir_default)")"
+
+DEFAULT_WORKDIR="/Users/x/My Code/thing"
+t_eq "a single path keeps a space, because the separator is a newline" \
+  "/Users/x/My Code/thing" "$(workdir_default)"
+t_eq "and is still one workspace" 1 "$(workdirs_count)"
+
+DEFAULT_WORKDIR="/Users/x/Claude/heinzel
+  /Users/x/Claude/paperclip-ops
+
+/Users/x/other  "
+t_eq "several lines are several workspaces" 3 "$(workdirs_count)"
+t_eq "a blank line is not one of them" \
+  "/Users/x/other" "$(workdirs_list | sed -n 3p)"
+t_eq "indentation is not part of a path" \
+  "/Users/x/Claude/paperclip-ops" "$(workdirs_list | sed -n 2p)"
+t_eq "and neither is a trailing space" \
+  "/Users/x/other" "$(workdirs_list | sed -n 3p)"
+t_eq "the first line is the default, whatever sorts first" \
+  "/Users/x/Claude/heinzel" "$(workdir_default)"
+t_eq "the names are the last components, in configuration order" \
+  "heinzel paperclip-ops other" "$(workdir_names_of "$(workdirs_list)")"
+
+t_eq "a name resolves to its path" \
+  "/Users/x/Claude/paperclip-ops" "$(workdir_of_name paperclip-ops)"
+t_fails "a name nobody configured resolves to nothing" \
+  "$(workdir_of_name nosuch >/dev/null 2>&1; echo $?)"
+
+# The lookup the runner makes is against the *session's* set, not against
+# whatever `heinzel.conf` says this morning: a session started last night keeps
+# the workspaces it was started with.
+t_eq "a name resolves within a given set" \
+  "/tmp/b" "$(workdir_path_in b "/tmp/a
+/tmp/b")"
+t_fails "and not outside it, even when the configuration has it" \
+  "$(workdir_path_in heinzel "/tmp/a
+/tmp/b" >/dev/null 2>&1; echo $?)"
+
+# --- what a person is shown ------------------------------------------------
+
+t_eq "one workspace is shown as the path it is" \
+  "/Users/x/Claude/heinzel" "$(workdirs_display "/Users/x/Claude/heinzel")"
+t_eq "several are shown by name, default first and marked" \
+  "heinzel (default), paperclip-ops" \
+  "$(workdirs_display "/Users/x/Claude/heinzel
+/Users/x/Claude/paperclip-ops")"
+t_eq "and none is said, not shown as an empty line" \
+  "unset" "$(workdirs_display "")"
+
+# `abspath` prints without a trailing newline because every other caller takes
+# it in a `$( )`. Here the newline is the separator, and without it two
+# workspaces come out as one impossible path - which shows up first as an allow
+# rule that matches nothing, which is silent.
+ABS_TWO=$(abspath_lines "${TMPROOT}/one
+${TMPROOT}/two")
+t_eq "abspath over a list keeps the entries apart" 2 "$(printf '%s\n' "${ABS_TWO}" | grep -c .)"
+t_eq "and resolves each of them the way abspath does" \
+  "$(abspath "${TMPROOT}/two")" "$(printf '%s\n' "${ABS_TWO}" | sed -n 2p)"
+
+# --- what the configuration will not accept --------------------------------
+#
+# Shape only, and deliberately not existence: this runs before every command,
+# and a checkout on an unmounted disk must not stop `hzl status` answering.
+
+ws_validate() { # value
+  (
+    # The same clearing `sc_validate` does, and for the same reason: the suite
+    # sets marker model and effort values for the argv assertions, and every
+    # list below would otherwise be invalid for a reason that has nothing to do
+    # with workspaces.
+    HEINZEL_MODEL="" HEINZEL_EFFORT=""
+    HEINZEL_CODEX_MODEL="" HEINZEL_CODEX_EFFORT=""
+    HEINZEL_ROOT=${SC_ROOT}
+    hzl_load_conf >/dev/null 2>&1
+    DEFAULT_WORKDIR=$1
+    hzl_validate_conf >/dev/null 2>&1
+  )
+}
+
+ws_validate "/Users/x/a
+/Users/x/b"
+t_ok "two absolute paths are a valid list" "$?"
+ws_validate ""
+t_ok "and so is none, because a fresh install has none yet" "$?"
+ws_validate "Claude/heinzel"
+t_fails "a relative path is refused - launchd runs with cwd=/" "$?"
+ws_validate "/Users/x/a
+/Users/y/a"
+t_fails "and so are two workspaces with the same name" "$?"
+WS_ERR=${TMPROOT}/ws-err.txt
+(
+  HEINZEL_MODEL="" HEINZEL_EFFORT=""
+  HEINZEL_CODEX_MODEL="" HEINZEL_CODEX_EFFORT=""
+  HEINZEL_ROOT=${SC_ROOT}
+  hzl_load_conf >/dev/null 2>&1
+  DEFAULT_WORKDIR="/Users/x/a
+/Users/y/a"
+  hzl_validate_conf
+) >/dev/null 2>"${WS_ERR}"
+t_has "and the message says which name is ambiguous" "${WS_ERR}" "(dir:a) could mean either"
+
+# --- which workspace a task belongs to -------------------------------------
+
+group 'routing a task to a workspace'
+
+DEFAULT_WORKDIR="/Users/x/Claude/heinzel
+/Users/x/Claude/paperclip-ops"
+
+t_eq "a task with no (dir:) belongs to the default workspace" \
+  "heinzel" "$(task_workspace_name "")"
+t_eq "and one with a (dir:) belongs to that one" \
+  "paperclip-ops" "$(task_workspace_name paperclip-ops)"
+
+WS_LEDGER=${TMPROOT}/ws-backlog.md
+cat >"${WS_LEDGER}" <<'FIXTURE'
+# Backlog
+
+## P1
+- [ ] (id:h-0001) (dir:paperclip-ops) the highest-priority task
+- [ ] (id:h-0002) an untagged task, so the default workspace
+## P2
+- [ ] (id:h-0003) (dir:paperclip-ops) another for paperclip
+- [ ] (id:h-0004) (dir:heinzel) one named explicitly
+FIXTURE
+
+# The order of attack picks the task and the workspace follows from it: one
+# queue, and the highest-priority task decides where the night starts.
+t_eq "the next run's workspace is the top task's" \
+  "paperclip-ops" "$(backlog_next_workspace "${WS_LEDGER}")"
+
+WS_OUT=${TMPROOT}/ws-worksheet.md
+WS_IDS=$(worksheet_write "${WS_LEDGER}" 9 "${WS_OUT}" paperclip-ops)
+t_eq "a worksheet for one workspace holds only that workspace's tasks" \
+  "h-0001 h-0003" "$(printf '%s\n' "${WS_IDS}" | tr '\n' ' ' | sed 's/ $//')"
+t_lacks "and names none of the others" "${WS_OUT}" "h-0002"
+
+# An engine launch has one working directory, so a worksheet spanning two would
+# list tasks the agent could not reach half of. The per-run limit therefore
+# counts within the workspace, not across the queue.
+WS_IDS=$(worksheet_write "${WS_LEDGER}" 1 "${WS_OUT}" paperclip-ops)
+t_eq "the per-run limit counts within the workspace" "h-0001" "${WS_IDS}"
+
+WS_IDS=$(worksheet_write "${WS_LEDGER}" 9 "${WS_OUT}" heinzel)
+t_eq "an untagged task lands in the default workspace's worksheet" \
+  "h-0002 h-0004" "$(printf '%s\n' "${WS_IDS}" | tr '\n' ' ' | sed 's/ $//')"
+
+# No workspace named is the whole queue, which is what every caller before this
+# asked for and what a one-workspace configuration still means.
+WS_IDS=$(worksheet_write "${WS_LEDGER}" 9 "${WS_OUT}")
+t_eq "with no workspace named the worksheet is the whole queue" \
+  4 "$(printf '%s\n' "${WS_IDS}" | grep -c .)"
+
+# --- a task the agent split off ---------------------------------------------
+#
+# A follow-up written inside one checkout has to come back to it. Without the
+# tag it would be queued against whichever workspace happens to be first in
+# `DEFAULT_WORKDIR`, and the next run would hand the agent a task about a tree
+# it is not standing in.
+
+t_eq "a task written in a non-default workspace is tagged with it" \
+  "(dir:paperclip-ops) " "$(task_route_prefix paperclip-ops)"
+t_eq "one written in the default workspace is not, because untagged means that" \
+  "" "$(task_route_prefix heinzel)"
+t_eq "and a name no configuration knows routes nothing at all" \
+  "" "$(task_route_prefix somewhere-else)"
+
+# The name comes from where the worksheet lives, because the merge is reached
+# through four callers and the recovery path has only the files a dead run
+# wrote.
+t_eq "a worksheet names the workspace it was written in" \
+  "paperclip-ops" "$(worksheet_workspace "/Users/x/Claude/paperclip-ops/.heinzel/worksheet.md")"
+
+WS_MG_LED=${TMPROOT}/ws-merge-ledger.md
+cat >"${WS_MG_LED}" <<'FIXTURE'
+# Backlog
+
+## P1
+- [ ] (id:h-0001) (dir:paperclip-ops) the claimed task
+FIXTURE
+WS_MG_DIR=${TMPROOT}/ws-merge/paperclip-ops/.heinzel
+mkdir -p "${WS_MG_DIR}"
+cat >"${WS_MG_DIR}/worksheet.md" <<'FIXTURE'
+# Worksheet
+
+## P1
+- [x] (id:h-0001) the claimed task
+- [ ] something else this checkout needs
+FIXTURE
+printf 'h-0001\n' >"${TMPROOT}/ws-merge-ids.txt"
+(
+  # The workspace has to be a configured one for the tag to be written, and
+  # its path has to be the one the worksheet sits under.
+  DEFAULT_WORKDIR="/Users/x/Claude/heinzel
+${TMPROOT}/ws-merge/paperclip-ops"
+  worksheet_merge "${WS_MG_DIR}/worksheet.md" "${WS_MG_LED}" run-1 \
+    "${TMPROOT}/ws-merge-ids.txt"
+) >/dev/null
+t_has "a new task keeps the workspace it was written in" \
+  "${WS_MG_LED}" "(dir:paperclip-ops) something else this checkout needs"
+
+# --- a session started by an older build -----------------------------------
+#
+# `state.json` carried a single `.workdir` before this. It has to read as the
+# one-workspace list it describes, or a session started last night loses its
+# working directory when this build's runner picks it up at 03:00.
+
+WS_STATE=${TMPROOT}/ws-state.json
+printf '{"mode":"heinzel","workdir":"/Users/x/only"}\n' >"${WS_STATE}"
+t_eq "a state file with .workdir and no .workdirs reads as one workspace" \
+  "/Users/x/only" "$(STATE_FILE=${WS_STATE} state_get_workdirs)"
+printf '{"mode":"heinzel","workdir":"/a","workdirs":["/a","/b"]}\n' >"${WS_STATE}"
+t_eq "and one with .workdirs reads all of them, in the order it recorded" \
+  "/a /b" "$(STATE_FILE=${WS_STATE} state_get_workdirs | tr '\n' ' ' | sed 's/ $//')"
+
+DEFAULT_WORKDIR=${WS_SAVED}
+unset WS_SAVED WS_LEDGER WS_OUT WS_IDS WS_ERR ABS_TWO WS_MG_LED WS_MG_DIR WS_STATE
 
 # --- the minimum gap between runs ------------------------------------------
 #
@@ -4190,9 +4454,17 @@ t_eq "no placeholder survives into the generated file" \
 
 # And the same check the other way round, so that a template rule nobody
 # substitutes cannot be added without this suite saying so.
+#
+# The placeholder has to be *named* in `generate_settings`, not substituted by
+# any particular means: `__WORKSPACE_RULES__` is a whole line replaced by a
+# generated block, the way the plist's `__CALENDAR__` is, because the number of
+# entries behind it is a function of how many workspaces are configured and
+# `sed` replaces a placeholder with a value rather than with a list. Paired
+# with the check above - that nothing survives into the output - this still
+# catches the failure it was written for.
 GS_MISSING=""
 for gs_ph in $(grep -o '__[A-Z_]*__' "${GS_ROOT}/etc/heinzel-settings.json.in" | sort -u); do
-  grep -q "s|${gs_ph}|" "${GS_SRC}" || GS_MISSING="${GS_MISSING} ${gs_ph}"
+  grep -q -- "${gs_ph}" "${GS_SRC}" || GS_MISSING="${GS_MISSING} ${gs_ph}"
 done
 t_eq "every placeholder in the template has a substitution behind it" \
   "" "${GS_MISSING}"

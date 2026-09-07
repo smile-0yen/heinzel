@@ -6,6 +6,108 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.20] - 2026-09-08
+
+`DEFAULT_WORKDIR` takes more than one checkout. Before this a session was one
+working directory, so the only tasks that could be queued were the ones about
+that one repository — and a task about any other was picked up in the wrong
+tree and blocked, which is exactly how `h-0041` was lost. The queue stays one
+backlog; a task says which checkout it is about, and a run works one of them.
+A patch bump and not a minor one: the minor is reserved for the task that
+completes a phase of `docs/RUNTIME-BACKENDS.md`, and this completes none.
+
+### Added
+- **Several working directories.** `DEFAULT_WORKDIR` holds one absolute path
+  per line. One line is one workspace — which is what this setting has always
+  been, so no configuration written before this changes meaning — and several
+  lines are several. The separator is a newline and not a space because a path
+  may contain one and this is not a list of integers like `HEINZEL_HOURS`; a
+  space-separated list would halve such a path at 03:00 and the run would fail
+  on a directory nobody wrote. The first line is the default. A workspace is
+  named by its last path component, and there is deliberately no second setting
+  mapping names to paths: a name kept in step with a path by hand goes stale,
+  and the last component is already what a person calls the checkout. The cost
+  is that two checkouts cannot share one, and that pair is refused by name
+  rather than left to make `(dir:x)` mean either of them.
+- **`(dir:<name>)` on a task.** A sixth field in the ledger's parse, taken off
+  the front of the line the way the id is, so what reaches the worksheet, the
+  prompt and the ledger reads as a person wrote it. It goes after the id, or at
+  the front of a line that has no id yet — a person writes one and the runner
+  puts the id in front of it later, and both orders parse, or a task would
+  route correctly only after the run that numbered it. Only a leading tag
+  routes: one written mid-text stays text, or a task *about* the syntax would
+  reroute itself by being written down. Absent means the default workspace,
+  which is most tasks and is why nothing has to be written at all when there is
+  only one checkout.
+- **A run works one checkout, chosen by the queue.** Past gate 7 the run reads
+  the highest-priority `[ ]` in the order of attack and takes that task's
+  workspace as its own, then works only that workspace's tasks — the per-run
+  limit counts within it. Not a policy choice: an engine launch has one working
+  directory and the sandbox that confines the agent is rooted there, so a
+  worksheet spanning two would list tasks the agent could not reach half of.
+- **`hzl on --workdir` is repeatable, and must name a configured workspace.**
+  By name or by path; each occurrence adds one and the first is the session's
+  default; given none, the session gets all of them. Refusing an unconfigured
+  path closes the sharpest edge the tool had: `hzl install` generates the
+  agent's permission file from `DEFAULT_WORKDIR`, so a session pointed
+  elsewhere used to start, run, and have every write refused by rules naming a
+  tree it was no longer in — with nothing saying so, in `hzl doctor` or
+  anywhere else. `state.json` gains `workdirs`; a file written by an earlier
+  build carries only `workdir` and reads as the one-workspace list it
+  describes, so a session started last night keeps its working directory when
+  this build's runner picks it up at 03:00.
+- **Where a task is going, in the commands that answer questions.** `hzl next`
+  prints the workspace of the task it would pick, and says so plainly when that
+  workspace is one the session does not have. `hzl take` marks the workspace in
+  its list and opens the pasted prompt with the `cd` that gets there — the
+  first thing a person needs and the easiest to get wrong, since a task pasted
+  into a session opened in the wrong tree is worked on the wrong tree.
+  `hzl status`, `hzl schedule` and `hzl install` name every workspace, and
+  `hzl doctor` checks each one exists rather than only the first: a checkout
+  that has moved is a class of tasks that cannot be worked, and the run that
+  would otherwise find out is whichever one a task naming it eventually
+  reaches.
+
+### Changed
+- **The agent's permission file names every configured workspace.** The two
+  allow rules per workspace are generated, the way the plist's calendar is,
+  because the number of them is a function of configuration and `sed` replaces
+  a placeholder with a value rather than with a list. One installed file serves
+  every workspace, so the allow list is wider than any single run needs — and
+  it is the sandbox that makes that acceptable, since it roots at the run's own
+  working directory and leaves the other rules inert for the whole of that run.
+  The layer it does cost is the inner one: were the sandbox off, an agent could
+  reach every configured workspace rather than one. Which is the argument for
+  listing checkouts you are willing to have worked on unattended, and not every
+  checkout on the disk. Recorded in the generated file's own comment.
+- **A run holds the writer lease on every workspace its session has.** The
+  order is forced and there is no other: the workspace is chosen from the
+  queue, the queue is read after the sweep, and the sweep is a ledger write the
+  run must already own the checkouts to make. Taken in the session's recorded
+  order, which is fixed, so two runners racing for the same set contend on the
+  same first entry rather than half way into each other's; a run that loses
+  gives back what it took before standing down. It costs nothing that was
+  previously possible — a session had one workspace and one lease — and it buys
+  "the checkout takes one writer" holding with six checkouts exactly as with
+  one, with no window between choosing a workspace and owning it. Stale claims
+  left by a killed run are now released across all of them, rather than waiting
+  for a run that happens to pick that checkout again.
+- **A task the agent splits off keeps the workspace it was written in.** The
+  merge prepends `(dir:<name>)` to a new task when the worksheet came from a
+  workspace that is not the default. The name is taken from where the worksheet
+  lives — `<workdir>/.heinzel/worksheet.md` — and not from an argument, because
+  the merge is reached through four callers and one of them is the recovery
+  path, which finishes a commit a dead run left and has only the files that run
+  wrote. Nothing is prepended for the default workspace, which is what an
+  untagged task already means, nor for a name no configuration knows: a
+  follow-up routed to a workspace that has never existed is a task blocked for
+  a reason nobody can act on.
+- **A task naming a workspace the session does not have is blocked, not
+  skipped.** Skipping is the quieter failure and by far the worse one: the task
+  stays at the head of the queue, is chosen again every night after, and each
+  of those runs reports "nothing to do" about a backlog with work in it. The
+  block says which name was not found and which names were.
+
 ## [0.3.19] - 2026-09-08
 
 "When does this next run?" had no command behind it. `HEINZEL_HOURS` is the

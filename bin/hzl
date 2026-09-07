@@ -128,8 +128,23 @@ session_path() {
   fi
   printf '%s' "${fallback}"
 }
-cur_workdir() { session_path .workdir "${DEFAULT_WORKDIR}"; }
+cur_workdir() { session_path .workdir "$(workdir_default)"; }
 cur_backlog() { session_path .backlog "${DEFAULT_BACKLOG}"; }
+
+# Every workspace this session may work in, one absolute path per line, in the
+# order that makes the first one the default.
+#
+# A live session owns its list for the same reason it owns its paths: `hzl on
+# --workdir X` is a promise for that session, and an edit to `heinzel.conf` at
+# 02:00 must not add a checkout to a session that was started without it.
+cur_workdirs() {
+  local v
+  if [ "$(effective_mode)" = heinzel ]; then
+    v=$(state_get_workdirs)
+    if [ -n "${v}" ]; then printf '%s\n' "${v}"; return 0; fi
+  fi
+  workdirs_list
+}
 
 cmd_status() {
   local json=0 quiet=0 mode rc
@@ -192,7 +207,7 @@ cmd_status() {
   if [ "${mode}" = heinzel ]; then
     field "session" "$(good "on") (expires $(short_at "$(state_get .expires_at_epoch 0)"))"
     field "budget" "$(budget_line)"
-    field "workdir" "$(state_get .workdir "")"
+    field "workdir" "$(workdirs_display "$(cur_workdirs)")"
   else
     field "session" "off - ${HZ_REASON}"
   fi
@@ -272,7 +287,7 @@ cmd_on() {
   require_not_root
   local duration=${DEFAULT_DURATION} max_tasks=${DEFAULT_MAX_TASKS}
   local max_total=${DEFAULT_MAX_TASKS_TOTAL} timeout=${DEFAULT_RUN_TIMEOUT}
-  local backlog=${DEFAULT_BACKLOG} workdir=${DEFAULT_WORKDIR}
+  local backlog=${DEFAULT_BACKLOG} workdir="" wanted=""
   local use_sudo=1 force=0 kick=1 dry=0
 
   while [ $# -gt 0 ]; do
@@ -282,7 +297,12 @@ cmd_on() {
       --max-total) max_total=${2:-}; shift ;;
       --timeout) timeout=${2:-}; shift ;;
       --backlog) backlog=${2:-}; shift ;;
-      --workdir) workdir=${2:-}; shift ;;
+      # Repeatable: each occurrence adds one workspace, and the first given
+      # is the session's default. Given none, the session gets every workspace
+      # `DEFAULT_WORKDIR` lists, which is what a configuration with one
+      # workspace has always meant.
+      --workdir) wanted="${wanted}${2:-}
+"; shift ;;
       --no-sudo) use_sudo=0 ;;
       --force) force=1 ;;
       --no-kick) kick=0 ;;
@@ -303,22 +323,65 @@ cmd_on() {
   [ "${max_total}" -ge 1 ] || die "--max-total must be >= 1"
   [ "${timeout}" -ge 60 ] || die "--timeout must be >= 60"
 
-  [ -n "${workdir}" ] || die "no workdir configured. Set DEFAULT_WORKDIR in etc/heinzel.conf or pass --workdir"
+  [ -n "${DEFAULT_WORKDIR}" ] || die "no workdir configured. Set DEFAULT_WORKDIR in etc/heinzel.conf"
   [ -n "${backlog}" ] || die "no backlog configured. Set DEFAULT_BACKLOG in etc/heinzel.conf or pass --backlog"
-  workdir=$(abspath "${workdir}")
   backlog=$(abspath "${backlog}")
-  [ -d "${workdir}" ] || die "workdir does not exist: ${workdir}"
-  # ~/.heinzel is denied to the agent wholesale, on purpose: it holds state.json,
-  # the lock, and the logs. Pointing the working directory at it produces a run
-  # where every write is refused - and the failure reads as an agent that could
-  # not manage the task, not as a configuration mistake.
-  case ${workdir} in
-    "${HEINZEL_HOME}"|"${HEINZEL_HOME}"/*)
-      err "workdir is inside ${HEINZEL_HOME}, which the agent is denied entirely."
-      err "that directory is Heinzel's own state; an agent working there can write nothing."
-      err "point DEFAULT_WORKDIR at the code you want worked on."
-      exit 1 ;;
-  esac
+
+  # A `--workdir` must name a workspace this installation is configured for -
+  # by its name (`heinzel`) or by its path - and is refused otherwise rather
+  # than accepted and worked in. An arbitrary path used to be accepted here and
+  # was the sharpest edge in the tool: the agent's permission file is generated
+  # by `hzl install` from `DEFAULT_WORKDIR`, so a session pointed somewhere else
+  # started, ran, and had every write refused by rules naming a tree it was no
+  # longer in. Refusing here is what makes `hzl on` and the installed rules
+  # incapable of disagreeing.
+  local one resolved configured
+  configured=$(abspath_lines "$(workdirs_list)")
+  if [ -n "${wanted}" ]; then
+    while IFS= read -r one; do
+      [ -n "${one}" ] || continue
+      # By name first, because that is what a person types and what a task
+      # writes. A path is accepted too, and has to be one of the configured
+      # ones after `abspath`, so `--workdir .` from inside a checkout works.
+      resolved=$(workdir_of_name "${one}") || resolved=$(abspath "${one}")
+      resolved=$(abspath "${resolved}")
+      if ! printf '%s\n' "${configured}" | grep -qxF -- "${resolved}"; then
+        err "--workdir ${one}: not a configured workspace"
+        err "configured: $(workdir_names | tr '\n' ' ' | sed 's/ $//')"
+        err "add it to DEFAULT_WORKDIR in etc/heinzel.conf, then run 'hzl install'"
+        exit 1
+      fi
+      workdir="${workdir}${resolved}
+"
+    done <<EOF
+${wanted}
+EOF
+  else
+    workdir=${configured}
+  fi
+  workdir=$(printf '%s\n' "${workdir}" | grep -v '^$')
+  [ -n "${workdir}" ] || die "no workdir resolved - set DEFAULT_WORKDIR in etc/heinzel.conf"
+
+  # Every one of them, not just the first. A workspace that does not exist, or
+  # one pointed at Heinzel's own state, is a run that goes wrong on whichever
+  # night a task happens to name it - which is a worse time to find out.
+  #
+  # ~/.heinzel is denied to the agent wholesale, on purpose: it holds
+  # state.json, the lock, and the logs. Pointing a working directory at it
+  # produces a run where every write is refused - and the failure reads as an
+  # agent that could not manage the task, not as a configuration mistake.
+  while IFS= read -r one; do
+    [ -d "${one}" ] || die "workdir does not exist: ${one}"
+    case ${one} in
+      "${HEINZEL_HOME}"|"${HEINZEL_HOME}"/*)
+        err "workdir is inside ${HEINZEL_HOME}, which the agent is denied entirely."
+        err "that directory is Heinzel's own state; an agent working there can write nothing."
+        err "point DEFAULT_WORKDIR at the code you want worked on."
+        exit 1 ;;
+    esac
+  done <<EOF
+${workdir}
+EOF
 
   if [ "${timeout}" -gt 3600 ]; then
     warn "a run may use up to ${timeout}s, which is longer than the gap between slots;"
@@ -377,7 +440,7 @@ cmd_on() {
     say "would start a session:"
     field "expires" "$(short_at "${expires}") (${duration})"
     field "budget" "${max_total} tasks total, ${max_tasks} per run, ${timeout}s wall clock"
-    field "workdir" "${workdir}"
+    field "workdir" "$(workdirs_display "${workdir}")"
     field "backlog" "${backlog} (${todo} todo)"
     field "slots before expiry" "${slots} (hours: $(hours_display))"
     field "would sudo" "$([ "${use_sudo}" = 1 ] && echo "pmset -a disablesleep 1" || echo "no (--no-sudo)")"
@@ -437,7 +500,8 @@ cmd_on() {
     --argjson expires_at_epoch "${expires}" \
     --arg duration "${duration}" \
     --arg boot_id "$(boot_id_now)" \
-    --arg workdir "${workdir}" \
+    --arg workdir "$(printf '%s\n' "${workdir}" | head -1)" \
+    --argjson workdirs "$(printf '%s\n' "${workdir}" | jq -R . | jq -s .)" \
     --arg backlog "${backlog}" \
     --argjson max_tasks_per_run "${max_tasks}" \
     --argjson max_tasks_total "${max_total}" \
@@ -452,7 +516,7 @@ cmd_on() {
       activated_at: $activated_at, activated_at_epoch: $activated_at_epoch,
       expires_at: $expires_at, expires_at_epoch: $expires_at_epoch,
       duration: $duration, boot_id: $boot_id,
-      workdir: $workdir, backlog: $backlog,
+      workdir: $workdir, workdirs: $workdirs, backlog: $backlog,
       max_tasks_per_run: $max_tasks_per_run, max_tasks_total: $max_tasks_total,
       tasks_done_total: 0, run_timeout_sec: $run_timeout_sec,
       hours: $hours, caffeinate_pid: $caffeinate_pid,
@@ -477,7 +541,7 @@ cmd_on() {
       warn "could not kickstart the agent; it will still fire on schedule"
   fi
 
-  log_event ok "session on until $(iso_at "${expires}") budget=${max_total} workdir=${workdir}"
+  log_event ok "session on until $(iso_at "${expires}") budget=${max_total} workdir=$(oneline "${workdir}")"
   cmd_status
 }
 
@@ -876,6 +940,17 @@ cmd_next() {
   printf '\n'
   field "next up" "${nid}"
   field "priority" "P$(printf '%s' "${row}" | cut -f2)"
+  # Which checkout this task sends the next run to. Printed always, and not
+  # only when several are configured: the answer to "where will it work" should
+  # not depend on how many workspaces there happen to be today, and a task that
+  # names one that no longer exists is worth seeing before the run blocks it.
+  local nws nwd
+  nws=$(task_workspace_name "$(printf '%s' "${row}" | cut -f6)")
+  if nwd=$(workdir_path_in "${nws}" "$(cur_workdirs)"); then
+    field "workspace" "${nws} (${nwd})"
+  else
+    field "workspace" "$(bad "${nws}") - no such workspace here; the next run will block this task"
+  fi
   say ""
   say "  $(printf '%s' "${row}" | cut -f5)"
   backlog_notes_for_line "${b}" "$(printf '%s' "${row}" | cut -f1)"
@@ -900,7 +975,13 @@ cmd_take() {
     printf '\n'
     say "blocked, waiting for you:"
     printf '\n'
-    ledger_scan_live "${b}" | awk -F'\t' '$3 == "!" {printf "  P%-3s %-8s %s\n", $2, $4, $5}'
+    # The workspace, when a task names one. Only then: with one checkout
+    # configured every line would carry the same word, and the column would be
+    # noise in the one place a person is trying to read a list quickly.
+    ledger_scan_live "${b}" |
+      awk -F'\t' '$3 == "!" {
+        printf "  P%-3s %-8s %s%s\n", $2, $4, ($6 == "" ? "" : "[" $6 "] "), $5
+      }'
     printf '\n'
     dim "  'hzl take <id>' prints a prompt for an interactive session"
     printf '\n'
@@ -916,7 +997,22 @@ cmd_take() {
   marker=$(backlog_marker_of_id "${f}" "${id}")
   lineno=$(backlog_line_of_id "${f}" "${id}")
 
+  # Which checkout the task is about, and the `cd` that gets there. This is the
+  # first thing a person needs and the easiest to get wrong: a task pasted into
+  # a session opened in the wrong tree is worked on the wrong tree, and the
+  # session finds out at the first file that is not where it should be.
+  local tws twd=""
+  tws=$(task_workspace_name "$(ledger_scan_live "${b}" 2>/dev/null |
+    awk -F'\t' -v want="${id}" '$4 == want {print $6; exit}')")
+  twd=$(workdir_path_in "${tws}" "$(cur_workdirs)") || twd=""
+
   printf '\n--- paste this into an interactive session ---\n\n'
+  if [ -n "${twd}" ]; then
+    printf 'Work in %s (workspace %s):\n\n    cd %s\n\n' "${twd}" "${tws}" "${twd}"
+  else
+    printf 'This task names workspace %s, which is not configured here.\n' "${tws}"
+    printf 'Configured: %s\n\n' "$(workdir_names_of "$(cur_workdirs)")"
+  fi
   printf 'Task %s from %s:\n\n' "${id}" "${f}"
   printf '  %s\n' "${text}"
   backlog_notes_for_line "${f}" "${lineno}"
@@ -1321,7 +1417,12 @@ cmd_doctor() {
       # to widen its own boundary instead of doing the task. Nothing else
       # notices if that rule goes missing; the run would simply be unconfined
       # in the direction that matters most.
-      if [ "$(cur_workdir)" = "${HEINZEL_ROOT}" ]; then
+      #
+      # Any of the session's workspaces, not the default one: this repository
+      # being the second entry in the list makes it no less this repository,
+      # and the carve-out is what stands between a run that reaches it and its
+      # own deny list.
+      if printf '%s\n' "$(cur_workdirs)" | grep -qxF -- "${HEINZEL_ROOT}"; then
         if jq -e --arg p "Edit(//${HEINZEL_ROOT#/}/etc/**)" \
              '(.permissions.deny // []) | index($p)' "${settings}" >/dev/null 2>&1; then
           doc_ok "self-hosting: the agent may edit the repository but not etc/"
@@ -1400,33 +1501,61 @@ cmd_doctor() {
     doc_ok "sleep suppression matches the session state"
   fi
 
-  printf '\n6. working directory and backlog\n'
-  local b w
-  w=$(cur_workdir)
+  printf '\n6. working directories and backlog\n'
+  local b w ws_all ws_n ws_ok=0 first=1 ws_reachable=""
+  ws_all=$(cur_workdirs)
+  ws_n=$(printf '%s\n' "${ws_all}" | grep -c .)
   b=$(cur_backlog)
-  if [ -z "${w}" ] || [ -z "${b}" ]; then
+  if [ -z "${ws_all}" ] || [ -z "${b}" ]; then
     doc_bad "not configured yet - set DEFAULT_WORKDIR and DEFAULT_BACKLOG in etc/heinzel.conf"
-  elif case ${w} in ("${HEINZEL_HOME}"|"${HEINZEL_HOME}"/*) true ;; (*) false ;; esac; then
-    doc_bad "the working directory is inside ${HEINZEL_HOME} - the agent is denied all of it"
-    printf '       %s holds state.json, the lock and the logs. An agent working\n' "${HEINZEL_HOME}"
-    printf '       there can write nothing, and the run looks like a capable agent failing.\n'
-    printf "       point DEFAULT_WORKDIR at the code you want worked on. 'hzl on' refuses this.\n"
-  elif [ ! -d "${w}" ]; then
-    doc_bad "the working directory does not exist: ${w}"
-    printf '       create it, or point DEFAULT_WORKDIR somewhere that exists.\n'
-    printf "       'hzl on' refuses to start without it, because launchd runs with cwd=/\n"
   else
-    doc_ok "working directory ${w}"
-    # The agent works from a worksheet the runner merges back, so it never
-    # needs the ledger - and the sandbox is a path boundary, so a ledger kept
-    # outside the working directory is one a subprocess cannot reach either.
-    case ${b} in
-      "${w}"/*)
-        doc_warn "the backlog is inside the working directory, so the agent can reach it"
-        printf '       backlog %s\n       workdir %s\n' "${b}" "${w}"
-        printf '       move it out (e.g. %s/backlog.md) and re-run '"'"'hzl install'"'"'\n' "${HEINZEL_HOME}" ;;
-      *) doc_ok "the backlog is outside the working directory, out of the agent's reach" ;;
+    # Every workspace, each one checked the same way. A checkout that has been
+    # moved or renamed is a whole class of tasks that cannot be worked, and
+    # under one working directory the first run said so; under several, only a
+    # run that reached a task naming *that* one would - which could be weeks.
+    while IFS= read -r w; do
+      [ -n "${w}" ] || continue
+      if case ${w} in ("${HEINZEL_HOME}"|"${HEINZEL_HOME}"/*) true ;; (*) false ;; esac; then
+        doc_bad "workspace ${w} is inside ${HEINZEL_HOME} - the agent is denied all of it"
+        printf '       %s holds state.json, the lock and the logs. An agent working\n' "${HEINZEL_HOME}"
+        printf '       there can write nothing, and the run looks like a capable agent failing.\n'
+        printf "       point DEFAULT_WORKDIR at the code you want worked on. 'hzl on' refuses this.\n"
+      elif [ ! -d "${w}" ]; then
+        doc_bad "workspace ${w} does not exist"
+        printf '       create it, or take it out of DEFAULT_WORKDIR.\n'
+        printf "       'hzl on' refuses to start without it, because launchd runs with cwd=/\n"
+      else
+        ws_ok=$((ws_ok + 1))
+        if [ "${first}" = 1 ]; then
+          doc_ok "workspace $(workdir_name "${w}") - ${w} (the default: a task with no (dir:) goes here)"
+        else
+          doc_ok "workspace $(workdir_name "${w}") - ${w}"
+        fi
+      fi
+      first=0
+      # The agent works from a worksheet the runner merges back, so it never
+      # needs the ledger - and the sandbox is a path boundary, so a ledger kept
+      # outside every working directory is one a subprocess cannot reach
+      # either. Checked against each of them: it only takes one to reach it.
+      case ${b} in
+        "${w}"/*)
+          ws_reachable=1
+          doc_warn "the backlog is inside workspace ${w}, so the agent can reach it"
+          printf '       backlog %s\n       workdir %s\n' "${b}" "${w}"
+          printf '       move it out (e.g. %s/backlog.md) and re-run '"'"'hzl install'"'"'\n' "${HEINZEL_HOME}" ;;
+      esac
+    done <<EOF
+${ws_all}
+EOF
+    # It only takes one workspace to reach the ledger, so this is said once,
+    # about all of them, and only when none of them can.
+    [ -n "${ws_reachable}" ] ||
+      doc_ok "the backlog is outside every working directory, out of the agent's reach"
+    case ${ws_n} in
+      1) ;;
+      *) doc_ok "${ws_n} workspaces; the queue is shared and a task picks one with (dir:<name>)" ;;
     esac
+    w=$(printf '%s\n' "${ws_all}" | head -1)
     if [ -r "${b}" ]; then
       doc_ok "${b}: $(backlog_count "${b}" " ") todo, $(backlog_count "${b}" "~") in progress, $(backlog_count "${b}" x) done, $(ledger_count "${b}" "!") blocked"
     else
@@ -1542,11 +1671,12 @@ generate_plist() {
     { if ($0 == "__CALENDAR__") print cal; else print }'
 }
 
-# The deny list has to name the working directory, which is configuration, so
-# the file the runner validates is generated rather than shipped.
+# The allow list has to name every working directory and the deny list the
+# ledger, both of which are configuration, so the file the runner validates is
+# generated rather than shipped.
 generate_settings() {
-  local workdir=$1 backlog=$2 out="${HEINZEL_ROOT}/etc/heinzel-settings.json"
-  local blocked completed
+  local workdirs=$1 backlog=$2 out="${HEINZEL_ROOT}/etc/heinzel-settings.json"
+  local blocked completed rules="" wd
   # The ledger is three files, and all three are denied by name. The other two
   # are derived from the backlog rather than looked up, because `ledger_files`
   # answers with the files that exist and this list has to hold for the ones
@@ -1562,15 +1692,41 @@ generate_settings() {
   # An absolute path in a Read/Edit rule needs two leading slashes: one slash
   # anchors at the settings file's own location, which silently matches
   # nothing. The paths are anchored here so the template cannot get it wrong.
-  sed -e "s|__WORKDIR_ABS__|//${workdir#/}|g" \
-      -e "s|__WORKSHEET_ABS__|//${workdir#/}/.heinzel/worksheet.md|g" \
-      -e "s|__BACKLOG_ABS__|//${backlog#/}|g" \
+  # One workspace or several: the allow list carries the same two rules for
+  # each. `$1` is the whole of `DEFAULT_WORKDIR`, one absolute path per line,
+  # so a single-workspace configuration produces exactly the four lines this
+  # file has always had.
+  #
+  # A generated block and not a `sed` substitution, for the same reason the
+  # plist's calendar is one: the number of entries is a function of
+  # configuration, and `sed` replaces a placeholder with a value rather than
+  # with a list.
+  while IFS= read -r wd; do
+    [ -n "${wd}" ] || continue
+    rules="${rules}      \"Read(//${wd#/}/**)\",
+      \"Edit(//${wd#/}/**)\",
+      \"Read(//${wd#/}/.heinzel/worksheet.md)\",
+      \"Edit(//${wd#/}/.heinzel/worksheet.md)\",
+"
+  done <<EOF
+${workdirs}
+EOF
+  # The last entry of a JSON array takes no comma. Stripped from the last line
+  # rather than by building the block backwards, because a `}` at the start of
+  # a line would end this function as far as the test that lifts it out of
+  # bin/hzl is concerned.
+  rules=$(printf '%s' "${rules}" | sed -e '$ s/,$//')
+  [ -n "${rules}" ] || { err "no workspace to allow - DEFAULT_WORKDIR is empty"; return 1; }
+
+  sed -e "s|__BACKLOG_ABS__|//${backlog#/}|g" \
       -e "s|__BACKLOG_BLOCKED_ABS__|//${blocked#/}|g" \
       -e "s|__BACKLOG_COMPLETED_ABS__|//${completed#/}|g" \
       -e "s|__HEINZEL_HOME_ABS__|//${HEINZEL_HOME#/}|g" \
       -e "s|__HEINZEL_ROOT_ABS__|//${HEINZEL_ROOT#/}|g" \
-      -e "s|__WORKDIR__|${workdir}|g" \
-      "${HEINZEL_ROOT}/etc/heinzel-settings.json.in" >"${out}" || return 1
+      "${HEINZEL_ROOT}/etc/heinzel-settings.json.in" |
+  HZL_WS_RULES=${rules} awk '
+    BEGIN { rules = ENVIRON["HZL_WS_RULES"] }
+    { if ($0 == "__WORKSPACE_RULES__") print rules; else print }' >"${out}" || return 1
   jq -e . "${out}" >/dev/null 2>&1 || {
     err "generated ${out} is not valid JSON"
     return 1
@@ -1591,7 +1747,7 @@ cmd_install() {
   mkdir -p "${PLIST_DIR}" "${LOG_DIR}" || die "could not create ${PLIST_DIR}"
 
   local wd bl
-  wd=$(cur_workdir)
+  wd=$(cur_workdirs)
   [ -n "${wd}" ] || die "no workdir configured - set DEFAULT_WORKDIR in etc/heinzel.conf"
   # The backlog is named in the deny list, so it has to be known here. An empty
   # value would render as a path rule of `//`, which is a rule about the whole
@@ -1600,8 +1756,10 @@ cmd_install() {
   [ -n "${bl}" ] || die "no backlog configured - set DEFAULT_BACKLOG in etc/heinzel.conf"
   # Through abspath, exactly as `on` stores it. Without this, installing before
   # the first session writes allow rules for /tmp/x while the agent runs in
-  # /private/tmp/x, and the rules match nothing.
-  wd=$(abspath "${wd}")
+  # /private/tmp/x, and the rules match nothing. Every workspace, not the first:
+  # a rule that matches nothing is silent, and it would be silent for whichever
+  # checkout happened to be listed second.
+  wd=$(abspath_lines "${wd}")
   bl=$(abspath "${bl}")
   generate_settings "${wd}" "${bl}" || die "could not generate the agent permission file"
   local pl
@@ -1615,7 +1773,22 @@ cmd_install() {
   good "installed ${HEINZEL_LABEL}"
   field "schedule" "$(hours_display) (on the hour)"
   field "plist" "${pl}"
-  field "agent confined to" "${wd}"
+  # One workspace prints as it always did. Several print one per line, the
+  # first marked, because "the default" is a fact about the list and means
+  # nothing when the list is one long.
+  local first=1 one many=""
+  [ "$(printf '%s\n' "${wd}" | grep -c .)" -gt 1 ] && many=1
+  while IFS= read -r one; do
+    [ -n "${one}" ] || continue
+    if [ "${first}" = 1 ]; then
+      field "agent confined to" "${one}${many:+ $(dim "(default)")}"
+      first=0
+    else
+      field "" "${one}"
+    fi
+  done <<EOF
+${wd}
+EOF
 }
 
 cmd_uninstall() {
@@ -1742,7 +1915,7 @@ cmd_schedule() {
     field "budget" "$(budget_line)"
     field "tasks per run" "$(state_get .max_tasks_per_run 0)"
     field "wall clock per run" "$(state_get .run_timeout_sec 0)s"
-    field "workdir" "$(state_get .workdir "")"
+    field "workdir" "$(workdirs_display "$(cur_workdirs)")"
     field "backlog" "$(state_get .backlog "")"
   else
     # The defaults, labelled as defaults: outside a session these are what the
@@ -1752,7 +1925,7 @@ cmd_schedule() {
     field "tasks per session" "${DEFAULT_MAX_TASKS_TOTAL}"
     field "tasks per run" "${DEFAULT_MAX_TASKS}"
     field "wall clock per run" "${DEFAULT_RUN_TIMEOUT}s"
-    field "workdir" "${DEFAULT_WORKDIR:-unset}"
+    field "workdir" "$(workdirs_display "$(workdirs_list)")"
     field "backlog" "${DEFAULT_BACKLOG:-unset}"
   fi
 
@@ -1786,7 +1959,10 @@ session (unattended work)
                                --max-total N      tasks for the whole session
                                --max-tasks N      tasks per run
                                --timeout N        wall clock per run, seconds
-                               --workdir PATH     --backlog PATH
+                               --workdir NAME     one of the configured
+                                                  workspaces; repeatable.
+                                                  Default: all of them
+                               --backlog PATH
                                --force            allow starting on battery
                                --no-sudo          do not suppress sleep
                                --no-kick          do not run one immediately

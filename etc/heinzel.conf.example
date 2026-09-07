@@ -10,6 +10,31 @@
 # There is no sensible default here, so there isn't one: fill both in.
 # The directory must already exist; the backlog file is created for you.
 #
+# DEFAULT_WORKDIR takes SEVERAL checkouts, one per line:
+#
+#   DEFAULT_WORKDIR="/Users/you/projects/alpha
+#   /Users/you/projects/beta"
+#
+# One line is one workspace, which is what this setting has always been. The
+# separator is a newline and not a space, so a path with a space in it keeps
+# meaning what it meant.
+#
+# The queue is still one backlog. A task picks its checkout by name - the last
+# component of the path - written at the front of the line:
+#
+#   ## P1
+#   - [ ] (dir:beta) the login page forgets the redirect
+#   - [ ] this one has no (dir:), so it goes to alpha
+#
+# The FIRST line is the default: a task with no `(dir:)` is worked there. A run
+# works in one checkout - the one the highest-priority task names - and takes
+# only that checkout's tasks, so a night moves through one tree at a time.
+#
+# Two checkouts cannot share a last component; `hzl doctor` and every command
+# refuse the pair rather than let `(dir:x)` mean either of them. Run
+# `hzl install` after changing this: the agent's permission file names every
+# workspace and is generated from this value.
+#
 # Keep the backlog OUTSIDE the working directory. The agent works from a
 # worksheet the runner merges back into the backlog afterwards, so it never
 # needs the file itself - and the sandbox that confines the agent is a path
@@ -24,7 +49,7 @@
 # session keeps the paths it was started with, and `hzl install` bakes whatever
 # is current into the agent's permission file - so after changing one, re-run
 # `hzl install` and check `hzl doctor` section 2.
-DEFAULT_WORKDIR=""       # e.g. "/Users/you/projects"
+DEFAULT_WORKDIR=""       # e.g. "/Users/you/projects", or several, one per line
 DEFAULT_BACKLOG=""       # e.g. "/Users/you/.heinzel/backlog.md"
 
 # --- when to run -----------------------------------------------------------

@@ -20,6 +20,7 @@ hzl on --duration 10h     # start an unattended session (expires by itself)
 hzl off                   # stop it, and restore what it changed
 hzl status                # what is actually true right now
 hzl schedule              # when the next run is, and whether it will do anything
+hzl next                  # what it would pick up next, and in which checkout
 hzl report                # the morning read: what is blocked, what got done
 ```
 
@@ -96,6 +97,12 @@ hzl doctor          # check the setup
 hzl install         # generate the launchd agent and the permission file
 hzl on --dry-run    # see what starting a session would do
 ```
+
+`DEFAULT_WORKDIR` takes several checkouts, one per line. The queue stays one
+backlog and a task picks its checkout by name — `- [ ] (dir:beta) fix the
+redirect` — with the first line of the list as the default for tasks that name
+none. A run works one checkout per night, whichever the highest-priority task
+names. `docs/RUNBOOK.md` has the details.
 
 Nothing runs unattended until you run `hzl on`, and `hzl travel` / `hzl remote`
 refuse to touch anything until you set `HEINZEL_POSTURE=1` deliberately.
