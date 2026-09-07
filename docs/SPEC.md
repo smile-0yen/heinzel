@@ -106,6 +106,7 @@ Privileged subcommands escalate internally.
 | `set` | `[max-total\|max-tasks\|timeout] N` | 0 / 1 |
 | `travel` | `--dry-run` | 0 / 1 |
 | `remote` | `--dry-run` | 0 / 1 |
+| `add` | `--priority N`, `--dir NAME`, `<text>` | 0 / 1 / **4** already in the ledger |
 | `next` | — | 0 / 1 |
 | `take` | `[id]` | 0 / 1 / **3** no such id |
 | `done` | `<id> [note]` | 0 / 1 / **3** / **4** |
@@ -116,6 +117,8 @@ Privileged subcommands escalate internally.
 | `report` | `--days N`, `--json`, `--quiet` | **0** nothing blocked, **10** something is, 1 error |
 | `run-now` | `--dry-run` | the runner's exit code |
 | `logs` | `-f`, `-n N` | 0 / 1 |
+| `dashboard` | `--days N` | 0 / 1 |
+| `web` | `--port N`, `--days N`, `--no-open` | the server's; ctrl-c is 130 |
 | `doctor` | — | 0 clean, 1 problems found |
 | `install` / `uninstall` | — | 0 / 1 |
 
@@ -136,6 +139,20 @@ to be accepted, and was the sharpest edge in the tool: `hzl install` generates
 the agent's permission file from `DEFAULT_WORKDIR`, so a session pointed
 elsewhere started, ran, and had every write refused by rules naming a tree it
 was no longer in.
+
+`add` is the ledger's writer in a person's hands: it inserts under the backlog
+lock, through the same `backlog_insert_at_priority` the merge uses, and
+allocates the id with the runner's own allocator so that whoever added a task is
+told what it is called. §8 still holds — ids are allocated by that allocator and
+never hand-written. A task already in the ledger **word for word** exits 4 and
+writes nothing: two identical tasks are worked twice and the second finds
+nothing to do, and a double-submitted form is the ordinary way to make that pair.
+
+`dashboard` prints one JSON document holding the session, the schedule and its
+slots, the workspaces, every task in the live ledger plus the archive within
+`--days`, the recent runs with their own event trails, and the tail of
+`runner.log`. It exists so the web UI has one thing to fetch and **no parser of
+its own** (§8.2).
 
 `schedule` answers "when does this next run, and will that run do anything",
 and is read-only: it asks `launchctl` whether the agent is loaded and diffs the
@@ -502,8 +519,17 @@ checkout — makes "what is next" a question with several answers and priority a
 thing that only orders within a repository.
 
 `backlog_scan` emits one TSV row per task line: **lineno, priority, marker, id,
-text, workspace**. Everything else is derived from it, so the parse exists in
-exactly one place.
+text, workspace, meta**. Everything else is derived from it, so the parse exists
+in exactly one place.
+
+> **Normative: there is one task-line parser.** `meta` is the trailing
+> `<!-- ... -->` verbatim, carried as a field rather than re-extracted by each
+> reader. `ledger_blocked` held a second copy of the parser and the copy fell
+> behind the moment the first one learned something: `(dir:)` routing was taken
+> off the text by `backlog_scan` and left on it there, so the morning report and
+> `hzl take` showed a tag the ledger no longer considered part of the task. Tabs
+> inside a comment become spaces on the way into the field: this is a TSV, and a
+> comment nobody expected to contain one would shift every field after it.
 
 | Element | Rule |
 |---|---|
@@ -737,6 +763,36 @@ tab is an IFS whitespace character, so consecutive tabs collapse into one
 delimiter. An empty field — exactly what an id-less line the agent added looks
 like — shifts every later field left, and the new task arrives wearing the next
 field's value.
+
+### 8.2 The web surface (normative)
+
+`hzl web` serves the dashboard on loopback for as long as the terminal that
+started it holds it. It is **not** a LaunchAgent and must not become one:
+everything else Heinzel installs runs unattended and is confined for it, while
+this is a window a person opens while they are sitting there. A resident service
+that can write the backlog would run all day whether or not anyone was looking,
+and would be the one thing still listening through `hzl travel`.
+
+`lib/web/server.py` is transport and nothing else. It parses no ledger, reads no
+state file and knows no rule: `GET /api/dashboard` runs `hzl dashboard` and
+passes its output through, `POST /api/task` runs `hzl add`. This is §8's one
+parse restated for a different reader; a second implementation of "what the
+queue says", written in Python or JavaScript, would be the copy that falls
+behind.
+
+| Boundary | Rule |
+|---|---|
+| Bind address | `127.0.0.1` only |
+| `Host` | must be a loopback address or `localhost`; a rebound DNS name is refused |
+| Mutating route | additionally: `Sec-Fetch-Site: cross-site` refused; `Origin`, when the browser sends one, must equal `Host`; the body must be `application/json`, which a cross-origin form cannot claim without a preflight this server never approves |
+| Headers | `Content-Security-Policy` with `frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` and `Cache-Control: no-store` on every response |
+| Collection failure | `503`, and **no body from a previous collection**. A stale document served with a fresh face is the failure this surface exists to avoid; the page greys itself out and says how old what it is showing is |
+
+python3 is the only dependency outside the unattended path, and it is confined
+to this command: `bin/hzl-run` and every gate it walks are untouched by it.
+macOS ships `/usr/bin/python3` with the Command Line Tools. `hzl doctor` reports
+it as needed for `hzl web` and nothing else, and its absence is a warning rather
+than a fault.
 
 ## §9 Engines (normative)
 
@@ -1420,6 +1476,7 @@ the review and model keys, which are environment > conf > default so that
 | `DEFAULT_RUN_TIMEOUT` | `3600` | ≥ 1 (`set timeout` ≥ 60) |
 | `DEFAULT_DURATION` | `"10h"` | `10h`/`90m`/`3600`, in [60s, 24h] |
 | `DEFAULT_WORKDIR` | *(none)* | one absolute path **per line**; required. One line is one workspace, several lines are several, and the first is the default. The separator is a newline and not a space, because a path may contain a space and this is not a list of integers like `HEINZEL_HOURS` — a single-line value therefore means exactly what it always meant. Validated for shape only: absolute, and no two sharing a last path component, which would make `(dir:x)` ambiguous. Existence is `hzl on`'s and `hzl doctor`'s business, because this is checked before every command and a checkout on an unmounted disk must not stop `hzl status` answering. Every workspace is baked into the generated permission file, so adding or moving one needs `hzl install` again |
+| `HEINZEL_WEB_PORT` | `3151` | the port `hzl web` listens on, 1024–65535. Loopback only, and never privileged: `hzl` refuses to run as root |
 | `DEFAULT_BACKLOG` | *(none)* | absolute path; required. One queue, whatever the number of workspaces. It should sit **outside** every workspace — `hzl doctor` warns if it does not — and is baked into the generated permission file, so moving it needs `hzl install` again |
 | `HEINZEL_MODEL` / `HEINZEL_EFFORT` | `claude-opus-5` / `xhigh` | effort: `low\|medium\|high\|xhigh\|max` |
 | `HEINZEL_EXECUTOR_ENGINE` / `HEINZEL_REVIEWER_ENGINE` | `claude` / `codex` | `claude\|codex` |

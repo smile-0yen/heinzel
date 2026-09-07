@@ -115,4 +115,5 @@ HEINZEL_CLAUDE_SETTINGS="${HOME}/.claude/settings.json"
 
 # --- housekeeping ----------------------------------------------------------
 HEINZEL_LABEL="local.heinzel"          # launchd label
+HEINZEL_WEB_PORT=3151                  # `hzl web` listens here, on 127.0.0.1 only
 LOG_RETENTION_DAYS=14

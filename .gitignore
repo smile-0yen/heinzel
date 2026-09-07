@@ -14,3 +14,6 @@ etc/sudoers-ticket
 # macOS
 .DS_Store
 etc/heinzel-settings.json
+
+# Byte-compiled by python3 when `hzl web` serves the dashboard
+__pycache__/

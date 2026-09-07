@@ -21,6 +21,8 @@ hzl off                   # stop it, and restore what it changed
 hzl status                # what is actually true right now
 hzl schedule              # when the next run is, and whether it will do anything
 hzl next                  # what it would pick up next, and in which checkout
+hzl add "..."             # put a task in the queue
+hzl web                   # the same, in a browser, on 127.0.0.1 only
 hzl report                # the morning read: what is blocked, what got done
 ```
 

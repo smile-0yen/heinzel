@@ -6,6 +6,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.21] - 2026-09-08
+
+A web UI, modelled on the 運行図表 (smile-monitor): what the session is doing,
+what is waiting on a person, what is queued, and a form that puts a task in the
+queue. Everything is fetched once at load and again when the refresh button is
+pressed. A patch bump and not a minor one: the minor is reserved for the task
+that completes a phase of `docs/RUNTIME-BACKENDS.md`, and this completes none.
+
+### Added
+- **`hzl web`.** Serves the dashboard on `127.0.0.1` for as long as the terminal
+  that started it holds it. Deliberately not a LaunchAgent: everything else
+  Heinzel installs runs unattended and is confined for it, while this is a
+  window a person opens while they are sitting there — a resident service that
+  can write the backlog would run all day whether or not anyone was looking, and
+  would be the one thing still listening through `hzl travel`. The page follows
+  smile-monitor's design rubric: three state colours and none for ordinary
+  running, every state carrying a glyph and a word as well as a colour, the
+  judgement in the largest text on the screen with its evidence beneath it, and
+  a freshness stamp that greys the whole page out rather than showing an old
+  answer with a fresh face. The 運行図表 itself is the spine: the dashed lines
+  are launchd's scheduled slots and the solid ones are the runs that actually
+  happened, traced through queued → engine → review → merge → end, so a slot
+  with no line against it is a night that fired and did nothing.
+- **`hzl add [--priority N] [--dir NAME] <text>`.** The ledger's writer in a
+  person's hands. Tasks were added by opening `backlog.md` in an editor, which
+  is fine at the machine and impossible for anything else — a form, a script, a
+  phone. This is the same edit, made under the backlog lock through the same
+  insertion the merge uses, so a task added while a run is merging lands cleanly
+  instead of racing a rename. The id is allocated with the runner's own
+  allocator, so whoever added a task is told what it is called. A task already
+  in the ledger word for word exits 4 and writes nothing: two identical tasks
+  are worked twice and the second finds nothing to do, and a double-submitted
+  form is the ordinary way to produce that pair.
+- **`hzl dashboard [--days N]`.** One JSON document: the session, the schedule
+  and its slots either side of now, the workspaces and whether each still
+  exists, every task in the live ledger plus the archive inside the window, the
+  recent runs with their own event trails, and the tail of `runner.log`. It
+  exists so the page has one thing to fetch and no parser of its own.
+- **`HEINZEL_WEB_PORT`** (default `3151`), validated like every other setting.
+
+### Changed
+- **`backlog_scan` carries the trailing comment as a seventh field, and
+  `ledger_blocked` stopped parsing task lines a second time.** That second copy
+  had already fallen behind: `(dir:)` routing was taken off the text by
+  `backlog_scan` and left on it by the copy, so the morning report and
+  `hzl take` showed a tag the ledger no longer considered part of the task.
+  One parser, and every reader of a task's metadata now reads the field it
+  produces. Tabs inside a comment become spaces on the way in — this is a TSV,
+  and a comment nobody expected to contain one would shift every field after it.
+- **`hzl doctor` reports python3**, as needed by `hzl web` and by nothing else.
+  A warning rather than a fault: every unattended path runs without it, and
+  macOS ships `/usr/bin/python3` with the Command Line Tools.
+
+### Fixed
+- **String comparison in `awk` is wrong for multibyte text on this platform,
+  and two comparisons depended on it.** Measured 2026-09-08:
+
+      printf 'a\tログイン\nb\tデフォルト\n' |
+        awk -F'\t' -v t=デフォルト '$2 == t {print $1}'
+      a
+      b
+
+  BSD awk under a UTF-8 locale reports two different multibyte strings as equal.
+  The worksheet's workspace filter and `hzl add`'s id lookup both compared text
+  through it, so a checkout with a Japanese name would have collected another
+  workspace's tasks, and `hzl add` printed the id of an unrelated task. Both run
+  under `LC_ALL=C` now, which compares bytes — and byte equality is exactly what
+  they want, since nothing in this program sorts or folds case on task text. The
+  bug is invisible while the ledger is in English, which this one is not, so the
+  regression test is pinned on a Japanese workspace name.
+- **`hzl dashboard` no longer appends `null` to a perfectly good document.**
+  `status --json` exits 10 when a session is live — that code is its answer, not
+  a failure — and `$(cmd_status --json || echo null)` took it as one, producing
+  invalid JSON exactly when a session was running, which is the case the page is
+  for.
+
 ## [0.3.20] - 2026-09-08
 
 `DEFAULT_WORKDIR` takes more than one checkout. Before this a session was one

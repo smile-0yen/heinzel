@@ -292,6 +292,36 @@ The one thing its prompt must say, and does, is that **exit 10 is not a
 failure**: `hzl report` exits 10 exactly when something is blocked, which is the
 morning it matters most.
 
+## 画面で見る
+
+```sh
+hzl web
+```
+
+`http://127.0.0.1:3151/` を開く。読み込んだときに一度だけ集めて、あとは右上の
+**更新** を押したときだけ取り直す。止めるのは ctrl-c。
+
+出るもの: いまの判定（開いているか、次はいつか、走っても何もしないのか）、
+セッションの設定、あなた待ちの一覧とその理由、待ち行列、チェックアウト、
+そして運行図表 — 破線が launchd の予定の枠、実線が実際に走った run で、
+枠だけあって線が無いところが gate で止まった回。理由は `runner.log` の skip 行。
+
+`backlog に積む` フォームがこのページで唯一書き込む場所で、書き込みは `hzl add`
+を通る。だから run が merge している最中でも backlog のロックの内側に入るし、
+id の採番も run と同じ。
+
+`127.0.0.1` にしか出ない。LaunchAgent ではないのも意図で、backlog を書ける常駐
+サービスは、誰も見ていない時間帯もずっと動き続け、`hzl travel` を通り抜けて
+listen し続ける唯一のものになる。ページを開いている間だけ開いていればいい。
+
+python3 が要るのはこのコマンドだけで、`hzl doctor` はそう書く。無人で動く経路は
+python3 が無くても何も変わらない。
+
+```sh
+hzl add --priority 1 --dir heinzel "hzl schedule の出力に色を付ける"
+hzl dashboard --days 7 | jq .        # 画面と同じものを JSON で
+```
+
 ## Several checkouts
 
 `DEFAULT_WORKDIR` takes more than one, a line each:
