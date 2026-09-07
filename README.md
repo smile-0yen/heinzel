@@ -72,42 +72,148 @@ design is about bounding it.
   cannot close, revert or reword a task it was not given, and that is checked against a list the
   agent cannot reach rather than asked for in a prompt.
 
-## Requirements
+## Quick start
+
+Eight steps, about five minutes, and **nothing runs unattended until step 8**. Every step says
+what you should see, so if you get something else you can stop there rather than carry on.
+
+### 1. Check the four things it needs
 
 - macOS (developed against 26.6 on Apple silicon)
 - `/bin/bash` 3.2 — the stock one; no newer bash required
-- [Claude Code](https://claude.com/claude-code) for the unattended session
+- [Claude Code](https://claude.com/claude-code), installed and signed in
 - `jq`
-- Optionally a second agent CLI as the reviewer
 
-No Homebrew dependency: notably, Heinzel does **not** require coreutils' `timeout`, which stock
-macOS does not ship. It carries its own watchdog.
+```sh
+sw_vers -productVersion && jq --version && claude --version
+```
 
-## Installation
+Three version numbers means you have them. `caffeinate`, `pmset`, `launchctl` and `lockf` are
+already on any Mac. There is no Homebrew dependency: notably, Heinzel does **not** require
+coreutils' `timeout`, which stock macOS does not ship — it carries its own watchdog. A second
+agent CLI, as the reviewer, is optional and off by default.
+
+### 2. Install
 
 ```sh
 git clone https://github.com/smile-0yen/heinzel.git
 cd heinzel && ./install.sh
 ```
 
-That links `hzl` into `~/.local/bin` and copies the example configuration.
-Then edit `etc/heinzel.conf` (at minimum `DEFAULT_WORKDIR` and
-`DEFAULT_BACKLOG` — keep the backlog outside the working directory), and:
+That links `hzl` into `~/.local/bin` and copies `etc/heinzel.conf.example` to
+`etc/heinzel.conf`. It does nothing else — no schedule, no privilege, no background process —
+and it prints the next four steps back to you. If it warns that `~/.local/bin` is not on your
+`PATH`, either add it to your shell profile or link `bin/hzl` into a directory that is; both
+work, because `hzl` finds its own libraries through the symlink.
+
+### 3. Say what to work on, and where the queue lives
+
+Two lines in `etc/heinzel.conf`. Both must be **absolute** paths — launchd runs with `cwd=/`, so
+a relative path is not a latent bug, it is a certain abort.
 
 ```sh
-hzl doctor          # check the setup
-hzl install         # generate the launchd agent and the permission file
-hzl on --dry-run    # see what starting a session would do
+DEFAULT_WORKDIR="/Users/you/projects/alpha"
+DEFAULT_BACKLOG="/Users/you/.heinzel/backlog.md"
 ```
 
-`DEFAULT_WORKDIR` takes several checkouts, one per line. The queue stays one
-backlog and a task picks its checkout by name — `- [ ] (dir:beta) fix the
-redirect` — with the first line of the list as the default for tasks that name
-none. A run works one checkout per night, whichever the highest-priority task
-names. `docs/RUNBOOK.md` has the details.
+The working directory has to exist already; the backlog file is created for you. Keep the
+backlog **outside** the working directory: the sandbox that confines the agent is a path
+boundary, so a backlog kept elsewhere is one the agent cannot reach even through a subprocess.
 
-Nothing runs unattended until you run `hzl on`, and `hzl travel` / `hzl remote`
-refuse to touch anything until you set `HEINZEL_POSTURE=1` deliberately.
+### 4. Check the setup
+
+```sh
+hzl doctor
+```
+
+Eight numbered sections — prerequisites, configuration, launch agent, session state, power,
+working directories, review, posture. Read section 2 and section 6 in particular: they are the
+ones about the two paths you just wrote. Sections that are not set up yet say so; what you are
+looking for is the absence of `XX`.
+
+### 5. Generate the schedule and the agent's permission file
+
+```sh
+hzl install
+```
+
+This writes `~/Library/LaunchAgents/local.heinzel.plist` (when the runner wakes) and
+`etc/heinzel-settings.json` (what the unattended agent may and may not do), both from your
+configuration. **Run it again after changing `DEFAULT_WORKDIR`, `DEFAULT_BACKLOG` or
+`HEINZEL_HOURS`** — those values are baked into the two generated files, and nothing else
+notices that they have gone stale.
+
+### 6. Write a task
+
+```sh
+mkdir -p ~/.heinzel && $EDITOR ~/.heinzel/backlog.md
+```
+
+```markdown
+## P1
+- [ ] the install note says ~/bin, but the installer uses ~/.local/bin
+      note: README.md, near the top
+```
+
+`- [ ] <the task>` under a `## P1` heading, and that is the whole format you write by hand.
+Ids, markers and timestamps are the runner's; indented lines under a task are context and are
+passed to the agent word for word. Then:
+
+```sh
+hzl next
+```
+
+which tells you what would be picked up next, and in which checkout.
+
+### 7. See what starting a session would do, without starting one
+
+```sh
+hzl on --dry-run
+```
+
+Prints the session it would create — TTL, budgets, working directory, backlog — and changes
+nothing. This is also the cheapest way to find a configuration mistake, because it fails on
+exactly what a real `hzl on` would fail on.
+
+### 8. Start it
+
+```sh
+hzl on --duration 10h
+```
+
+The session expires by itself after ten hours; there is a 24-hour ceiling that is not
+configurable. From here:
+
+```sh
+hzl status          # what is actually true right now
+hzl schedule        # when the next run is, and whether it will do anything
+hzl off             # stop it, and restore what it changed
+```
+
+### In the morning
+
+```sh
+hzl report
+```
+
+What is blocked, with the one-line request each blocked task carries, and what got done. It
+exits `10` when something needs a decision, so it can drive a notification without being
+parsed. `hzl take <id>` prints a blocked task together with its instructions.
+
+Expect blocked tasks. A run that cannot verify its work, or that needs a judgement call, a
+credential, or anything irreversible, is *supposed* to stop and say why — that is the design
+working, not the exception.
+
+### What you have not switched on
+
+`hzl travel` and `hzl remote` change your firewall, screen sharing and sudo policy, and they
+refuse to touch anything until you set `HEINZEL_POSTURE=1` deliberately. Review by a second
+engine is off until you set `HEINZEL_REVIEW=1`. Neither is needed for any of the above.
+
+`DEFAULT_WORKDIR` also takes several checkouts, one absolute path per line. The queue stays one
+backlog and a task picks its checkout by name — `- [ ] (dir:beta) fix the redirect` — with the
+first line of the list as the default for tasks that name none. A run works one checkout per
+night, whichever the highest-priority task names. `docs/RUNBOOK.md` has the details.
 
 ## Prior art
 

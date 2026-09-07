@@ -6,6 +6,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.22] - 2026-09-08
+
+A Quick Start in the README: eight steps, about five minutes, and nothing runs
+unattended until the last one. A patch bump and not a minor one: the minor is
+reserved for the task that completes a phase of `docs/RUNTIME-BACKENDS.md`, and
+this completes none.
+
+### Added
+- **`## Quick start`, replacing `## Requirements` and `## Installation`.**
+  Every step says what you should see, so a reader who gets something else can
+  stop there rather than carry on: three version numbers from one line for the
+  prerequisites, the four steps `install.sh` prints back, the two absolute
+  paths in `etc/heinzel.conf` and why relative ones are a certain abort, the
+  eight sections `hzl doctor` prints and which two are about the paths you just
+  wrote, what `hzl install` generates and when it goes stale, the whole of the
+  backlog format a person writes by hand, and `hzl on --dry-run` before
+  `hzl on`. It ends with the morning — `hzl report`, its exit code, and the
+  sentence that matters most to someone starting out: **expect blocked tasks.**
+  A run that needs a judgement call or anything irreversible is supposed to
+  stop and say why; that is the design working, not the exception. Followed by
+  what has deliberately *not* been switched on, because posture and review are
+  both opt-in and neither is needed for any of the above.
+
+  Written by the unattended run `20260908-013305`, which then blocked its own
+  task rather than claim it: it had noticed a second writer in the same
+  checkout and asked for a person to decide whether to keep the work. Every
+  factual claim in it was checked against the code before this commit — the
+  doctor sections are eight and in that order, `doc_bad` does print `XX`,
+  `install.sh` does print those four steps and that PATH note, `report` does
+  exit 10, and the 24-hour ceiling is `MAX_DURATION_SEC`.
+
 ## [0.3.21] - 2026-09-08
 
 A web UI, modelled on the 運行図表 (smile-monitor): what the session is doing,
