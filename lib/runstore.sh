@@ -68,9 +68,21 @@ runstore_new_id() {
   local stamp suffix id tries=0
   while :; do
     stamp=$(date +%Y%m%dT%H%M%S)
-    # tr takes a SIGPIPE when head has had enough, which is why the result is
-    # checked for shape rather than the pipeline for status.
-    suffix=$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom 2>/dev/null | head -c 6)
+    # The randomness is bounded at the *source*, by `dd`, and not at the sink by
+    # a `head` that stops reading. `tr -dc ... </dev/urandom | head -c 6` ends
+    # only when `head` exits and the write that follows kills `tr` — and SIGPIPE
+    # is inherited, so under any parent that ignores it the write returns EPIPE,
+    # BSD tr carries on, and the pipeline never ends. It reads /dev/urandom for
+    # ever at full tilt. Node ignores SIGPIPE and so does everything it starts,
+    # which is why this hung a GitHub Actions runner until the job was cancelled
+    # and left an orphaned `tr` behind; the same is true of any supervisor that
+    # ignores it. Nothing in this program may depend on a signal to stop.
+    #
+    # 512 bytes yield about 72 characters of the alphabet, and the shape is
+    # checked below, so a short draw falls through to the same fallback a
+    # missing /dev/urandom does.
+    suffix=$(dd if=/dev/urandom bs=512 count=1 2>/dev/null | LC_ALL=C tr -dc 'a-z0-9')
+    suffix=${suffix:0:6}
     case ${suffix} in
       [a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9]) ;;
       # No /dev/urandom, or a tr that gave up early. Still six characters, still

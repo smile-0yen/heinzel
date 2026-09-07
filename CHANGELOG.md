@@ -47,6 +47,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   id and not `h - 0900` (SC2100); `ls | grep -c` became `find -name` (SC2010);
   and `_sc`, assigned through an `eval` shellcheck cannot see, is declared
   (SC2154).
+- **A run id could not be drawn under a parent that ignores SIGPIPE.**
+  `runstore_new_id` drew its suffix as `tr -dc 'a-z0-9' </dev/urandom |
+  head -c 6`. That pipeline ends only when `head` exits and the write that
+  follows kills `tr` — and SIGPIPE is inherited, so under a parent that ignores
+  it the write returns EPIPE, BSD tr carries on, and the pipeline reads
+  /dev/urandom for ever at full tilt. Node ignores SIGPIPE and so does
+  everything it starts, which is how this was found: with the shellcheck step
+  fixed, the test step ran in CI for the first time in a while and hung there
+  until the job was cancelled, leaving an orphaned `tr` behind. Every run asks
+  for an id before it does anything else, so under such a supervisor the whole
+  program would hang on the first thing it did. The randomness is now bounded
+  at the source by `dd`, so `tr` ends at EOF: nothing here depends on a signal
+  arriving. Same shape, same alphabet, same fallback when the draw is short.
 - **`t_true` and `t_false` in the test suite.** Sixteen assertions were a
   `[ ... ]` on one line and `$?` on the next. That is the status of the
   condition above — until somebody inserts a line between the two, when it

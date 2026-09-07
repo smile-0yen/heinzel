@@ -1709,6 +1709,48 @@ t_eq "a run id is a fixed-width timestamp and a random suffix" 0 "${RS_SHAPE}"
 t_eq "two ids made in the same second are still different" \
   "different" "$([ "${RS_ID}" != "${RS_ID2}" ] && echo different || echo same)"
 
+# The bug this pipeline had, and the reason it is written with `dd`: an id was
+# drawn as `tr -dc ... </dev/urandom | head -c 6`, which ends only when `head`
+# exits and the write that follows kills `tr`. SIGPIPE is inherited, so under a
+# parent that ignores it the write returns EPIPE, BSD tr carries on, and the
+# pipeline reads /dev/urandom for ever. Node ignores SIGPIPE and so does
+# everything it starts: this hung a GitHub Actions runner - at this very group -
+# until the job was cancelled, and left an orphaned `tr` behind. Every run asks
+# for an id before it does anything else, so the whole program hung with it.
+#
+# Run in a real child with SIGPIPE ignored, because that is the condition, and a
+# test that asserted the source held no `head` would pass for a rewrite that put
+# the dependence back somewhere else.
+RS_SIGPIPE_OUT=${TMPROOT}/runstore-sigpipe.out
+: >"${RS_SIGPIPE_OUT}"
+(
+  trap '' PIPE
+  "${BASH}" -c '
+    . "$1/lib/runstore.sh"
+    printf "%s" "$(runstore_new_id)"
+  ' _ "${TEST_ROOT}" >"${RS_SIGPIPE_OUT}" 2>/dev/null
+) &
+RS_SIGPIPE_PID=$!
+RS_SIGPIPE_WAITED=0
+while [ "${RS_SIGPIPE_WAITED}" -lt 15 ] && kill -0 "${RS_SIGPIPE_PID}" 2>/dev/null; do
+  sleep 1
+  RS_SIGPIPE_WAITED=$((RS_SIGPIPE_WAITED + 1))
+done
+if kill -0 "${RS_SIGPIPE_PID}" 2>/dev/null; then
+  kill -9 "${RS_SIGPIPE_PID}" 2>/dev/null
+  pkill -9 -P "${RS_SIGPIPE_PID}" 2>/dev/null
+  RS_SIGPIPE_ID='(never finished)'
+else
+  RS_SIGPIPE_ID=$(cat "${RS_SIGPIPE_OUT}")
+fi
+wait "${RS_SIGPIPE_PID}" 2>/dev/null
+case ${RS_SIGPIPE_ID} in
+  r-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]-[a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9][a-z0-9]) RS_SIGPIPE_SHAPE=ok ;;
+  *) RS_SIGPIPE_SHAPE=${RS_SIGPIPE_ID} ;;
+esac
+t_eq "an id is drawn under a parent that ignores SIGPIPE, and does not hang" \
+  ok "${RS_SIGPIPE_SHAPE}"
+
 # The whole point of the shape: `sort` on the strings is chronological order.
 t_eq "ids sort chronologically as plain strings" \
   "r-20260901T235959-aaaaaa r-20260902T000000-000000 r-20260902T031500-zzzzzz" \
