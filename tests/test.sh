@@ -121,6 +121,27 @@ t_fails() { # name status (non-zero passes)
   fi
 }
 
+# `[ ... ]` on one line and `$?` on the next is the status of that condition -
+# until somebody inserts a line between the two, when it silently becomes the
+# status of whatever they inserted, and an assertion that reads as a check on
+# the file is a check on the last `printf`. shellcheck names the shape (SC2319)
+# and is right that it invites the mistake even where it has not made it. These
+# two take the condition itself, so there is nothing in between to get it wrong.
+# A compound condition cannot be passed as arguments; write those as an `if`.
+t_true() { # name command...
+  local name=$1
+  shift
+  "$@"
+  t_ok "${name}" "$?"
+}
+
+t_false() { # name command...
+  local name=$1
+  shift
+  "$@"
+  t_fails "${name}" "$?"
+}
+
 t_has() { # name file fixed-string
   if grep -qF -- "$3" "$2"; then
     PASS=$((PASS + 1))
@@ -475,10 +496,12 @@ t_has "and so does one under a second priority" \
 MG_P1NEW=$(line_of "${MG_LEDGER}" 'a task split off from h-0001')
 MG_P2HEAD=$(line_of "${MG_LEDGER}" '## P2')
 MG_P2NEW=$(line_of "${MG_LEDGER}" 'a second-priority task split off')
-[ "${MG_P1NEW}" -gt 0 ] && [ "${MG_P1NEW}" -lt "${MG_P2HEAD}" ]
-t_ok "a new task is inserted at the end of its own priority section" "$?"
-[ "${MG_P2NEW}" -gt "${MG_P2HEAD}" ]
-t_ok "a new P2 task lands under P2, not P1" "$?"
+if [ "${MG_P1NEW}" -gt 0 ] && [ "${MG_P1NEW}" -lt "${MG_P2HEAD}" ]
+then MG_INSERTED=0
+else MG_INSERTED=1
+fi
+t_ok "a new task is inserted at the end of its own priority section" "${MG_INSERTED}"
+t_true "a new P2 task lands under P2, not P1" [ "${MG_P2NEW}" -gt "${MG_P2HEAD}" ]
 
 # The ignored line is the one assertion that makes scope structural rather
 # than requested: the agent wrote [x] beside h-0004 and the ledger does not
@@ -802,8 +825,7 @@ t_argv "claude executor: the launch, argument for argument" \
   --permission-mode dontAsk \
   --disallowedTools 'Bash(sudo *)' 'Bash(sudo)' \
   --model test-model --effort test-effort
-[ -e "${AR_CE}/must-not-exist.argv" ]
-t_fails "a dry run starts no engine" "$?"
+t_false "a dry run starts no engine" [ -e "${AR_CE}/must-not-exist.argv" ]
 
 AR_CR=${TMPROOT}/argv-claude-reviewer
 dry_run claude reviewer "${AR_CR}"
@@ -1158,8 +1180,7 @@ RT_OUT=${TMPROOT}/runtime-unknown
 HEINZEL_RUNTIME=herdr engine_run claude executor "${RUN_WORK}" \
   "${RUN_PROMPT}" "${RT_OUT}" 60 2>/dev/null
 t_fails "and engine_run fails rather than quietly running it here" "$?"
-[ -e "${RT_OUT}/result.json" ]
-t_fails "leaving no result.json to be mistaken for a run" "$?"
+t_false "leaving no result.json to be mistaken for a run" [ -e "${RT_OUT}/result.json" ]
 
 # The same refusal, in a directory a previous run already succeeded in. The
 # records of that run are cleared before anything is launched, so a launch that
@@ -1175,10 +1196,10 @@ t_eq "and leaves a collected.json behind" \
 HEINZEL_RUNTIME=herdr engine_run claude executor "${RUN_WORK}" \
   "${RUN_PROMPT}" "${RT_REUSE}" 60 2>/dev/null
 t_fails "a second run that never starts fails" "$?"
-[ -e "${RT_REUSE}/collected.json" ]
-t_fails "the previous run's collected.json is gone, not waiting to be reread" "$?"
-[ -e "${RT_REUSE}/result.json" ]
-t_fails "and no result.json survives to report the old run as this one" "$?"
+t_false "the previous run's collected.json is gone, not waiting to be reread" \
+  [ -e "${RT_REUSE}/collected.json" ]
+t_false "and no result.json survives to report the old run as this one" \
+  [ -e "${RT_REUSE}/result.json" ]
 
 # The launch spec and the run spec are separate files because they answer
 # separate questions: what to start, and where and for how long.
@@ -1203,8 +1224,7 @@ t_eq "the stream paths in the record are the ones it was given" \
   "${RT_DIR}/raw ${RT_DIR}/stderr ${RT_DIR}/last.txt" \
   "$(jq -r '[.stdout_path, .stderr_path, .output_path] | join(" ")' \
       "${RT_DIR}/collected.json")"
-[ -e "${RT_DIR}/collected.json.tmp" ]
-t_fails "the temp file it renamed from is gone" "$?"
+t_false "the temp file it renamed from is gone" [ -e "${RT_DIR}/collected.json.tmp" ]
 
 # A launch environment is carried, not refused: the backend passes a validated
 # env as `env KEY=VALUE ... command` (RUNTIME-BACKENDS §8.4). The values are
@@ -1235,8 +1255,7 @@ jq '.argv += [("x" + ([0] | implode) + "y")]' "${RT_DIR}/launch.json" \
 runtime_run_batch local "${RT_DIR}/nul-argv-launch.json" "${RT_RUN}" \
   "${TMPROOT}/never.json" 2>/dev/null
 t_fails "an argv holding a NUL byte is refused, not silently split in two" "$?"
-[ -e "${FAKE_ARGV}" ]
-t_fails "and nothing was started" "$?"
+t_false "and nothing was started" [ -e "${FAKE_ARGV}" ]
 
 jq '.env = {"HZL_TEST_ONE": ("x" + ([0] | implode) + "y")}' \
   "${RT_DIR}/launch.json" >"${RT_DIR}/nul-env-launch.json"
@@ -1256,8 +1275,7 @@ runtime_run_batch local "${RT_DIR}/bad-value-launch.json" "${RT_RUN}" \
   "${TMPROOT}/never.json" 2>/dev/null
 t_fails "and so is a value that is not a string" "$?"
 
-[ -e "${TMPROOT}/never.json" ]
-t_fails "no refused launch left a collected record behind" "$?"
+t_false "no refused launch left a collected record behind" [ -e "${TMPROOT}/never.json" ]
 fake_reset
 
 # --- which backend a run goes to -------------------------------------------
@@ -1288,8 +1306,7 @@ fake_reset
 FAKE_ARGV=${RT_FS}/must-not-exist.argv
 engine_run claude executor "${RUN_WORK}" "${RUN_PROMPT}" "${RT_FS}" 60 2>/dev/null
 t_fails "and a run goes there, so an unregistered one fails the run" "$?"
-[ -e "${FAKE_ARGV}" ]
-t_fails "without starting anything here instead" "$?"
+t_false "without starting anything here instead" [ -e "${FAKE_ARGV}" ]
 
 # The other direction, which is the one the environment could get wrong: a
 # session that recorded `local` runs here even when the environment asks for a
@@ -1473,8 +1490,11 @@ group 'schema constants'
 # Each of the three is handed straight to `jq --argjson`, where an unset or
 # non-numeric value is not a wrong version but a jq error — and the run record
 # is appended with stderr discarded, so the row would simply not be written.
+_sc=
 for _sc_name in HEINZEL_STATE_SCHEMA HEINZEL_RESULT_SCHEMA \
                 HEINZEL_RUN_RECORD_SCHEMA; do
+  # Through eval because the name is the loop variable, and shellcheck cannot
+  # see an assignment made that way - hence the declaration above the loop.
   eval "_sc=\${${_sc_name}:-}"
   case ${_sc} in
     ""|*[!0-9]*) _sc_ok=1 ;;
@@ -1722,8 +1742,7 @@ t_fails "and so is an empty one" "$?"
 runstore_init "${RS_ID}"
 t_ok "the store for a run is created" "$?"
 RS_DIR=$(runstore_dir "${RS_ID}")
-[ -d "${RS_DIR}" ]
-t_ok "and the directory is really there" "$?"
+t_true "and the directory is really there" [ -d "${RS_DIR}" ]
 
 # The directory is created exclusively. An id handed out twice must not reopen
 # the first run's store: two runs appending to one events.jsonl would leave a
@@ -1758,8 +1777,8 @@ RS_FRESH_HOME=${TMPROOT}/runstore-fresh-home
   runstore_init r-20260906T090000-fresh1
 ) 2>/dev/null
 t_ok "the first store in a HEINZEL_HOME with no runs/ yet is created" "$?"
-[ -d "${RS_FRESH_HOME}/runs/r-20260906T090000-fresh1" ]
-t_ok "and it is where runstore_dir would have put it" "$?"
+t_true "and it is where runstore_dir would have put it" \
+  [ -d "${RS_FRESH_HOME}/runs/r-20260906T090000-fresh1" ]
 
 group 'runstore snapshot'
 
@@ -1769,8 +1788,8 @@ group 'runstore snapshot'
 # renamed into place, so it does not exist at all.
 runstore_snapshot "${RS_ID}" '{"broken": ' 2>/dev/null
 t_fails "a snapshot that does not parse is refused" "$?"
-[ -e "${RS_DIR}/workflow.json" ]
-t_fails "and no partial file is left where a reader would look for one" "$?"
+t_false "and no partial file is left where a reader would look for one" \
+  [ -e "${RS_DIR}/workflow.json" ]
 
 runstore_snapshot "${RS_ID}" '{"schema_version":1,"runner_state":"queued"}'
 t_ok "a valid snapshot is written" "$?"
@@ -1948,7 +1967,7 @@ group 'claims: one taker, one counter'
 # would overwrite the first's record of holding a task they were both working
 # on. Sixteen racers rather than two, because the window a check-then-write
 # leaves open is small and a test that only sometimes enters it is not a test.
-CL_RACE=h-0900
+CL_RACE='h-0900'
 CL_RACE_DIR=${TMPROOT}/claim-race
 mkdir -p "${CL_RACE_DIR}"
 : >"${CL_RACE_DIR}/winners"
@@ -1973,7 +1992,7 @@ claims_release "${CL_ID}" "${CL_RACE}" "$(claims_holder "${CL_ID}" "${CL_RACE}")
 # that took a task over was handed a generation the previous holder already
 # had, and a fencing check could not tell the two apart. lib/locks.sh keeps its
 # lease generation in a file of its own for the same reason.
-CL_G=h-0800
+CL_G='h-0800'
 claims_acquire "${CL_ID}" "${CL_G}" "${CL_A}"
 t_eq "a first claim is generation 1" 1 "$(claims_generation "${CL_ID}" "${CL_G}")"
 claims_release "${CL_ID}" "${CL_G}" "${CL_A}"
@@ -2584,12 +2603,12 @@ FIXTURE
 
 t_eq "the merge blocks both tasks" \
   "0 2 0 0" "$(worksheet_merge "${ST_WS}" "${ST_B}" 20260906-170000 "${ST_IDS}")"
-t_ok "the steps written in the working directory are carried beside the ledger" \
-  "$([ -r "${ST_HOME}/blocked/h-0201.md" ]; echo $?)"
+t_true "the steps written in the working directory are carried beside the ledger" \
+  [ -r "${ST_HOME}/blocked/h-0201.md" ]
 t_eq "whole, so a person reads what the run wrote" \
   "$(cat "${ST_WSDIR}/blocked/h-0201.md")" "$(cat "${ST_HOME}/blocked/h-0201.md")"
 t_eq "a block with no steps file leaves none behind" \
-  0 "$(ls "${ST_HOME}/blocked" | grep -c 'h-0202')"
+  0 "$(find "${ST_HOME}/blocked" -name '*h-0202*' | wc -l | tr -d ' ')"
 
 # The ledger line is the assertion that matters: nothing about the steps is
 # recorded on it, so §8's format is the one it always was.
@@ -2648,8 +2667,8 @@ t_eq "the intent records the steps beside the id they belong to" \
 
 t_eq "recovery applies the block" \
   "0 2 0 0" "$(finalize_recover "${ST_RUN}" "${ST_LED2}")"
-t_ok "and installs the steps the killed run never carried out" \
-  "$([ -r "${ST_HOME}/blocked/h-0201.md" ]; echo $?)"
+t_true "and installs the steps the killed run never carried out" \
+  [ -r "${ST_HOME}/blocked/h-0201.md" ]
 t_eq "with the content the agent wrote" \
   "$(cat "${ST_WSDIR}/blocked/h-0201.md")" "$(cat "${ST_HOME}/blocked/h-0201.md")"
 
@@ -2681,8 +2700,8 @@ rmdir "${ST_WSDIR}/blocked"
 rm -f "${ST_HOME}/blocked/h-0201.md"
 t_eq "recovery after the trap ran still applies the block" \
   "0 2 0 0" "$(finalize_recover "${ST_RUN2}" "${ST_LED3}")"
-t_ok "and installs the steps from the copy the run kept with its record" \
-  "$([ -r "${ST_HOME}/blocked/h-0201.md" ]; echo $?)"
+t_true "and installs the steps from the copy the run kept with its record" \
+  [ -r "${ST_HOME}/blocked/h-0201.md" ]
 t_eq "with the content of that copy" \
   "# h-0201: the same ask, second run" "$(cat "${ST_HOME}/blocked/h-0201.md")"
 t_fails "a run whose snapshot names no exec directory has no kept copy" \
