@@ -136,16 +136,24 @@ engine_build_launch() {
       # `--verbose` is not optional decoration: the CLI refuses
       # `--output-format stream-json` under `-p` without it.
       #
-      # The reviewer stays on the single-object `json` form. Whether
-      # `--json-schema` survives being combined with `stream-json` is not
-      # known here, and a reviewer whose schema was quietly dropped would
-      # return prose where the runner parses a verdict — a worse failure than
-      # a review nobody can watch. Deciding it needs a live reviewer run
-      # (docs/VERIFICATION.md), not a guess.
-      if [ "${role}" = reviewer ]; then
-        format=(--output-format json)
-      else
+      # The executor and nothing else. Named rather than written as "not the
+      # reviewer", because the roles are not two: `fixer` (§9.2, the one-shot
+      # repair pass under `HEINZEL_REVIEW_ON_REVISE=fix-once`) is neither, and
+      # under the negative form it would have started streaming as a side
+      # effect of a change nobody made for it. A role added later joins the
+      # `json` side too, which is the half where an unexamined format is
+      # merely dull to watch rather than a surprise.
+      #
+      # The reviewer stays on the single-object `json` form for a reason of
+      # its own. Whether `--json-schema` survives being combined with
+      # `stream-json` is not known here, and a reviewer whose schema was
+      # quietly dropped would return prose where the runner parses a verdict —
+      # a worse failure than a review nobody can watch. Deciding it needs a
+      # live reviewer run (docs/VERIFICATION.md), not a guess.
+      if [ "${role}" = executor ]; then
         format=(--output-format stream-json --verbose)
+      else
+        format=(--output-format json)
       fi
       argv=(-p "${prompt}"
             "${format[@]}"

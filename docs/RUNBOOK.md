@@ -173,9 +173,11 @@ Three things this is not:
   lines. The one line Heinzel does read is the last, `"type": "result"`, which
   carries the session id, the cost, the turn count and the final message — and
   `result.json` beside it is the form to write anything durable against.
-- **Not available for the reviewer.** The review is launched with
-  `--output-format json`, one object that appears whole when it is over, so
-  there is nothing to follow. `docs/SPEC.md` §9 says which role writes which.
+- **Only the executor.** The review, and the one repair pass a `revise`
+  verdict can run, are launched with `--output-format json` — one object that
+  appears whole when it is over, so there is nothing to follow. It is the long
+  unattended pass that is worth watching, and that one is the executor.
+  `docs/SPEC.md` §9 says which role writes which.
 
 ## The backlog
 

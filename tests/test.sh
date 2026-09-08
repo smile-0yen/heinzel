@@ -891,6 +891,23 @@ t_argv "claude reviewer: no write tools, and the schema as one argument" \
   --json-schema "${REVIEW_SCHEMA}" \
   --model test-model --effort test-effort
 
+AR_CF=${TMPROOT}/argv-claude-fixer
+dry_run claude fixer "${AR_CF}"
+# The third role, and the reason the streaming branch names `executor` instead
+# of saying "not the reviewer": the fixer is a writer like the executor, so a
+# negative test would have handed it `stream-json` as a side effect of a change
+# made for someone else. It keeps the writer's permissions and the single
+# object, and this is what says so.
+t_argv "claude fixer: a writer, but not a streamed one" \
+  "${AR_CF}/dry-run.cmd" \
+  claude -p "${PROMPT_ARG}" \
+  --output-format json \
+  --setting-sources user \
+  --settings "${SETTINGS}" \
+  --permission-mode dontAsk \
+  --disallowedTools 'Bash(sudo *)' 'Bash(sudo)' \
+  --model test-model --effort test-effort
+
 AR_XE=${TMPROOT}/argv-codex-executor
 dry_run codex executor "${AR_XE}"
 t_argv "codex executor: workspace-write, and the prompt last" \
@@ -1272,6 +1289,23 @@ t_eq "the single-object form is still read, however many lines it is on" \
   '{"session_id":"sess-1","cost_usd":0.25,"turns":4,"tokens_in":11,"tokens_out":22,"text":"first line\nsecond line"}' \
   "$(_engine_result_claude "${CLAUDE_OK_RAW}" |
      jq -c '{session_id, cost_usd, turns, tokens_in, tokens_out, text}')"
+
+# And the fixer, which is neither of the two roles the change was about, comes
+# out of the same reader with the same fields. The argv assertion above says it
+# is still launched with `--output-format json`; this says that what comes back
+# from that launch is normalised, so the one-shot repair pass is not a role
+# whose telemetry quietly stopped being recorded.
+RUN_CFX=${TMPROOT}/run-claude-fixer
+fake_reset
+FAKE_OUT_FILE=${CLAUDE_OK_RAW}
+engine_run claude fixer "${RUN_WORK}" "${RUN_PROMPT}" "${RUN_CFX}" 60
+t_status "a fixer run returns 0" 0 "$?"
+t_eq "the fixer's single object is normalised like any other run" \
+  '{"role":"fixer","verdict":"ok","session_id":"sess-1","cost_usd":0.25,"turns":4}' \
+  "$(jq -c '{role, verdict, session_id, cost_usd, turns}' \
+      "${RUN_CFX}/result.json")"
+t_eq "and its raw is one object, not a stream" \
+  1 "$(jq -c -s 'length' "${RUN_CFX}/raw")"
 
 # --- what reaches runs.jsonl -----------------------------------------------
 #

@@ -861,7 +861,8 @@ depends on the role as well as the engine**:
 |---|---|---|---|
 | claude | executor | `--output-format stream-json --verbose` | JSONL, one event per line, appended as the run happens |
 | claude | reviewer | `--output-format json` | one JSON object, written when the run ends |
-| codex | either | `--json` | JSONL |
+| claude | fixer | `--output-format json` | one JSON object, written when the run ends |
+| codex | any | `--json` | JSONL |
 
 The executor streams so that a run in progress can be watched from a terminal
 (`docs/RUNBOOK.md`, "Watching a run that is still going"); `--verbose` is
@@ -870,6 +871,14 @@ it. The reviewer does not, because whether `--json-schema` survives being
 combined with `stream-json` is **unverified**, and a reviewer whose schema was
 silently dropped would return prose where the runner parses a verdict. That is
 a live-run question (`docs/VERIFICATION.md`), not one to settle by guessing.
+
+The claude rows are **the executor and everything else**, not the executor and
+the reviewer: `lib/engines.sh` names `executor` rather than testing for "not
+the reviewer", so the `fixer` (§10, the one-shot repair pass under
+`HEINZEL_REVIEW_ON_REVISE=fix-once`) and any role added later get the
+single-object form until someone decides otherwise for that role. Streaming is
+a thing done *for a watcher*, and a role nobody watches gains nothing from it
+while quietly changing the shape of the evidence it leaves.
 
 > **Normative: `raw` is evidence, not an interface.** Nothing outside
 > `lib/engines.sh` parses it. Both claude shapes end in the same object — the

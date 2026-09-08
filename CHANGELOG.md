@@ -6,6 +6,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-09-09
+
+Streaming reaches the executor and stops there. 0.4.1 selected the format by
+asking whether the role was the *reviewer*, which is not the same question as
+whether it is the executor: the `fixer` - the one-shot repair pass a `revise`
+verdict runs under `HEINZEL_REVIEW_ON_REVISE=fix-once` - is neither, and it
+began streaming as a side effect of a change nobody made for it. The review
+that caught it is in the run log for 2026-09-08.
+
+Nothing was broken by that, which is why this is a patch: one reader takes
+either shape, so the fixer's telemetry and verdict were normalised correctly
+throughout. But a role's output format is a decision, and that one was never
+made.
+
+### Fixed
+- **Only the `executor` streams.** `lib/engines.sh` names the role that gets
+  `--output-format stream-json --verbose` instead of naming the one that does
+  not, so `fixer` is back on `--output-format json` and a role added later
+  arrives on the single-object form rather than inheriting a format nobody
+  chose for it. Streaming is done for a watcher; a role nobody watches gains
+  nothing from it and changes the shape of the evidence it leaves.
+
+### Added
+- **Four assertions** holding it there: the fixer's launch argument for
+  argument (a writer's permissions, `--output-format json`), and a fixer run
+  over the single-object fixture - normalised result, verdict, and a `raw` that
+  is one object rather than a stream. No real engine is called.
+- **`docs/SPEC.md` §9** gains the fixer row in the `raw` format table and says
+  the claude rows are "the executor and everything else", not "the executor and
+  the reviewer". `docs/RUNBOOK.md` and `docs/VERIFICATION.md` say the same
+  where they used to name only the reviewer.
+
 ## [0.4.1] - 2026-09-08
 
 A run in progress can now be watched from a terminal. The executor is launched

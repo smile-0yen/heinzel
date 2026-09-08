@@ -236,9 +236,11 @@ Three things to see, in order:
    | tail -1`. Everything in `result.json` is read from that line, so if it is
    absent the cost and the session id are absent too, whatever the run did.
 
-The reviewer is deliberately not part of this: it is launched with
-`--output-format json` because `--json-schema` combined with `stream-json` is
-untested. If you want to settle that, run one review by hand with both flags
+Only the executor streams, so only the executor is part of this. The reviewer
+is launched with `--output-format json` because `--json-schema` combined with
+`stream-json` is untested; the `fixer` is on the same single-object form
+because nothing was decided for it either way, and a role gets `stream-json`
+by being named, not by not being the reviewer. If you want to settle that, run one review by hand with both flags
 and check the verdict still parses — that answer is worth writing into §15.
 
 ### Phase 3a — is the deny list actually in force?
