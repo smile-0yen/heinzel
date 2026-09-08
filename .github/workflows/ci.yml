@@ -14,27 +14,42 @@ jobs:
       - name: bash version (must be the stock 3.2)
         run: /bin/bash --version | head -1
 
+      # `lib/web/` holds the dashboard's JavaScript, HTML and the Python that
+      # serves them. They are sources, but they are not shell, and handing them
+      # to `bash -n` fails on the first line of every one of them. Named by
+      # what they are rather than excluded by name, so a second .py does not
+      # turn CI red on the day it lands.
+      - name: list the shell sources
+        run: |
+          # The trailing -print is load-bearing: find drops the implicit one
+          # as soon as the expression contains -exec, and the list comes back
+          # empty with nothing to say it went wrong.
+          find bin lib tests tools -type f \
+            \( -name '*.sh' -o -exec grep -Iq '^#!.*sh' {} \; \) -print \
+            2>/dev/null | sort >/tmp/shell-sources
+          cat /tmp/shell-sources
+
       - name: syntax check under bash 3.2
         run: |
           found=0
           while IFS= read -r f; do
             found=1
             /bin/bash -n "$f" || exit 1
-          done < <(find bin lib tests -type f 2>/dev/null)
+          done </tmp/shell-sources
           if [ "$found" -eq 0 ]; then
             echo "no shell sources yet (design phase) — skipping"
           fi
 
       - name: shellcheck
         run: |
-          if find bin lib tests -type f 2>/dev/null | grep -q .; then
+          if [ -s /tmp/shell-sources ]; then
             brew install shellcheck
             # -x so sourced libraries are followed from their entry points.
             # SC2034 is excluded: almost everything in lib/ is assigned there
             # and consumed by the scripts that source it, which shellcheck
             # cannot see when it analyses a file on its own.
             shellcheck --shell=bash --severity=warning -x -e SC2034 \
-              $(find bin lib tests -type f) install.sh
+              $(cat /tmp/shell-sources) install.sh
           else
             echo "no shell sources yet (design phase) — skipping"
           fi
