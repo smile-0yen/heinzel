@@ -1986,16 +1986,22 @@ t_has "the runner consults the mobile battery decision" \
   "${TEST_ROOT}/bin/hzl-run" 'if session_allows_battery; then'
 t_has "schedule reports with the same battery decision" \
   "${TEST_ROOT}/bin/hzl" 'elif ! on_ac_power && ! session_allows_battery; then'
-# DESIGN 4.3: the write-capable sudo drop-in is allowed under remote posture
-# only while the session is off, and both live modes start one. Installing it
-# and removing it again seconds later is the same defect as leaving it open,
-# because the removal is a step that can fail.
-t_lacks "no live mode installs the sudo ticket window" \
-  "${TEST_ROOT}/bin/hzl" 'mode_apply_posture remote 1'
-t_has "work applies remote posture with the ticket window closed" \
-  "${TEST_ROOT}/bin/hzl" 'work) mode_apply_posture remote 0 0'
-t_has "and mobile applies travel posture the same way" \
-  "${TEST_ROOT}/bin/hzl" 'mobile) mode_apply_posture travel 0 0'
+# DESIGN 4.3: the write-capable sudo drop-in was allowed under remote posture
+# only while the session is off, and no mode is that pair. It is not installed
+# conditionally, it is not installed at all - a guarantee that rests on a
+# removal step is a guarantee that fails when the step does.
+t_false "there is no write-capable sudoers template to install" \
+  test -e "${TEST_ROOT}/etc/sudoers-ticket.in"
+t_lacks "and nothing asks for one" \
+  "${TEST_ROOT}/lib/posture.sh" 'posture_install_sudoers ticket'
+t_lacks "the read-only template is the only one posture knows" \
+  "${TEST_ROOT}/lib/posture.sh" 'sudoers-ticket.in'
+# Removal stays: a machine upgraded from a build that did install the file
+# still has it, and every transition has to take it away.
+t_has "every posture still removes a ticket window an older build left" \
+  "${TEST_ROOT}/lib/posture.sh" 'posture_remove_sudoers ticket'
+t_has "and a live mode purges tickets already granted" \
+  "${TEST_ROOT}/bin/hzl" 'posture_remove_sudoers ticket && posture_purge_tickets'
 
 # This suite normally stops before the posture gate and therefore does not
 # source lib/posture.sh. A controlled observation lets the composed gate prove

@@ -72,7 +72,7 @@
     "  heinzel-settings.json.in   the same, one `hzl install` later",
     "  heinzel.conf               budget, schedule, workdir, engine, review",
     "  agent.plist.in             when the runner fires, and with what PATH",
-    "  sudoers-{ticket,diag}.in   installed BY A HUMAN WITH sudo. An agent that",
+    "  sudoers-diag.in            installed BY A HUMAN WITH sudo. An agent that",
     "                             writes these is writing a privileged file and",
     "                             waiting for someone to install it",
     "  pf-travel.conf.in          firewall rules, installed with privilege",

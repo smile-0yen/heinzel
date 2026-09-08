@@ -460,9 +460,11 @@ EOF
   [ "${todo}" -eq 0 ] && warn "the backlog has no todo items - runs will do nothing"
 
   if [ "${dry}" = 1 ]; then
+    # The same transition the real path takes, with the dry-run flag set: what
+    # this prints is the list of privileged commands, not a description of them.
     case ${operating_mode} in
-      work) mode_apply_posture remote 0 1 || return 1 ;;
-      mobile) mode_apply_posture travel 0 1 || return 1 ;;
+      work) mode_apply_posture remote 1 || return 1 ;;
+      mobile) mode_apply_posture travel 1 || return 1 ;;
     esac
     printf '\n'
     say "would enter ${operating_mode} mode:"
@@ -486,15 +488,9 @@ EOF
     [ "${stop_rc}" -eq 0 ] || return "${stop_rc}"
   fi
 
-  # Neither live mode may leave the write-capable sudo window open: the ticket
-  # is allowed under remote posture only while the session is off (DESIGN 4.3),
-  # and both of these are starting one. Passing `allow_ticket=1` here installed
-  # the drop-in and step 8 removed it seconds later - two privileged writes for
-  # a file that must not exist, and a session left with it open whenever the
-  # second one failed.
   case ${operating_mode} in
-    work) mode_apply_posture remote 0 0 || return 1 ;;
-    mobile) mode_apply_posture travel 0 0 || return 1 ;;
+    work) mode_apply_posture remote 0 || return 1 ;;
+    mobile) mode_apply_posture travel 0 || return 1 ;;
   esac
 
   # 6. The liveness marker. Started before the privileged step so that a
@@ -530,11 +526,12 @@ EOF
   fi
 
   # 8. Close the write-capable sudo window for the duration (DESIGN 4.3).
-  # The posture transition above has already removed the drop-in, and neither
-  # mode installs it - but a ticket granted before this command outlives the
-  # file it came from, so the outstanding timestamps go too. The removal is
-  # repeated rather than assumed: it is a no-op when the file is absent, and
-  # this is the step the guarantee is written against.
+  # Nothing in this build installs `heinzel-ticket`; the posture transition
+  # above removes one an older build left behind. A ticket already granted
+  # outlives the file it came from, so the outstanding timestamps go too. The
+  # removal is repeated rather than assumed: it is a no-op when the file is
+  # absent, it also runs with posture management on but no transition to make,
+  # and this is the step the guarantee is written against.
   local ticket_suspended=false
   if [ "${HEINZEL_POSTURE}" = 1 ]; then
     if posture_remove_sudoers ticket && posture_purge_tickets; then
@@ -841,8 +838,8 @@ cmd_set() {
 # Apply the OS half of a mode when posture management is enabled. It remains
 # opt-in because these settings can disconnect remote access; with it disabled
 # the session half still works and status reports the posture as unmanaged.
-mode_apply_posture() { # travel|remote allow-ticket dry-run
-  local want=$1 allow_ticket=$2 dry=$3
+mode_apply_posture() { # travel|remote dry-run
+  local want=$1 dry=$2
   if [ "${HEINZEL_POSTURE}" != 1 ]; then
     if [ "${dry}" = 1 ]; then
       dim "posture management is off; OS posture would remain unmanaged."
@@ -853,7 +850,7 @@ mode_apply_posture() { # travel|remote allow-ticket dry-run
   fi
 
   POSTURE_DRY_RUN=${dry}
-  if posture_apply "${want}" "${allow_ticket}"; then
+  if posture_apply "${want}"; then
     if [ "${dry}" = 1 ]; then
       good "${want} posture would be applied."
     else
@@ -881,7 +878,7 @@ cmd_off() {
   # non-zero stop status is still returned so ORPHANED is never called success.
   local stop_rc=0 posture_rc=0
   session_stop "$@" || stop_rc=$?
-  mode_apply_posture travel 0 0 || posture_rc=$?
+  mode_apply_posture travel 0 || posture_rc=$?
 
   if [ "${stop_rc}" -ne 0 ]; then
     printf '\n'
@@ -1649,7 +1646,7 @@ EOF
     # The only way to reach this is a restore path that failed, so it is a
     # defect rather than a warning (DESIGN 4.3).
     if [ "${mode}" = heinzel ] && [ -f "${SUDOERS_TICKET}" ]; then
-      doc_bad "the relaxed sudo ticket window is OPEN during a session - it should have been closed"
+      doc_bad "the relaxed sudo ticket window is OPEN during a session - it should have been removed"
     fi
     # Closing our own ticket file achieves nothing if another drop-in grants
     # the same thing. Heinzel only manages its own two files, so anything else
@@ -1672,7 +1669,7 @@ EOF
       done
       if [ -n "${leaky}" ]; then
         doc_bad "another sudoers file keeps a ticket window open: ${leaky}"
-        printf '       a live work/mobile mode removes its own heinzel-ticket, but these grant the same thing,\n'
+        printf '       every mode removes heinzel-ticket, but these grant the same thing,\n'
         printf '       so the write-capable sudo window is NOT closed during a session.\n'
       elif sudo -n true 2>/dev/null; then
         doc_ok "no other sudoers file grants a ticket window (${others})"

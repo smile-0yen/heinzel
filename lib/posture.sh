@@ -20,6 +20,9 @@
 # Requires lib/common.sh.
 
 SUDOERS_DIAG=/etc/sudoers.d/heinzel-diag
+# Not installed by anything here since v0.3.25 (DESIGN 4.3). The name survives
+# because a machine upgraded from a build that did install it still has the
+# file, and every transition has to take it away.
 SUDOERS_TICKET=/etc/sudoers.d/heinzel-ticket
 SS_LABEL=com.apple.screensharing
 SS_PLIST=/System/Library/LaunchDaemons/com.apple.screensharing.plist
@@ -312,11 +315,12 @@ posture_set_screenlock() {
 
 # visudo -c before installing: a syntax error here breaks sudo itself, and
 # recovering from that needs the very privilege it just removed.
+# `diag` is the only template: it is read-only, and the write-capable half was
+# retired in v0.3.25 rather than left as an argument someone could pass a 1 to.
 posture_install_sudoers() {
   local which=$1 src dst tmp user=${SUDO_USER:-$(id -un)}
   case ${which} in
     diag) src=${HEINZEL_ROOT}/etc/sudoers-diag.in; dst=${SUDOERS_DIAG} ;;
-    ticket) src=${HEINZEL_ROOT}/etc/sudoers-ticket.in; dst=${SUDOERS_TICKET} ;;
     *) return 1 ;;
   esac
   if [ "${POSTURE_DRY_RUN}" = 1 ]; then
@@ -324,8 +328,7 @@ posture_install_sudoers() {
     return 0
   fi
   tmp=$(mktemp "${TMPDIR:-/tmp}/hzl-sudoers.XXXXXX") || return 1
-  sed -e "s/__USER__/${user}/g" \
-      -e "s/__TIMEOUT__/${HEINZEL_TICKET_TIMEOUT:-480}/g" "${src}" >"${tmp}"
+  sed -e "s/__USER__/${user}/g" "${src}" >"${tmp}"
   if ! visudo -cf "${tmp}" >/dev/null 2>&1; then
     rm -f "${tmp}"
     posture_step_failed "sudoers template ${which} failed validation, not installed (sudo is untouched)"
@@ -394,10 +397,11 @@ posture_patch_claude_settings() {
 
 # --- transitions -----------------------------------------------------------
 
-# `allow_ticket` is 0 while an unattended session is live: the write-capable
-# sudo window stays shut for its duration (DESIGN 4.3).
+# Neither posture installs the write-capable sudo window; both take it away
+# (DESIGN 4.3). Remote posture used to install it while the session was off,
+# and that pair is not one of the three modes.
 posture_apply() {
-  local want=$1 allow_ticket=${2:-1}
+  local want=$1
   POSTURE_FAILED=0
 
   case ${want} in
@@ -419,12 +423,13 @@ posture_apply() {
       posture_set_power remote
       posture_set_screenlock "${HEINZEL_REMOTE_SCREENLOCK}"
       posture_install_sudoers diag
-      if [ "${allow_ticket}" = 1 ]; then
-        posture_install_sudoers ticket
-      else
-        posture_remove_sudoers ticket
-        say "  the sudo ticket window stays closed while a session is running"
-      fi
+      # The file only, not the outstanding tickets: purging here would
+      # invalidate the timestamp this transition just used, and the caller's
+      # next privileged step - `pmset -a disablesleep 1` - would ask for the
+      # password a second time. `session_start` purges after that step, which
+      # is the last one a live mode takes.
+      posture_remove_sudoers ticket
+      say "  the write-capable sudo ticket window stays closed"
       posture_patch_claude_settings true false
       ;;
     *) return 1 ;;

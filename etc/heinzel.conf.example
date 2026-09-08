@@ -111,7 +111,6 @@ HEINZEL_REMOTE_SCREENLOCK=300          # seconds, or "immediate"
 HEINZEL_TRAVEL_SCREENLOCK="immediate"
 HEINZEL_REMOTE_IDLE_SLEEP=0            # pmset -c sleep, minutes (0 = never)
 HEINZEL_TRAVEL_IDLE_SLEEP=10
-HEINZEL_TICKET_TIMEOUT=480             # sudo ticket lifetime, minutes
 HEINZEL_CLAUDE_SETTINGS="${HOME}/.claude/settings.json"
 
 # --- housekeeping ----------------------------------------------------------

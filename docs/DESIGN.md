@@ -155,7 +155,7 @@ rules that contradict each other. Principle 8 resolves it by key — no key has 
 | screen-lock grace | posture | immediate | configurable | — | — |
 | `~/.claude/settings.json` remote control | posture | off | on | — | — |
 | `sudoers.d/heinzel-diag` (read-only NOPASSWD) | posture | removed | installed | — | — |
-| `sudoers.d/heinzel-ticket` (`!tty_tickets`) | posture, **suspended by session** (§4.3) | removed | *unreachable* (§4.3) | removed | — |
+| `sudoers.d/heinzel-ticket` (`!tty_tickets`) | posture, **removal only** (§4.3) | removed | removed | removed | — |
 | `caffeinate` | session | — | — | started | killed |
 
 Two notes carried from the ancestors, both load-bearing:
@@ -194,30 +194,31 @@ It is fine while a human is driving. It is not fine while the runner is.
 | File | Contents | Present when |
 |---|---|---|
 | `sudoers.d/heinzel-diag` | `NOPASSWD` read-only diagnostics only | posture is `remote` |
-| `sudoers.d/heinzel-ticket` | `!tty_tickets`, `timestamp_timeout` | posture is `remote` **and** session is `off` |
+| `sudoers.d/heinzel-ticket` | `!tty_tickets`, `timestamp_timeout` | **never** — retired in v0.3.25 |
 
-`hzl work` and `hzl mobile` remove `heinzel-ticket` and invalidate outstanding tickets
-(`/var/db/sudo/ts/<user>`). `hzl off` selects travel posture, where the file is absent. So during an unattended session the
-write-capable sudo window is *structurally closed*, and defence layer 1 (unprivileged) holds on
-its own instead of leaning on layers 2–3.
+The suspend rule survived the split for one release and then ran out of cells. The write-capable
+half was allowed under remote posture with the session *off*, and the three modes of §2 do not
+produce that pair: remote posture belongs to `work`, and `work` starts a session. Rather than
+install the file and remove it again a step later — a guarantee resting on a step that can fail —
+v0.3.25 deleted `etc/sudoers-ticket.in` and the code that installed it. `posture_install_sudoers`
+now knows one template, and it is the read-only one.
 
-Since v0.3.25 the row above has no reachable cell: remote posture belongs to `work`, `work`
-starts a session, and the file is allowed only with the session off. **No mode installs it.**
-`posture_apply remote` is therefore always called with the ticket half suppressed — installing it
-and removing it again one step later would be the same guarantee resting on a step that can fail.
-What remains is the keeping-absent, which every mode does, and `hzl doctor`'s report of a file
-some other tool left behind. Reopening the window would need a fourth public mode, and that is a
-decision to take deliberately rather than by leaving an argument at `1`.
+What remains is removal, and it is not vestigial: a machine upgraded from a build that did install
+the file still has it, so both postures remove `heinzel-ticket` and invalidate outstanding tickets
+(`/var/db/sudo/ts/<user>`), and a live mode does it again as the step its guarantee is written
+against. During an unattended session the write-capable sudo window is *structurally closed*, and
+defence layer 1 (unprivileged) holds on its own instead of leaning on layers 2–3.
 
 The read-only half stays: it cannot write, and the deny layer blocks `Bash(sudo *)` for the agent
 independently. Two reasons, either sufficient.
 
-**What this costs:** an unattended session and a human doing sudo work over VNC cannot overlap.
-Acceptable — the unattended window is 01–05 by default, which is the same window a human is
-already not using. Both operations reserve the machine; now they say so.
+**What this costs:** a human doing sudo work over VNC authenticates per terminal, with the stock
+five-minute tty-scoped ticket, and cannot hand that ticket to Claude Code — which has no TTY and
+was the reason `!tty_tickets` existed. Reopening the window means a fourth public mode with the
+session off, which is a decision to take deliberately rather than by leaving an argument at `1`.
 
-`hzl doctor` treats a live mode **and** `heinzel-ticket` present as a defect, not a warning: the
-only way to reach it is a restore path that failed.
+`hzl doctor` treats a live mode **and** `heinzel-ticket` present as a defect, not a warning: with
+nothing here able to write that file, it came from another tool or from a build before v0.3.25.
 
 ### 4.4 Defence in depth for the unattended lane
 
@@ -602,7 +603,7 @@ heinzel/
 ├── etc/heinzel-settings.json     deny/allow for the unattended agent
 ├── etc/review-schema.json        forces the reviewer's output shape
 ├── etc/pf-travel.conf.in         pf anchor template (posture)
-├── etc/sudoers-{diag,ticket}.in  sudoers templates (posture, §4.3)
+├── etc/sudoers-diag.in           read-only sudoers template (posture, §4.3)
 ├── etc/agent.plist.in            LaunchAgent template
 ├── prompts/{backlog-run,review,review-fix}.md
 └── tests/{test.sh,lint.sh}       one entry point: test.sh
@@ -683,8 +684,8 @@ Recorded rather than guessed at.
    planned reboots go through `sudo fdesetup authrestart`.
 5. **What happens to `macmode`.** No longer only a tidiness question. Its
    `/etc/sudoers.d/claude-code` carries `Defaults !tty_tickets` and
-   `timestamp_timeout=480` — exactly what `heinzel-ticket` carries and what
-   a live Heinzel mode removes for the duration of a session. While that file is
+   `timestamp_timeout=480` — exactly what `heinzel-ticket` carried and what
+   every Heinzel mode now removes rather than installs. While that file is
    installed, closing ours closes nothing: the window stays open through
    somebody else's file, and §4.3's guarantee does not hold on that machine.
    `hzl doctor` now detects and names this. The sequence is to verify Heinzel's

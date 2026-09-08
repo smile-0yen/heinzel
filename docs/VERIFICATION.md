@@ -420,8 +420,8 @@ Two things worth knowing about the transition:
 - **`sudo` still works, whatever happens.** Every sudoers file is validated
   with `visudo -c` before installation, and a file that fails validation is not
   installed.
-- **macmode's `/etc/sudoers.d/claude-code` is not touched.** Heinzel manages
-  `heinzel-diag` and `heinzel-ticket` only, and posture detection ignores the
+- **macmode's `/etc/sudoers.d/claude-code` is not touched.** Heinzel installs
+  `heinzel-diag` and removes `heinzel-ticket`, and posture detection ignores the
   old file. After this phase both may exist; deciding whether to remove the old
   one is yours, and until you do, the old relaxed ticket policy is still in
   force regardless of what Heinzel thinks.
@@ -435,9 +435,9 @@ hzl off
 ls /etc/sudoers.d/
 ```
 
-`heinzel-ticket` must be gone during work and remain gone after off because
-off selects travel posture. `doctor` section 8 must not report a defect while
-the session is live.
+`heinzel-ticket` must be absent throughout: since v0.3.25 nothing installs it,
+and both postures remove one an older build left behind. `doctor` section 8 must
+not report a defect while the session is live.
 
 Finally verify mobile at the keyboard:
 
