@@ -132,6 +132,51 @@ only read, so a state file you carried back from a newer build still opens, and
 graphs written against the old fields keep working: every version so far only
 adds. `hzl doctor` prints the version it found.
 
+## Watching a run that is still going
+
+`hzl logs -f` follows the *runner*: the gates it walked, the worksheet it
+handed over, the review at the end. It says nothing about what the agent is
+doing in the half-hour in between, because that is not the runner's log. That
+is the agent's own output, in the run's exec directory, and the executor
+writes it a line at a time as the work happens:
+
+```sh
+ls -dt ~/.heinzel/logs/*/exec-*/ | head -1     # the run in progress
+tail -f ~/.heinzel/logs/2026-09-08/exec-030001/raw
+```
+
+One JSON object per line, appended as it goes. Raw it is unreadable at speed;
+through `jq` it is a commentary:
+
+```sh
+tail -f ~/.heinzel/logs/2026-09-08/exec-030001/raw |
+  jq -r --unbuffered '
+    if .type == "assistant" then
+      (.message.content[]? |
+       if .type == "text" then .text
+       elif .type == "tool_use" then "· " + .name
+       else empty end)
+    elif .type == "result" then
+      "— " + (.subtype // "done") + "  $" + (.total_cost_usd // 0 | tostring)
+    else empty end'
+```
+
+`--unbuffered` is the flag that matters. Without it `jq` holds its output in a
+buffer and the commentary arrives in bursts, several minutes behind the run.
+
+Three things this is not:
+
+- **Not a way to intervene.** It is a read of a file. The run holds the working
+  directory and there is nothing to type into. To stop one, `hzl off`.
+- **Not a stable format.** Every line above the last is the `claude` CLI's own
+  event stream, and a CLI upgrade may change it. Nothing in Heinzel reads those
+  lines. The one line Heinzel does read is the last, `"type": "result"`, which
+  carries the session id, the cost, the turn count and the final message — and
+  `result.json` beside it is the form to write anything durable against.
+- **Not available for the reviewer.** The review is launched with
+  `--output-format json`, one object that appears whole when it is over, so
+  there is nothing to follow. `docs/SPEC.md` §9 says which role writes which.
+
 ## The backlog
 
 The ledger lives wherever `DEFAULT_BACKLOG` points, and it is the only place

@@ -854,6 +854,34 @@ Driver normalising what came back (`docs/RUNTIME-BACKENDS.md` §7, §8.4).
 `HEINZEL_DRY_RUN=1` a NUL-separated `dry-run.cmd` (NUL, so a multi-line
 argument survives as one argument).
 
+`raw` is the engine's own output in the engine's own format, and **the format
+depends on the role as well as the engine**:
+
+| Engine | Role | Launched with | `raw` |
+|---|---|---|---|
+| claude | executor | `--output-format stream-json --verbose` | JSONL, one event per line, appended as the run happens |
+| claude | reviewer | `--output-format json` | one JSON object, written when the run ends |
+| codex | either | `--json` | JSONL |
+
+The executor streams so that a run in progress can be watched from a terminal
+(`docs/RUNBOOK.md`, "Watching a run that is still going"); `--verbose` is
+required, not decorative — the CLI refuses `stream-json` under `-p` without
+it. The reviewer does not, because whether `--json-schema` survives being
+combined with `stream-json` is **unverified**, and a reviewer whose schema was
+silently dropped would return prose where the runner parses a verdict. That is
+a live-run question (`docs/VERIFICATION.md`), not one to settle by guessing.
+
+> **Normative: `raw` is evidence, not an interface.** Nothing outside
+> `lib/engines.sh` parses it. Both claude shapes end in the same object — the
+> one the CLI marks `"type": "result"` — and that object alone is what the
+> verdict and the telemetry are read from, by one reader that accepts either
+> shape. A stream that ends without it, which is what a run killed at the
+> deadline leaves, is read for what did arrive: the complete events before the
+> half-written last line are parsed, and everything the result object would
+> have carried is reported absent — `cost_usd` null, no turns, no text — rather
+> than as a zero. `result.json` is the interface; it is unchanged by any of
+> this.
+
 > **Normative: an outdir carries no record of an earlier run.** Before it
 > builds a launch, `engine_run` empties `raw`, `last.txt` and `stderr` and
 > *removes* `collected.json` and `result.json`. The two removed files are the
@@ -1645,6 +1673,8 @@ Honest as of 2026-08-29.
 | The review gate's `reject` path | The rule that matters most in §10 — reverting only the lines carrying this run's id — is unit-checked but has never fired against a real `reject`. Neither has `approve`, nor `fix-once` |
 | **The review gate runs after the push** *(open design question, not a gap in verification)* | The release ritual (`docs/RELEASING.md`) has the executor commit, push and tag inside its own run; `bin/hzl-run` applies the review gate afterwards. So a `reject` reverts the backlog line and leaves the commit, the push and the tag in place — review gates the ledger, not the remote. The two behaviours landed the same day and neither is wrong alone. Three ways out, none chosen: move the push behind the gate and have the runner do it on approval; keep the ritual and have a reject `git revert`; or accept it as an after-the-fact record and say so everywhere. Until it is decided, `HEINZEL_REVIEW=1` buys a second opinion and a morning signal, not prevention |
 | HALT in the field | The auth-failure patterns are desk-checked only; a real credential expiry has not been reproduced |
+| **`stream-json` against a real `claude`** | The executor's launch changed in 0.4.1. The suite covers it against fixed JSONL samples and a stand-in engine — normalisation, the verdict, `runs.jsonl`'s `cost_usd`, and a stream cut off mid-line — but no real run has been made since. Two things a fixture cannot show: that the CLI accepts `--output-format stream-json --verbose` alongside these flags, and that its last line is the `"type": "result"` object every figure in `result.json` is read from. `docs/VERIFICATION.md` phase 3 checks both from a second terminal |
+| **`--json-schema` combined with `stream-json`** | Unknown, and the reason the reviewer was left on `--output-format json`. It decides whether a review can be watched the way an execution now can. One live reviewer run answers it; guessing wrong costs a schema silently dropped and prose where the runner parses a verdict |
 
 > The interlock is verified as *implemented*. On the machine it was tested on
 > it currently has **no effect**, because a sudoers drop-in left over from a

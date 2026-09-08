@@ -6,6 +6,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-08
+
+A run in progress can now be watched from a terminal. The executor is launched
+with `--output-format stream-json --verbose`, so its `raw` file is written a
+line at a time as the agent works instead of appearing whole when the run is
+already over, and `tail -f` on it is a live commentary.
+
+A patch bump. `raw` has always been "the engine's own output", never a format
+this project defines or promises - `result.json` is the interface, and it is
+unchanged, field for field. But anything you wrote that reads `raw` directly
+needs to know: for the claude **executor** it is now JSONL, so `jq .` becomes
+`jq -s .` or a read of the last line. The reviewer's `raw` is untouched.
+
+### Changed
+- **The claude executor streams.** `--output-format stream-json --verbose`;
+  `--verbose` is required rather than decorative, because the CLI refuses
+  `stream-json` under `-p` without it.
+- **The claude reviewer deliberately does not.** Whether `--json-schema`
+  survives being combined with `stream-json` is unknown, and a reviewer whose
+  schema was silently dropped would return prose where the runner parses a
+  verdict - a worse failure than a review nobody can watch. It stays on
+  `--output-format json`, an argv assertion holds it there, and the open
+  question is written down in `docs/SPEC.md` §15 for a live run to settle.
+- **One reader for both shapes.** The verdict and the telemetry come from the
+  object the CLI marks `"type": "result"` - the last line of a stream, or the
+  whole of the reviewer's single object - so nothing outside `lib/engines.sh`
+  has to know which role wrote the file it is holding. It reads the file twice
+  where it has to: `jq -s` first, which handles a pretty-printed object spread
+  over several lines and every record written before this release, then line by
+  line dropping what will not parse. The second reading is what saves a run cut
+  off at the deadline, where one half-written last line would otherwise make
+  `jq` reject the hundred complete events before it.
+- **A run that reported nothing records nothing**, rather than a zero. No
+  result object means `cost_usd: null`, no turns and no text - and `last.txt`
+  is now empty rather than holding the single newline an empty message used to
+  render as, so a run cut off before it spoke is not recorded as having said
+  one blank line.
+
+### Added
+- **18 regression assertions** over three fixed JSONL samples - a stream that
+  finished, one whose result line says `is_error`, and one cut off mid-line
+  with no result line at all. They check the normalised result, the verdict,
+  what a failed run still recorded spending, that `raw` really is one parseable
+  object per line, and the `cost_usd` that reaches `runs.jsonl` in all four
+  cases including codex's null. The projection out of `result.json` is
+  replicated from `bin/hzl-run` and pinned to its source, so the replica cannot
+  quietly stop matching the runner. No real engine is called.
+- **`docs/RUNBOOK.md`, "Watching a run that is still going"** - where the file
+  is, the `jq` filter that turns it into a commentary, why `--unbuffered`
+  matters, and three things this is not: not a way to intervene, not a stable
+  format, not available for the reviewer.
+- **`docs/VERIFICATION.md` phase 3** gains the three checks a fake engine
+  cannot make: that lines arrive during the run, that `claude` did not refuse
+  the flag pair, and that the last line is the result object.
+
+### Documentation
+- **`docs/SPEC.md` §9** now states that `raw`'s format depends on the role as
+  well as the engine, as a table, with a normative note that `raw` is evidence
+  and not an interface. §15 gains two unverified rows: the streamed launch
+  against a real `claude`, and the `--json-schema` question.
+
 ## [0.4.0] - 2026-09-08
 
 Three intent-based modes replace the independent posture and session commands.

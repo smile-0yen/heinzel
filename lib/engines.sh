@@ -36,7 +36,10 @@
 #   engine_result_attempt_outcome <result.json>
 #
 # engine_run leaves in <outdir>:
-#   raw            the engine's own output (claude: JSON, codex: JSONL)
+#   raw            the engine's own output, in the engine's own format, which
+#                  depends on the role as well as the engine: JSONL for the
+#                  claude executor and for codex, one JSON object for the
+#                  claude reviewer. Nothing outside this file parses it.
 #   last.txt       the final message, in the same place for every engine
 #   stderr         standard error; the input to auth-failure detection
 #   result.json    the engine-independent result. Callers read only this.
@@ -108,7 +111,7 @@ engine_is_auth_error() {
 engine_build_launch() {
   local engine=$1 role=$2 io_mode=$3 workdir=$4 promptfile=$5 outdir=$6 spec=$7
   local prompt model effort executable profile
-  local -a argv
+  local -a argv format
 
   case ${io_mode} in
     # One-shot batch is all Phase 1 runs. An unsupported mode is refused rather
@@ -125,8 +128,27 @@ engine_build_launch() {
       executable=claude
       model=${HEINZEL_MODEL}
       effort=${HEINZEL_EFFORT}
+      # The executor streams, so that a person can watch a run that is still
+      # going: `stream-json` writes one event per line as it happens, and
+      # `raw` becomes a file `tail -f` has something to say about, instead of
+      # one JSON object that appears whole when it is already too late to
+      # watch (docs/RUNBOOK.md, "Watching a run that is still going").
+      # `--verbose` is not optional decoration: the CLI refuses
+      # `--output-format stream-json` under `-p` without it.
+      #
+      # The reviewer stays on the single-object `json` form. Whether
+      # `--json-schema` survives being combined with `stream-json` is not
+      # known here, and a reviewer whose schema was quietly dropped would
+      # return prose where the runner parses a verdict — a worse failure than
+      # a review nobody can watch. Deciding it needs a live reviewer run
+      # (docs/VERIFICATION.md), not a guess.
+      if [ "${role}" = reviewer ]; then
+        format=(--output-format json)
+      else
+        format=(--output-format stream-json --verbose)
+      fi
       argv=(-p "${prompt}"
-            --output-format json
+            "${format[@]}"
             --setting-sources user
             --settings "${HEINZEL_ROOT}/etc/heinzel-settings.json")
       if [ "${role}" = reviewer ]; then
@@ -220,6 +242,41 @@ engine_render_launch() {
 
 # --- Agent Driver: the result ----------------------------------------------
 
+# claude's `raw` has two shapes, because its two roles are launched with two
+# output formats: the reviewer's `json` is one object, the executor's
+# `stream-json` is one object per line. Both end in the same object — the one
+# the CLI marks `"type": "result"` — and it is the only one anything here
+# reads. So there is one reader for both, and no caller has to know which role
+# wrote the file it is holding.
+#
+# Twice, because the two readings fail on different files and neither alone is
+# enough:
+#
+#   -s   jq's own parser over the whole file. It reads one object however many
+#        lines it is pretty-printed across, and a JSONL file as the sequence of
+#        objects it is. Right for every file that was written to the end.
+#   -Rs  line by line, dropping with `fromjson?` whatever will not parse. This
+#        is for the file that is still being written, or was cut off at the
+#        deadline: one half-written last line makes the first reading reject
+#        the *whole* input, losing the hundred complete events before it.
+#
+# The fallbacks within each are ordered by how much is known: the result object
+# if there is one, else the last object that parsed — which is what reads the
+# reviewer's single object, and what leaves an interrupted stream naming the
+# session it got as far as. Nothing at all reads as nothing, not as an object
+# of defaults: an empty, absent or unreadable file must stay distinguishable
+# from a run that reported zeroes.
+_engine_claude_result_json() {
+  local raw=$1 out
+  out=$(jq -s -c '(map(select(.type? == "result")) | last) // last // empty' \
+        "${raw}" 2>/dev/null)
+  [ -n "${out}" ] || out=$(jq -R -s -c '
+    [splits("\n") | select(length > 0) | fromjson?]
+    | (map(select(.type? == "result")) | last) // last // empty' \
+    "${raw}" 2>/dev/null)
+  printf '%s' "${out}"
+}
+
 # rc 124/137 come from the watchdog and mean the wall clock ran out.
 engine_verdict() {
   local engine=$1 rc=$2 errfile=$3 rawfile=$4
@@ -231,9 +288,14 @@ engine_verdict() {
     return
   fi
   [ "${rc}" -ne 0 ] && { printf error; return; }
-  # claude reports a failed run inside a successful process exit.
+  # claude reports a failed run inside a successful process exit, in the same
+  # result object the telemetry is read from. Reading the file rather than its
+  # last line matters now that the executor streams: the run's own `is_error`
+  # is the one on that object, and a stream is a hundred events that are not
+  # it.
   if [ "${engine}" = claude ] && [ -r "${rawfile}" ]; then
-    if jq -e '.is_error == true' "${rawfile}" >/dev/null 2>&1; then
+    if _engine_claude_result_json "${rawfile}" |
+       jq -e '.is_error == true' >/dev/null 2>&1; then
       printf error
       return
     fi
@@ -299,11 +361,22 @@ engine_result_attempt_outcome() {
 }
 
 _engine_result_claude() {
-  local raw=$1
+  local raw=$1 final
+  # Every figure below comes from the one result object, whichever shape the
+  # file has. A stream that ended without one — killed at the deadline, or
+  # still being written — falls back to the last event that parsed, and the
+  # defaults then say plainly what that event did not carry: no cost, no
+  # turns, no text.
+  final=$(_engine_claude_result_json "${raw}")
+  # Nothing parsed at all: an empty, absent or unreadable file. Report nothing
+  # rather than a shape full of defaults, so the caller's own default applies
+  # and `last.txt` is left empty instead of holding the newline an empty
+  # message still renders as.
+  [ -n "${final}" ] || return 0
   # `model` and `effort` are what we asked for; models_used is what actually
   # ran. They differ when an inherited setting overrides the request, and
   # without recording both there is no way to find that out afterwards.
-  jq -c '{
+  printf '%s' "${final}" | jq -c '{
     session_id: (.session_id // null),
     cost_usd: (.total_cost_usd // null),
     turns: (.num_turns // 0),
@@ -311,7 +384,7 @@ _engine_result_claude() {
     tokens_out: (.usage.output_tokens // 0),
     models_used: ((.modelUsage // {}) | keys),
     text: (.result // "")
-  }' "${raw}" 2>/dev/null || printf '{}'
+  }' 2>/dev/null || printf '{}'
 }
 
 _engine_result_codex() {
@@ -354,7 +427,15 @@ engine_normalize_result() {
       parsed=$(_engine_result_claude "${rawfile}")
       # claude reports its final message inside its own JSON; codex was told to
       # write it out itself. Both end up in the same file.
-      printf '%s' "${parsed}" | jq -r '.text // ""' >"${lastfile}" 2>/dev/null
+      #
+      # A message that exists is written with the trailing newline a text file
+      # ends in; no message writes no file. Not `jq -r`, which would end an
+      # absent message with a newline too, and leave `text` as "\n" — a run
+      # cut off before it said anything would then be recorded as having said
+      # one blank line, which is not the same thing as having said nothing.
+      printf '%s' "${parsed}" |
+        jq -j '(.text // "") | if . == "" then . else . + "\n" end' \
+        >"${lastfile}" 2>/dev/null
       ;;
     codex)
       parsed=$(_engine_result_codex "${rawfile}")

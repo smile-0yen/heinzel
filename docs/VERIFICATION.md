@@ -216,6 +216,31 @@ hzl off
 >
 > `stderr` can contain error text from the API. Skim it before pasting.
 
+While the run is still going, this is also the phase that checks the
+executor's stream — the one thing in `docs/SPEC.md` §9 that a fake engine
+cannot settle. In a second terminal:
+
+```sh
+tail -f "$(ls -dt ~/.heinzel/logs/*/exec-*/ | head -1)raw"
+```
+
+Three things to see, in order:
+
+1. **Lines arriving while the run is going**, not one object at the end. If
+   `raw` stays empty until the run finishes, the CLI ignored
+   `--output-format stream-json` and the flag is doing nothing.
+2. **`claude` not refusing the launch.** `stderr` naming `--verbose` or
+   `stream-json` means the flag pair is no longer accepted; the run will have
+   failed at once, with nothing in `raw` at all.
+3. **A last line that is `"type": "result"`** — `jq -r '.type' "$D"/exec-*/raw
+   | tail -1`. Everything in `result.json` is read from that line, so if it is
+   absent the cost and the session id are absent too, whatever the run did.
+
+The reviewer is deliberately not part of this: it is launched with
+`--output-format json` because `--json-schema` combined with `stream-json` is
+untested. If you want to settle that, run one review by hand with both flags
+and check the verdict still parses — that answer is worth writing into §15.
+
 ### Phase 3a — is the deny list actually in force?
 
 The runner checks that `etc/heinzel-settings.json` is valid JSON, but nothing

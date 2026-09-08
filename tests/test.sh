@@ -866,7 +866,7 @@ t_ok "a dry run of the executor succeeds" "$?"
 t_argv "claude executor: the launch, argument for argument" \
   "${AR_CE}/dry-run.cmd" \
   claude -p "${PROMPT_ARG}" \
-  --output-format json \
+  --output-format stream-json --verbose \
   --setting-sources user \
   --settings "${SETTINGS}" \
   --permission-mode dontAsk \
@@ -876,6 +876,10 @@ t_false "a dry run starts no engine" [ -e "${AR_CE}/must-not-exist.argv" ]
 
 AR_CR=${TMPROOT}/argv-claude-reviewer
 dry_run claude reviewer "${AR_CR}"
+# `--output-format json`, deliberately, where the executor streams: whether
+# `--json-schema` survives being combined with `stream-json` is not known, and
+# a reviewer whose schema was quietly dropped would return prose where the
+# runner parses a verdict. This assertion is what holds the reviewer there.
 t_argv "claude reviewer: no write tools, and the schema as one argument" \
   "${AR_CR}/dry-run.cmd" \
   claude -p "${PROMPT_ARG}" \
@@ -932,7 +936,7 @@ unset HEINZEL_MAX_BUDGET_USD
 t_argv "claude: a budget cap is passed through when one is configured" \
   "${AR_CB}/dry-run.cmd" \
   claude -p "${PROMPT_ARG}" \
-  --output-format json \
+  --output-format stream-json --verbose \
   --setting-sources user \
   --settings "${SETTINGS}" \
   --permission-mode dontAsk \
@@ -1075,7 +1079,7 @@ t_status "a clean claude run returns 0" 0 "$?"
 t_argv "the argv on a real run is the argv of the dry run" \
   "${TMPROOT}/run-claude.argv" \
   -p 'run this' \
-  --output-format json \
+  --output-format stream-json --verbose \
   --setting-sources user \
   --settings "${SETTINGS}" \
   --permission-mode dontAsk \
@@ -1168,6 +1172,131 @@ t_eq "codex telemetry is folded into the same shape, with no cost figure" \
              tokens_out, turns, models_used}' "${RUN_XE}/result.json")"
 t_eq "the last message codex wrote for itself is the one reported" \
   "codex had the last word" "$(jq -r '.text' "${RUN_XE}/result.json")"
+
+# --- the claude executor's stream -------------------------------------------
+#
+# The executor is launched with --output-format stream-json, so its `raw` is
+# one event per line as the run happens, and a person can `tail -f` it. Three
+# fixed samples, because three things can be true of a stream: it finished, it
+# finished saying the run failed, and it stopped in the middle. Fixed bytes on
+# disk, never a real engine: none of this costs anything or needs a network.
+#
+# The reviewer is deliberately not in this group. It stays on the single-object
+# `json` form, and the argv assertion above is what holds it there.
+
+group 'claude stream-json (executor)'
+
+STREAM_OK=${TMPROOT}/claude-stream-ok.jsonl
+cat >"${STREAM_OK}" <<'STREAMOK'
+{"type":"system","subtype":"init","session_id":"sess-stream","model":"test-model","tools":["Bash","Edit"]}
+{"type":"assistant","session_id":"sess-stream","message":{"role":"assistant","content":[{"type":"text","text":"reading the worksheet"}]}}
+{"type":"assistant","session_id":"sess-stream","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"tests/test.sh"}}]}}
+{"type":"user","session_id":"sess-stream","message":{"role":"user","content":[{"type":"tool_result","content":"900 passed"}]}}
+{"type":"result","subtype":"success","is_error":false,"session_id":"sess-stream","num_turns":4,"total_cost_usd":0.25,"usage":{"input_tokens":11,"output_tokens":22},"modelUsage":{"claude-opus-5":{"inputTokens":11},"claude-haiku-4-5":{"inputTokens":1}},"result":"first line\nsecond line"}
+STREAMOK
+
+RUN_SOK=${TMPROOT}/run-stream-ok
+fake_reset
+FAKE_OUT_FILE=${STREAM_OK}
+engine_run claude executor "${RUN_WORK}" "${RUN_PROMPT}" "${RUN_SOK}" 60
+t_status "a streamed run returns 0" 0 "$?"
+
+# The whole point of the change: what is on disk is a line per event, not one
+# object that appears only when the run is already over.
+t_eq "raw is one JSON object per line, so tail -f has something to follow" \
+  5 "$(grep -c . "${RUN_SOK}/raw")"
+t_eq "and every line of it parses on its own" \
+  5 "$(jq -c -s 'length' "${RUN_SOK}/raw")"
+
+t_eq "the telemetry is read from the result line, not from the stream" \
+  '{"verdict":"ok","session_id":"sess-stream","cost_usd":0.25,"turns":4,"tokens_in":11,"tokens_out":22,"models_used":["claude-haiku-4-5","claude-opus-5"]}' \
+  "$(jq -c '{verdict, session_id, cost_usd, turns, tokens_in, tokens_out,
+             models_used}' "${RUN_SOK}/result.json")"
+t_eq "and the final message still lands in last.txt, as it did before" \
+  "$(printf 'first line\nsecond line')" "$(cat "${RUN_SOK}/last.txt")"
+
+STREAM_ERR=${TMPROOT}/claude-stream-error.jsonl
+cat >"${STREAM_ERR}" <<'STREAMERR'
+{"type":"system","subtype":"init","session_id":"sess-stream-err","model":"test-model"}
+{"type":"assistant","session_id":"sess-stream-err","message":{"role":"assistant","content":[{"type":"text","text":"trying"}]}}
+{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"sess-stream-err","num_turns":2,"total_cost_usd":0.04,"usage":{"input_tokens":7,"output_tokens":3},"modelUsage":{"claude-opus-5":{"inputTokens":7}},"result":"could not finish"}
+STREAMERR
+
+RUN_SERR=${TMPROOT}/run-stream-error
+fake_reset
+FAKE_OUT_FILE=${STREAM_ERR}
+engine_run claude executor "${RUN_WORK}" "${RUN_PROMPT}" "${RUN_SERR}" 60
+t_status "a streamed run that failed still exits 0, as claude does" 0 "$?"
+t_eq "but is_error on the result line is found, and the verdict is error" \
+  '{"verdict":"error","exit_code":0,"attempt_outcome":"FAILED"}' \
+  "$(jq -c '{verdict, exit_code, attempt_outcome}' "${RUN_SERR}/result.json")"
+# A failed run still cost money, and it is the only record of what it cost.
+t_eq "and what the failed run spent is still recorded" \
+  '{"session_id":"sess-stream-err","cost_usd":0.04,"turns":2}' \
+  "$(jq -c '{session_id, cost_usd, turns}' "${RUN_SERR}/result.json")"
+
+# Cut off in the middle: no result line at all, and the last line half written,
+# which is exactly what a run killed at the deadline leaves behind. `jq -s`
+# rejects the whole file on that line; a reader that stopped there would throw
+# away the complete events before it.
+STREAM_CUT=${TMPROOT}/claude-stream-cut.jsonl
+cat >"${STREAM_CUT}" <<'STREAMCUT'
+{"type":"system","subtype":"init","session_id":"sess-cut","model":"test-model"}
+{"type":"assistant","session_id":"sess-cut","message":{"role":"assistant","content":[{"type":"text","text":"halfway through"}]}}
+STREAMCUT
+printf '%s' '{"type":"assistant","session_id":"sess-cut","message":{"role":"assi' \
+  >>"${STREAM_CUT}"
+
+RUN_SCUT=${TMPROOT}/run-stream-cut
+fake_reset
+FAKE_OUT_FILE=${STREAM_CUT}
+engine_run claude executor "${RUN_WORK}" "${RUN_PROMPT}" "${RUN_SCUT}" 60
+t_status "a stream that stopped in the middle is still normalised" 0 "$?"
+t_eq "the half-written line does not take the parsed ones with it" \
+  sess-cut "$(jq -r '.session_id' "${RUN_SCUT}/result.json")"
+# Nothing reported a cost, a turn count or a final message, and the record says
+# so rather than inventing a zero-dollar success.
+t_eq "with nothing reported reported as nothing, not as zero spend" \
+  '{"cost_usd":null,"turns":0,"tokens_in":0,"tokens_out":0,"text":""}' \
+  "$(jq -c '{cost_usd, turns, tokens_in, tokens_out, text}' \
+      "${RUN_SCUT}/result.json")"
+# Byte count, not `$(cat ...)`: command substitution strips trailing newlines,
+# so a file holding one blank line would read as empty and pass.
+t_eq "and last.txt is empty, because there was no final message" \
+  0 "$(wc -c <"${RUN_SCUT}/last.txt" | tr -d ' ')"
+
+# The reviewer's single object is read by the same reader, and a pretty-printed
+# one spread over several lines still parses. This is the shape every claude
+# record written before this release has, so it is not only the reviewer's.
+t_eq "the single-object form is still read, however many lines it is on" \
+  '{"session_id":"sess-1","cost_usd":0.25,"turns":4,"tokens_in":11,"tokens_out":22,"text":"first line\nsecond line"}' \
+  "$(_engine_result_claude "${CLAUDE_OK_RAW}" |
+     jq -c '{session_id, cost_usd, turns, tokens_in, tokens_out, text}')"
+
+# --- what reaches runs.jsonl -----------------------------------------------
+#
+# `cost_usd` in the run record is projected out of the engine's result.json by
+# bin/hzl-run. The projection is replicated here rather than by running a whole
+# night, and pinned to the runner's source below, so the replica cannot quietly
+# stop being what the runner does.
+
+runs_jsonl_cost() { # result.json -> the value the run record would carry
+  jq -n -c --slurpfile engine_result "$1" \
+    '$engine_result[0].cost_usd // null'
+}
+
+t_eq "a completed run's cost reaches the run record" \
+  0.25 "$(runs_jsonl_cost "${RUN_SOK}/result.json")"
+t_eq "so does a failed one's, which is still money spent" \
+  0.04 "$(runs_jsonl_cost "${RUN_SERR}/result.json")"
+t_eq "and a run that reported none carries null, not 0" \
+  null "$(runs_jsonl_cost "${RUN_SCUT}/result.json")"
+t_eq "codex, which has no USD telemetry at all, carries null too" \
+  null "$(runs_jsonl_cost "${RUN_XE}/result.json")"
+
+t_eq "the runner still projects that field from the engine result" \
+  1 "$(grep -cF 'cost_usd: ($engine_result[0].cost_usd // null),' \
+        "${TEST_ROOT}/bin/hzl-run")"
 
 # --- availability and authentication ---------------------------------------
 
