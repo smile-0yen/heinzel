@@ -36,47 +36,37 @@ command is `hzl`.
 
 **The license** is Apache-2.0. Every script carries an SPDX header.
 
-## §2 The central design: two orthogonal axes
+## §2 The central design: three combined modes
 
-macmode had one axis with two values (`travel` | `remote`). kobito had a *different* one axis
-(`normal` | `kobito`). Merging them by concatenation gives a four-valued mode soup where half the
-values are nonsense. Instead, Heinzel keeps them as two axes that do not interact:
+macmode had posture (`travel` | `remote`) and kobito had session state (`off` | `on`). Exposing
+both independently produced four commands and one combination that was not useful. Heinzel now
+offers the three combinations people actually choose:
 
-- **posture** — *how exposed the machine is.* `travel` | `remote`.
-  Privileged. Changed by a human standing at the machine.
-  Owns: screen sharing, packet filter, wake-on-LAN, screen-lock grace, sudo policy, Claude Code
-  remote control.
-- **session** — *whether unattended work is running.* `on` | `off`.
-  Unprivileged after the first moment, TTL-bounded, expires by itself.
-  Owns: sleep inhibition, the launchd runner, the budget, the backlog.
+| Public mode | Posture | Session | Purpose |
+|---|---|---|---|
+| `work` | remote | on | normal unattended work on a machine left at the desk |
+| `off` | travel | off | closed up and safe to carry |
+| `mobile` | travel | on | exceptional work while travelling, with explicit battery consent |
 
-|  | session off | session on |
-|---|---|---|
-| **posture travel** | laptop in a bag | **unreachable** — §2.2 |
-| **posture remote** | idle desk machine | the overnight case |
+There is no public `off + remote` choice. `hzl work` and `hzl mobile` start a bounded session and
+select its posture together; `hzl off` stops the session and closes the machine up. The OS facts
+remain separately owned internally because they are observed and restored by different mechanisms,
+but they are no longer separate user decisions.
 
-### 2.1 Why `remote` is not folded into `on`
+### 2.1 Why `mobile` is explicit
 
-Because you need three of the four cells. Opening VNC to work by hand from an iPhone is a
-different act from starting an unattended run, and both are useful alone. Folding them also makes
-`off` ambiguous: does stopping the unattended run also close VNC and re-arm the firewall? There is
-no answer that is right twice.
+Travel posture is valuable even while local work continues: inbound traffic is blocked, screen
+sharing and wake-on-LAN are off, and the relaxed sudo policy is absent. The cost is power. Mobile
+mode therefore warns every time and requires an interactive confirmation or `--yes`; its recorded
+mode is what permits later scheduled runs on battery. Work mode keeps the old battery gate.
 
-Keeping them orthogonal costs one extra concept and buys an unambiguous `off`.
+### 2.2 Transitions own both halves
 
-### 2.2 `travel` terminates a session; `on` refuses under `travel`
-
-The diagonal cell is not merely discouraged, it is made unreachable, in both directions:
-
-- `hzl travel` while a session is live → runs the full `off` path first (including the `pmset`
-  restore), *then* applies the travel posture. Reported on stdout, never silent.
-- `hzl on` while posture is `travel` → refused, exit 1, with the reason. **No `--force`.** The
-  other refusals in `on` are about caution and can be overridden; this one is about the machine
-  being in the wrong physical situation, and a flag cannot change that.
-
-Travel means: probably on battery, probably on an untrusted network, lid closed in a bag. Every
-one of those is independently a reason the runner would skip. Making the combination impossible is
-cheaper than making it safe.
+Changing between `work` and `mobile` stops an existing session through the normal stop barrier
+before it changes posture and starts a new one. `off` stops first and applies travel posture even
+when a process cannot be confirmed gone: leaving inbound access open is the worse failure, while
+the non-zero exit still says the run is ORPHANED. With `HEINZEL_POSTURE=0`, the session half works
+and the OS posture is explicitly reported as unmanaged.
 
 ### 2.3 posture is *observed*, never stored
 
@@ -104,13 +94,13 @@ Numbered so later sections can cite them. 1–7 are kobito's, restated; 8–10 a
 | # | Principle | Consequence |
 |---|---|---|
 | 1 | **Privilege only when a human is present** | The unattended lane never gains privilege. Posture changes are privileged *and* interactive. No `NOPASSWD` for anything that writes. |
-| 2 | **State is a composed function, not a stored field** | Expiry, reboot, dead marker, HALT, and now *travel* all fall to `normal` on their own. |
+| 2 | **State is a composed function, not a stored field** | Expiry, reboot, dead marker, HALT, and a mode/posture mismatch all fall to `normal` on their own. |
 | 3 | **One source of truth per fact** | Session state: `state.json`. Schedule: `HEINZEL_HOURS`. Posture: the OS itself (§2.3). |
 | 4 | **When in doubt stop — but never silently** | The unattended run treats `blocked` as a correct outcome. It never drops a task to make a number look better. |
 | 5 | **Cost and time are bounded structurally** | Per-run tasks, per-session tasks, wall clock. Plus a time window that excludes the working day. |
 | 6 | **Never degrade silently** | Invalid settings JSON ⇒ do not run. Truncated diff ⇒ say so. Misspelled effort ⇒ reject at startup. |
 | 7 | **Engine knowledge lives in one file** | The runner knows `engine_run` and `result.json`. Nothing else. |
-| 8 | **Every OS setting has exactly one owner** | No two subsystems write the same key. This is what keeps the two axes from colliding (§4.2). |
+| 8 | **Every OS setting has exactly one owner** | No two subsystems write the same key. Combined commands orchestrate the owners rather than merging them (§4.2). |
 | 9 | **Portable before convenient** | No dependency a stock macOS lacks. If one is unavoidable, `doctor` detects and reports its absence. This is why we do not use `timeout(1)` (§6.1). |
 | 10 | **Nothing in the repository names its author** | Paths, launchd labels, firewall rules and model IDs are configuration, not constants (§8). |
 
@@ -121,10 +111,9 @@ Numbered so later sections can cite them. 1–7 are kobito's, restated; 8–10 a
 ```
   human present — interactive                    │  no human — unattended
   ───────────────────────────────────────────────┼──────────────────────────────────
-  hzl travel / hzl remote                        │  launchd → hzl-run → engine
+  hzl work / hzl mobile / hzl off                │  launchd → hzl-run → engine
     sudo pfctl / launchctl / sysadminctl         │    no sudo anywhere, ever
     sudo install -m 440 …/sudoers.d/heinzel-*    │    writes confined to WORKDIR
-  hzl on / hzl off                               │    reads state.json, never writes mode
     sudo pmset -a disablesleep {1,0}   ← the only privileged bit session owns
                     │                                        ▲
                     ▼                                        │ read-only
@@ -143,13 +132,13 @@ failure mode kobito hit and guarded against. Heinzel extends the guard to all su
 inverts macmode's interface:
 
 ```
-  sudo macmode travel   →   hzl travel
-  sudo macmode remote   →   hzl remote
+  sudo macmode travel   →   hzl off
+  sudo macmode remote   →   posture half of hzl work
        macmode status   →   hzl status
 ```
 
 Consequence: the human is prompted for a password *inside* the command rather than in front of it.
-`hzl travel` therefore prints what it is about to do before the first prompt.
+The mode commands therefore print what they are about to do before the first prompt.
 
 ### 4.2 Which subsystem owns which OS setting
 
@@ -166,12 +155,12 @@ rules that contradict each other. Principle 8 resolves it by key — no key has 
 | screen-lock grace | posture | immediate | configurable | — | — |
 | `~/.claude/settings.json` remote control | posture | off | on | — | — |
 | `sudoers.d/heinzel-diag` (read-only NOPASSWD) | posture | removed | installed | — | — |
-| `sudoers.d/heinzel-ticket` (`!tty_tickets`) | posture, **suspended by session** (§4.3) | removed | installed | removed | restored |
+| `sudoers.d/heinzel-ticket` (`!tty_tickets`) | posture, **suspended by session** (§4.3) | removed | installed | removed | — |
 | `caffeinate` | session | — | — | started | killed |
 
 Two notes carried from the ancestors, both load-bearing:
 
-- **`disablesleep` restores to `0`, always** — never to the value recorded at `on` time. Honouring
+- **`disablesleep` restores to `0`, always** — never to the value recorded when a live mode starts. Honouring
   the recorded value compounds one missed `off` into permanent sleep suppression: the leaked `1`
   becomes the next session's baseline and no amount of `off` ever clears it. Observed on the real
   machine on 2026-08-19. `hzl off --no-sudo` is the escape hatch for deliberately keeping it.
@@ -207,8 +196,8 @@ It is fine while a human is driving. It is not fine while the runner is.
 | `sudoers.d/heinzel-diag` | `NOPASSWD` read-only diagnostics only | posture is `remote` |
 | `sudoers.d/heinzel-ticket` | `!tty_tickets`, `timestamp_timeout` | posture is `remote` **and** session is `off` |
 
-`hzl on` removes `heinzel-ticket` and invalidates outstanding tickets (`/var/db/sudo/ts/<user>`).
-`hzl off` restores it if posture is still `remote`. So during an unattended session the
+`hzl work` and `hzl mobile` remove `heinzel-ticket` and invalidate outstanding tickets
+(`/var/db/sudo/ts/<user>`). `hzl off` selects travel posture, where the file is absent. So during an unattended session the
 write-capable sudo window is *structurally closed*, and defence layer 1 (unprivileged) holds on
 its own instead of leaning on layers 2–3.
 
@@ -219,7 +208,7 @@ independently. Two reasons, either sufficient.
 Acceptable — the unattended window is 01–05 by default, which is the same window a human is
 already not using. Both operations reserve the machine; now they say so.
 
-`hzl doctor` treats `session on` **and** `heinzel-ticket` present as a defect, not a warning: the
+`hzl doctor` treats a live mode **and** `heinzel-ticket` present as a defect, not a warning: the
 only way to reach it is a restore path that failed.
 
 ### 4.4 Defence in depth for the unattended lane
@@ -420,6 +409,7 @@ Fields are kobito's, with the tool renamed. The full schema is normative and bel
 `docs/SPEC.md`; the design-relevant parts are:
 
 - `mode` — `"heinzel"` | `"normal"`. **Alone it does not mean the session is live** (§5.1).
+- `operating_mode` — `"work"` | `"mobile"`; absent in an older file means `work`.
 - `expires_at_epoch` — TTL. Max 24 h, not configurable upward.
 - `boot_id` — `sysctl -n kern.bootsessionuuid`. **Not `kern.boottime`** — see below.
 - `caffeinate_pid` — liveness marker. Killing it drops the session immediately; that is the
@@ -446,20 +436,19 @@ Short-circuit AND, evaluated in this order. Any single false ⇒ `normal` ⇒ th
   now < expires_at_epoch                ├─ AND ─→ heinzel   (status exit code 10)
   boot_id == current boot session       │
   caffeinate_pid is alive               │
-  posture != travel            ← new    ─┘
+  operating mode matches posture        ─┘
                     │
                     └─ any false ─→ normal (silent no-op, exit 0, no log line)
 ```
 
 Fail-safe is guaranteed by there being **only one direction to fall**. Expiry, reboot, a dead
-marker, HALT, and now leaving the desk all land on "do nothing".
+marker, HALT, and a drifted posture all land on "do nothing".
 
-**Why gate 7 (`posture != travel`) earns its place** even though the runner already skips on
-battery: the AC gate catches the bag, but not the café. A machine on travel posture plugged into a
-café outlet passes every other gate — right TTL, right boot, live marker, AC power — and would
-fire a run on an untrusted network with the firewall closed around it. Gate 7 is one `launchctl
-print` plus one `pfctl` read, and it is the only gate that encodes *where the machine is* rather
-than *what state it is in*. Both gates stay; they fail in different directions.
+**Gate 7 matches intent to observation.** `work` requires remote posture and `mobile` requires
+travel posture. A hand change in System Settings or a half-failed transition therefore stops the
+runner instead of silently changing what the selected mode means. `HEINZEL_POSTURE=0` yields
+`unmanaged` and deliberately bypasses the match. The battery gate is separate: work skips on
+battery, while mobile is the recorded opt-in that passes it.
 
 Each false condition maps to exactly one human-readable reason string, and each reason string maps
 to exactly one row in the RUNBOOK. That one-to-one property is normative — it is what makes
@@ -643,7 +632,7 @@ The two ancestors are personal tools; every hard-coded assumption has to become 
 | Japanese CLI output, byte-width alignment helper | English. The alignment helper is deleted outright, not translated. |
 | Model IDs, `--effort xhigh`, Bedrock env inheritance | Configurable; model and effort are always passed explicitly and echoed into `result.json`. Generalised as *inherited interactive settings must not silently change unattended cost*, which is true for everyone, rather than as one machine's quirk. |
 | codex required as reviewer | Optional. Review defaults to **off** on a fresh install. A missing reviewer yields `verdict: skipped`, never a failure. |
-| macmode's pf rules, sudoers contents, VNC assumptions | Templates in `etc/`, and the posture commands are **opt-in**: with no posture config, `hzl travel` / `hzl remote` refuse rather than guess at a stranger's firewall. |
+| macmode's pf rules, sudoers contents, VNC assumptions | Templates in `etc/`, and posture management is **opt-in**: with it disabled, mode commands leave OS posture unmanaged rather than guess at a stranger's firewall. |
 | Single-user assumptions (`/usr/local/bin`, root-owned script) | User-level install; `~/.local/bin/hzl` symlink, repo checked out anywhere. |
 
 Repository surface: `README.md`, `LICENSE` (Apache-2.0), `NOTICE`, `CONTRIBUTING.md`,
@@ -661,14 +650,14 @@ Each phase ends with `tests/test.sh` green. Nothing merges without it.
 | Phase | Delivers | Done when |
 |---|---|---|
 | **0** (this) | Design, repository skeleton, license, CI stub | Documents reviewed |
-| **1** | `lib/common.sh`, state model, `hzl status` / `on` / `off` / `doctor`, `lib/watchdog.sh` | Session lifecycle works with no engine involved; watchdog returns 124/137 correctly |
+| **1** | `lib/common.sh`, state model, `hzl status` / live modes / `off` / `doctor`, `lib/watchdog.sh` | Session lifecycle works with no engine involved; watchdog returns 124/137 correctly |
 | **2** | `lib/posture.sh` — `travel` / `remote` ported from macmode with read-back verification and the sudoers split (§4.3) | Both transitions verified by reading back, `mixed` reported correctly |
 | **3** | `bin/hzl-run`, LaunchAgent, backlog ledger, engine abstraction. Review disabled. | A seeded task goes `[ ]` → `[x]` unattended; `normal` no-ops in well under a second with zero API calls |
 | **4** | Review pipeline: `hzl-changeset`, `hzl-review`, the gate | Gate rewrites only this run's `[x]` lines; reviewer failure never drops a task |
 | **5** | `RUNBOOK.md`, docs pass, public-readiness review | Repository can be made public without an edit |
 
-Phases 1–2 are independent of 3–5 and can land in either order; the two axes do not share code
-beyond `lib/common.sh`.
+Phases 1–2 were implemented as separate owners; the combined mode commands now orchestrate both
+without giving either subsystem ownership of the other's settings.
 
 ## §10 Open questions
 
@@ -679,15 +668,15 @@ Recorded rather than guessed at.
    repository is ever meant to carry one.
 2. **Default schedule.** kobito used 01–05, five slots. Keeping it as the default; it is
    `HEINZEL_HOURS` and the plist is generated from it, so changing it is one edit in one place.
-3. **`hzl remote` and the network layer.** macmode assumes Tailscale is already up and does not
-   manage it. Heinzel keeps that boundary for v1: posture touches local settings only.
+3. **`hzl work` and the network layer.** macmode assumes Tailscale is already up and does not
+   manage it. Heinzel keeps that boundary: posture touches local settings only.
 4. **FileVault.** An unexpected reboot during a session strands the machine at the unlock screen,
    unreachable remotely. Nothing Heinzel can do about it; it belongs in the RUNBOOK as the reason
    planned reboots go through `sudo fdesetup authrestart`.
 5. **What happens to `macmode`.** No longer only a tidiness question. Its
    `/etc/sudoers.d/claude-code` carries `Defaults !tty_tickets` and
    `timestamp_timeout=480` — exactly what `heinzel-ticket` carries and what
-   `hzl on` removes for the duration of a session. While that file is
+   a live Heinzel mode removes for the duration of a session. While that file is
    installed, closing ours closes nothing: the window stays open through
    somebody else's file, and §4.3's guarantee does not hold on that machine.
    `hzl doctor` now detects and names this. The sequence is to verify Heinzel's

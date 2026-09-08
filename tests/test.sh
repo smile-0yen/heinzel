@@ -1926,6 +1926,8 @@ V1_DIGEST=$(cksum <"${STATE_FILE}")
 t_eq "a state file with no schema field is v1" 1 "$(state_schema_version)"
 t_eq "and ran on local, the only backend there was when it was written" \
   local "$(state_runtime_backend)"
+t_eq "and predates the mode split, so it reads as work" \
+  work "$(session_operating_mode)"
 
 # Everything a status-shaped read touches, in one go.
 state_get .mode normal >/dev/null
@@ -1939,11 +1941,11 @@ t_eq "reading a v1 file does not migrate it" "${V1_DIGEST}" "$(cksum <"${STATE_F
 t_eq "and it is still read as a real session state, not refused for its age" \
   "expired" "$(printf '%s' "${HZ_REASON}" | cut -d' ' -f1)"
 
-# The same file with the fields `hzl on` now writes.
-jq '. + {schema_version: 2, runtime_backend: "local"}' "${V1_STATE}" \
+# The same file with the fields `hzl work` now writes.
+jq '. + {schema_version: 3, runtime_backend: "local", operating_mode: "work"}' "${V1_STATE}" \
   >"${STATE_FILE}.next" && mv "${STATE_FILE}.next" "${STATE_FILE}"
 t_eq "a file that carries the field is read at that version" \
-  2 "$(state_schema_version)"
+  3 "$(state_schema_version)"
 V2_DIGEST=$(cksum <"${STATE_FILE}")
 state_schema_version >/dev/null
 state_runtime_backend >/dev/null
@@ -1958,20 +1960,84 @@ t_eq "a version that is not a number reads as v1 rather than as itself" \
   1 "$(state_schema_version)"
 
 # A backend key from a build that had more of them: reported, not corrected.
-jq '. + {schema_version: 3, runtime_backend: "herdr"}' "${V1_STATE}" \
+jq '. + {schema_version: 4, runtime_backend: "herdr"}' "${V1_STATE}" \
   >"${STATE_FILE}.next" && mv "${STATE_FILE}.next" "${STATE_FILE}"
 t_eq "a newer schema is read for the fields this build knows, not refused" \
-  3 "$(state_schema_version)"
+  4 "$(state_schema_version)"
 t_eq "and its backend is reported as it stands" herdr "$(state_runtime_backend)"
 
-# What `hzl status --json` puts in the record. A machine that never ran
-# `hzl on` has no state schema, and reporting 1 would be a claim about a file
+# What `hzl status --json` puts in the record. A machine that never ran a live
+# mode has no state schema, and reporting 1 would be a claim about a file
 # that does not exist.
-t_eq "a state file has its schema reported as a number" 3 "$(state_schema_json)"
+t_eq "a state file has its schema reported as a number" 4 "$(state_schema_json)"
 t_eq "and jq takes that value as a JSON scalar" \
-  '{"schema_version":3}' \
+  '{"schema_version":4}' \
   "$(jq -c -n --argjson schema_version "$(state_schema_json)" \
       '{schema_version: $schema_version}')"
+
+group 'combined operating modes'
+
+t_has "the CLI dispatches work mode" "${TEST_ROOT}/bin/hzl" 'work) cmd_work "$@"'
+t_has "the CLI dispatches mobile mode" "${TEST_ROOT}/bin/hzl" 'mobile) cmd_mobile "$@"'
+t_lacks "on is no longer a mode command" "${TEST_ROOT}/bin/hzl" 'on) cmd_on "$@"'
+t_lacks "remote is no longer a mode command" "${TEST_ROOT}/bin/hzl" 'remote) cmd_remote "$@"'
+t_lacks "travel is no longer a mode command" "${TEST_ROOT}/bin/hzl" 'travel) cmd_travel "$@"'
+t_has "the runner consults the mobile battery decision" \
+  "${TEST_ROOT}/bin/hzl-run" 'if session_allows_battery; then'
+t_has "schedule reports with the same battery decision" \
+  "${TEST_ROOT}/bin/hzl" 'elif ! on_ac_power && ! session_allows_battery; then'
+
+# This suite normally stops before the posture gate and therefore does not
+# source lib/posture.sh. A controlled observation lets the composed gate prove
+# the new three-mode matrix without touching a real machine.
+MODE_POSTURE=remote
+posture_now() { printf '%s' "${MODE_POSTURE}"; }
+MODE_EXPIRES=$(( $(now_epoch) + 3600 ))
+MODE_BOOT=$(boot_id_now)
+mode_state() { # operating-mode
+  local json
+  json=$(jq -n \
+    --arg operating_mode "$1" \
+    --arg boot_id "${MODE_BOOT}" \
+    --argjson expires "${MODE_EXPIRES}" \
+    --argjson pid "$$" \
+    '{schema_version: 3, mode: "heinzel", operating_mode: $operating_mode,
+      halt_reason: null, expires_at_epoch: $expires, boot_id: $boot_id,
+      caffeinate_pid: $pid}')
+  state_write "${json}"
+}
+
+mode_state work
+hzl_eval_mode
+t_eq "work is live under remote posture" heinzel "${HZ_MODE}"
+t_false "work does not opt into scheduled battery use" session_allows_battery
+
+MODE_POSTURE=travel
+hzl_eval_mode
+t_eq "work under travel posture fails closed" normal "${HZ_MODE}"
+t_eq "the mismatch names both sides" \
+  "work mode does not match travel posture" "${HZ_REASON}"
+
+mode_state mobile
+hzl_eval_mode
+t_eq "mobile is live under travel posture" heinzel "${HZ_MODE}"
+t_true "mobile opts into scheduled battery use" session_allows_battery
+
+MODE_POSTURE=remote
+hzl_eval_mode
+t_eq "mobile under remote posture fails closed" normal "${HZ_MODE}"
+t_eq "that mismatch also names both sides" \
+  "mobile mode does not match remote posture" "${HZ_REASON}"
+
+mode_state unexpected
+MODE_POSTURE=travel
+hzl_eval_mode
+t_eq "an unknown operating mode fails closed" normal "${HZ_MODE}"
+t_eq "and is not silently treated as work" \
+  "unknown operating mode: unexpected" "${HZ_REASON}"
+
+unset -f posture_now mode_state
+unset MODE_POSTURE MODE_EXPIRES MODE_BOOT
 rm -f "${STATE_FILE}"
 t_eq "with no state file at all there is no schema to report" \
   null "$(state_schema_json)"
@@ -4667,6 +4733,55 @@ cat >"${DB_BACKLOG}" <<'FIXTURE'
 - [ ] (id:h-0001) 待っている仕事
 - [!] (id:h-0002) 人を待っている <!-- blocked:2026-09-08T01:00:00+09:00 reason:実機が要る run:20260908-010000 -->
 FIXTURE
+
+group 'combined mode CLI'
+
+DB_MODE_OUT=${TMPROOT}/mode.out
+hzl_db help >"${DB_MODE_OUT}" 2>&1
+t_has "help presents work mode" "${DB_MODE_OUT}" "hzl work [options]"
+t_has "help presents mobile mode" "${DB_MODE_OUT}" "hzl mobile [options]"
+
+hzl_db on >"${DB_MODE_OUT}" 2>&1
+DB_OLD_RC=$?
+t_fails "the old on command is refused" "${DB_OLD_RC}"
+t_has "and tells the operator to choose a real mode" "${DB_MODE_OUT}" "choose 'hzl work' or 'hzl mobile'"
+
+hzl_db status --json >"${DB_MODE_OUT}" 2>/dev/null
+t_eq "status JSON reports the public off mode" off "$(jq -r .mode "${DB_MODE_OUT}")"
+
+DB_MODE_EXPIRES=$(( $(now_epoch) + 3600 ))
+jq -n \
+  --arg boot_id "$(boot_id_now)" \
+  --argjson expires "${DB_MODE_EXPIRES}" \
+  --argjson pid "$$" \
+  '{schema_version: 3, mode: "heinzel", operating_mode: "work",
+    halt_reason: null, expires_at_epoch: $expires, boot_id: $boot_id,
+    caffeinate_pid: $pid}' >"${DB_HOME}/state.json"
+hzl_db status --json >"${DB_MODE_OUT}" 2>/dev/null
+DB_STATUS_RC=$?
+t_eq "live work status keeps the live exit contract" 10 "${DB_STATUS_RC}"
+t_eq "and reports work as the public mode" work "$(jq -r .mode "${DB_MODE_OUT}")"
+
+jq '.operating_mode = "mobile"' "${DB_HOME}/state.json" >"${DB_HOME}/state.next" &&
+  mv "${DB_HOME}/state.next" "${DB_HOME}/state.json"
+hzl_db status --json >"${DB_MODE_OUT}" 2>/dev/null
+DB_STATUS_RC=$?
+t_eq "live mobile status keeps the live exit contract" 10 "${DB_STATUS_RC}"
+t_eq "and reports mobile as the public mode" mobile "$(jq -r .mode "${DB_MODE_OUT}")"
+rm -f "${DB_HOME}/state.json"
+
+hzl_db work --dry-run --force >"${DB_MODE_OUT}" 2>&1
+t_ok "work dry-run validates without changing posture" "$?"
+t_has "and names the mode it would enter" "${DB_MODE_OUT}" "would enter work mode"
+
+hzl_db mobile --dry-run >"${DB_MODE_OUT}" 2>&1
+t_ok "mobile dry-run does not demand interactive confirmation" "$?"
+t_has "but still carries the battery warning" "${DB_MODE_OUT}" "may drain it while travelling"
+
+hzl_db mobile >"${DB_MODE_OUT}" 2>&1
+DB_MOBILE_RC=$?
+t_fails "non-interactive mobile requires explicit consent" "${DB_MOBILE_RC}"
+t_has "and tells automation how to give it" "${DB_MODE_OUT}" "re-run with --yes"
 
 # JSON before anything else is worth asking: the server hands this to the page
 # verbatim, and a page that cannot parse it shows nothing at all.

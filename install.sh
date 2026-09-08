@@ -60,7 +60,7 @@ Next:
      They must be absolute paths.
   2. hzl doctor          check the setup
   3. hzl install         generate the launchd agent and the permission file
-  4. hzl on --dry-run    see what starting a session would do
+  4. hzl work --dry-run  see what starting normal work mode would do
 
-Nothing runs unattended until you run 'hzl on'.
+Nothing runs unattended until you run 'hzl work' or 'hzl mobile'.
 NEXT

@@ -15,7 +15,7 @@ Three rules that apply throughout:
   defaults to zsh, which does not treat `#` as a comment in an interactive
   shell: it arrives as an argument. Worse, a comment containing parentheses is
   read as a glob qualifier and the command fails without running at all - which
-  is how the first attempt at phase 4 silently skipped `hzl travel`.
+  is how the first attempt at phase 4 silently skipped the posture transition.
 - **Never run any of this with `sudo`.** `hzl` refuses, and the reason is that
   one `sudo hzl` leaves `state.json` owned by root and everything afterwards
   fails to read it. The commands that need privilege ask for it themselves.
@@ -85,7 +85,7 @@ worksheet the runner merges back (SPEC §8.1), so it never needs the ledger, and
 outside the working directory is outside the sandbox — the one boundary a
 subprocess cannot talk its way around. `hzl doctor` warns if they overlap.
 
-`mkdir -p` the scratch directory first — `hzl on` refuses if the working
+`mkdir -p` the scratch directory first — `hzl work` refuses if the working
 directory does not exist, on purpose, because launchd runs with `cwd=/` and a
 missing directory would abort every run at 03:00 instead of now.
 
@@ -157,14 +157,14 @@ EOF
 Start a deliberately small session:
 
 ```sh
-hzl on --duration 1h --max-total 1 --max-tasks 1 --timeout 600 --no-kick
+hzl work --duration 1h --max-total 1 --max-tasks 1 --timeout 600 --no-kick
 ```
 
 Why each flag:
 
 - **Mains power is preferable but no longer required.** Scheduled runs skip on
   battery; `hzl run-now` does not, and warns instead. On battery you need
-  `hzl on --force` to start the session, and then `run-now` works.
+  `hzl work --force` to start the session, and then `run-now` works.
 - `--max-total 1` — one task, so a misbehaving run costs one task's worth.
 - `--timeout 600` — ten minutes, not an hour. If the agent hangs on a denied
   tool call (a behaviour inherited from kobito's notes and never re-verified
@@ -283,7 +283,7 @@ chmod +x /tmp/hzl-stub/claude
 Adjust the id to whichever task is next, then:
 
 ```sh
-hzl on --duration 1h --max-total 1 --timeout 60 --no-kick
+hzl work --duration 1h --max-total 1 --timeout 60 --no-kick
 PATH="/tmp/hzl-stub:$PATH" hzl run-now
 hzl off
 rm -rf /tmp/hzl-stub
@@ -353,8 +353,8 @@ loosening the deny list.
 
 > ## Read this before running anything in this phase
 >
-> **`hzl travel` disconnects remote access to this machine.** It stops screen
-> sharing and blocks all inbound traffic. If you run it over VNC, the session
+> **`hzl off` and `hzl mobile` disconnect remote access to this machine.** They stop screen
+> sharing and block all inbound traffic. If you run one over VNC, the session
 > dies mid-command and you cannot undo it remotely — recovery needs the
 > keyboard.
 >
@@ -362,29 +362,29 @@ loosening the deny list.
 >
 > It also stops any running session first, on purpose.
 
-Posture refuses to do anything until you turn it on deliberately:
+Posture management does nothing until you turn it on deliberately:
 
 ```sh
 # in etc/heinzel.conf
 HEINZEL_POSTURE=1
 ```
 
-Look before you leap — this changes nothing and prints every step:
+Look before you leap — these change nothing and print the live-mode transitions:
 
 ```sh
-hzl travel --dry-run
-hzl remote --dry-run
+hzl work --dry-run
+hzl mobile --dry-run
 ```
 
 Then, at the machine:
 
 ```sh
-hzl travel
+hzl off
 hzl status
 hzl doctor
 ```
 
-`hzl travel` asks for your password, for `pfctl`, `launchctl` and
+`hzl off` asks for your password, for `pfctl`, `launchctl` and
 `sysadminctl`. Expect `posture travel` and screen sharing off in `status`, and
 a component-by-component breakdown in `doctor` section 8.
 
@@ -400,20 +400,20 @@ echo "5900 reachable: $?"
 ```
 
 Expect `Status: Enabled`, a `block drop in all` rule, and a non-zero exit from
-`nc`. This is the check that matters most in this phase: `hzl travel` can
+`nc`. This is the check that matters most in this phase: `hzl off` can
 report success while inbound traffic is still flowing, because `pfctl` cannot
 be read back without root.
 
-Then put it back:
+Then enter normal work mode:
 
 ```sh
-hzl remote
+hzl work --duration 1h --no-kick
 hzl status
 ls /etc/sudoers.d/
 ```
 
-Expect `posture remote`, screen sharing on, and both `heinzel-diag` and
-`heinzel-ticket` present.
+Expect mode `work`, posture `remote`, screen sharing on, `heinzel-diag`
+present, and `heinzel-ticket` absent while the session is live.
 
 Two things worth knowing about the transition:
 
@@ -426,33 +426,37 @@ Two things worth knowing about the transition:
   one is yours, and until you do, the old relaxed ticket policy is still in
   force regardless of what Heinzel thinks.
 
-Then check the interlock that the whole sudo split exists for:
+Then check the interlock and off transition:
 
 ```sh
-hzl on --duration 1h --no-kick
 ls /etc/sudoers.d/
 hzl doctor
 hzl off
 ls /etc/sudoers.d/
 ```
 
-`heinzel-ticket` must be gone after `hzl on` and back after `hzl off`, and
-`doctor` section 8 must not report a defect while the session is live.
+`heinzel-ticket` must be gone during work and remain gone after off because
+off selects travel posture. `doctor` section 8 must not report a defect while
+the session is live.
 
-And the refused cell of the matrix:
+Finally verify mobile at the keyboard:
 
 ```sh
-hzl travel
-hzl on
-hzl remote
+hzl mobile --duration 1h --no-kick
+hzl status
+hzl schedule
+hzl off
 ```
 
-`hzl on` must refuse with exit 1 and an explanation naming the posture.
+`hzl mobile` must warn about battery use and ask for confirmation. After
+confirmation, status must say mode `mobile` and posture `travel`; on battery,
+schedule must say the run is permitted rather than skipped. `hzl off` returns
+to mode `off` with the same closed posture.
 
-> **Evidence 4** — `hzl status` and `hzl doctor` section 8 after `travel` and
-> again after `remote`; the three `pfctl`/`nc` outputs; the two `ls
-> /etc/sudoers.d/` outputs from the interlock check; and the exact refusal
-> message from `hzl on` under travel.
+> **Evidence 4** — `hzl status` and `hzl doctor` section 8 after `off` and
+> again after `work`; the three `pfctl`/`nc` outputs; the two `ls
+> /etc/sudoers.d/` outputs from the interlock check; and the mobile warning,
+> status, and schedule output.
 
 ---
 
@@ -462,8 +466,7 @@ Only after phases 1–3 pass. Point the configuration at real work, or keep the
 scratch directory with a handful of genuine tasks.
 
 ```sh
-hzl remote
-hzl on --duration 10h
+hzl work --duration 10h
 hzl status
 ```
 
@@ -483,7 +486,7 @@ Things to look at specifically:
   window guard failed, which is the thing that keeps runs out of your working
   day.
 - Did the machine stay awake with the lid closed? If it slept, `disablesleep`
-  did not take on this build, and `hzl on` should have warned.
+  did not take on this build, and `hzl work` should have warned.
 - Did the budget hold? `tasks_done_total` must never exceed `max_tasks_total`.
 
 > **Evidence 5** — `notes.md`, `grep -E "skip|abort|HALT|ok" ~/.heinzel/logs/runner.log`,

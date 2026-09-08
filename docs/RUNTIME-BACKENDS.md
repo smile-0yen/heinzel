@@ -74,7 +74,7 @@ Claude/Codex の official integration は native session identity を報告す�
 
 | 用語 | 意味 |
 |---|---|
-| Heinzel work session | `hzl on` から `off` / TTL までの unattended 時間枠と予算単位 |
+| Heinzel work session | `hzl work` / `hzl mobile` から `off` / TTL までの unattended 時間枠と予算単位 |
 | workflow run | 一つの task を完了判定まで進める durable execution |
 | step | executor、reviewer、fixer、verifier など workflow の一段 |
 | attempt | 一つの step の再試行単位 |
@@ -791,7 +791,7 @@ agent から書けない `HEINZEL_HOME` に current state を置く。
 
 既存 day log、`runs.jsonl`、notes は human-facing history として残す。`workflow.json` が recovery の source of truth、`events.jsonl` は監査用とする。JSON update は temp file + rename を使う。
 
-`state.json` は work-session state のまま additive に `schema_version`、`work_session_id`、`runtime_backend` を持つ。旧 file で欠ける場合は v1 / `runtime_backend=local` と解釈し、次の明示的 `hzl on` で新 schema を atomic write する。read-only `status` は migration write を行わない。旧 reader へ rollback した状態で active durable run を再開することは support しない。
+`state.json` は work-session state のまま additive に `schema_version`、`work_session_id`、`runtime_backend` を持つ。旧 file で欠ける場合は v1 / `runtime_backend=local` と解釈し、次の明示的 `hzl work` / `hzl mobile` で新 schema を atomic write する。read-only `status` は migration write を行わない。旧 reader へ rollback した状態で active durable run を再開することは support しない。
 
 既存 `tasks_done_total` は ledger `[x]` commit receipt が成立した時だけ増やし、Herdr `done` や verification pass 前には増やさない。legacy run は従来互換の ledger commit 時点を保つ。新たに outcome 別 counter を追加し、`NEEDS_REVIEW` / failure を strict success と同じ counter に混ぜない。`consecutive_failures` の既存 HALT semantics は compatibility field として維持し、workflow/step retry counter は別に持つ。
 
@@ -830,9 +830,9 @@ controller lease と workspace lease は fencing generation を持つ。prompt�
 work-session command の互換意味は次の通りとする。
 
 - `hzl off`: 最初に新規 dispatch を止め、owned active workflow 全てへ durable cancel intent を書き、停止確認後にだけ claim/lease を解放して成功する。mode を `normal` にしただけでは停止済みと報告しない。
-- `hzl travel`: secure posture/firewall への移行は必ず行い、その前後で `off` と同じ停止 barrier を実行する。停止未確認なら posture は維持したまま非ゼロ終了し、`ORPHANED` を強く通知する。
+- `hzl off`: secure travel posture/firewall への移行は必ず行い、その前に停止 barrier を実行する。停止未確認でも posture は適用し、非ゼロ終了して `ORPHANED` を強く通知する。
 - work-session TTL: 新規 dispatch を止め、その session 所有の active run を deadline cancel する。absolute workflow deadline を restart で延長しない。
-- `hzl on`: active workflow の backend/deadline/budget を上書きしない。active workflow がある work session の再作成または backend 切替は拒否し、`off` / `cancel` を要求する。
+- `hzl work` / `hzl mobile`: active workflow の backend/deadline/budget を上書きしない。active workflow がある work session の再作成または backend 切替は拒否し、`off` / `cancel` を要求する。
 
 controller crash 自体は cancel ではない。active-run marker と durable state を残し、service restart 後に同じ handle を reconcile する。
 
@@ -976,7 +976,7 @@ precedence:
 
 1. CLI `--backend` / `--herdr`
 2. task/workflow definition
-3. live Heinzel work-session state (`hzl on --backend ...`)
+3. live Heinzel work-session state (`hzl work --backend ...`)
 4. `HEINZEL_RUNTIME_BACKEND`
 5. default `local`
 

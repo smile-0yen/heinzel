@@ -92,7 +92,7 @@ if [ "${HZ_MODE}" != heinzel ]; then
   if [ "${TRIGGER}" = manual ]; then
     log_event skip "not in a session: ${HZ_REASON}"
     err "nothing to do: ${HZ_REASON}"
-    err "start a session with 'hzl on' first."
+    err "start a session with 'hzl work' or 'hzl mobile' first."
   elif [ "${HEINZEL_DEBUG:-0}" = 1 ]; then
     log_event skip "not in a session: ${HZ_REASON}"
   fi
@@ -399,12 +399,13 @@ REMAINING=$((MAX_TOTAL - DONE_TOTAL))
 [ "${REMAINING}" -gt 0 ] || skip "session budget spent (${DONE_TOTAL}/${MAX_TOTAL})"
 
 # --- gate 4: power ---------------------------------------------------------
-# Scheduled runs never run on battery: the point of the gate is to stop an
-# unattended machine draining itself overnight. A human who typed `hzl run-now`
-# is standing there and has already made that call, so manual runs are exempt -
-# loudly, not silently.
+# Work-mode scheduled runs never run on battery. Mobile mode is the explicit,
+# confirmed exception, recorded in the session so launchd makes the same
+# decision after the person has left. A manual run is also exempt, loudly.
 if ! on_ac_power; then
-  if [ "${TRIGGER}" = manual ]; then
+  if session_allows_battery; then
+    warn "mobile mode: running on battery ($(battery_pct))"
+  elif [ "${TRIGGER}" = manual ]; then
     warn "running on battery ($(battery_pct)) because you asked for this run explicitly"
   else
     skip "on battery ($(battery_pct))"
@@ -819,6 +820,7 @@ fi
   printf 'workdir  %s\n' "${WORKDIR}"
   printf 'budget   %s task(s) this run, %s/%s this session\n' "${MAX_TASKS}" "${DONE_TOTAL}" "${MAX_TOTAL}"
   printf 'engine   %s %s effort=%s\n' "${HEINZEL_EXECUTOR_ENGINE}" "${HEINZEL_MODEL}" "${HEINZEL_EFFORT}"
+  printf 'mode     %s\n' "$(session_operating_mode)"
   # Written on every run, including the runs where it is on, because "was safe
   # mode on that night?" is a question asked of a log after the fact and the
   # answer has to be in it rather than inferred from the absence of a line.

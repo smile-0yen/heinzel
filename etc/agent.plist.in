@@ -25,7 +25,7 @@ __CALENDAR__
 
   <!-- A run straight after boot would no-op anyway (the boot id will not
        match), and we would rather not run at all than run for nothing.
-       `hzl on` kickstarts explicitly when a human asks for it. -->
+       `hzl work` and `hzl mobile` kickstart explicitly when a human asks. -->
   <key>RunAtLoad</key>
   <false/>
 

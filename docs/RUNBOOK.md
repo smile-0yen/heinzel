@@ -6,49 +6,52 @@ for what is normatively guaranteed see [SPEC.md](SPEC.md).
 ## A night, start to finish
 
 ```sh
-hzl remote                  # machine is on the desk and staying there
-hzl on --duration 10h       # start a session; it expires by itself
+hzl work --duration 10h     # remote posture + work; expires by itself
                             # ... go to bed ...
 hzl status                  # in the morning: what happened
 hzl take                    # what it could not finish, and why
-hzl off                     # stop, and put the sleep settings back
+hzl off                     # stop, restore sleep, and close remote access
 ```
 
-`hzl on` asks for your password once, for one command: `pmset -a disablesleep 1`.
+`hzl work` asks for your password for `pmset -a disablesleep 1` and, when
+posture management is enabled, for the posture transition.
 That is what keeps the machine awake with the lid closed. Nothing else in the
 unattended path uses privilege at all.
 
 ## Before you leave the house
 
 ```sh
-hzl travel
+hzl off
 ```
 
 Closes screen sharing, blocks inbound traffic, turns off wake-on-LAN, sets the
-screen to lock immediately, and removes the relaxed sudo policy. If a session
-is running it is stopped first, and you are told so.
+screen to lock immediately, removes the relaxed sudo policy, and stops any
+session that is running.
 
-You cannot start a session while the machine is in travel posture; `hzl on`
-refuses with an explanation. There is no `--force` for that. Run `hzl remote`
-when the machine is back on the desk.
+If Heinzel really must keep working while it travels, use `hzl mobile`. It
+applies the same closed posture but lets scheduled runs continue on battery,
+so it warns and asks for confirmation. Non-interactive use must say
+`hzl mobile --yes` explicitly. Use `hzl work` when the machine is back on the
+desk.
 
 ## Reading `hzl status`
 
-The `session` line is either `on` with an expiry, or `off` with the reason it
-is off. Every reason maps to exactly one row here:
+The `mode` line is `work` or `mobile` with an expiry, or `off` with the reason.
+Every off reason maps to exactly one row here:
 
 | Reason | What it means | What to do |
 |---|---|---|
-| `no state file (never started)` | Nothing has been started yet | `hzl on` |
+| `no state file (never started)` | Nothing has been started yet | `hzl work` |
 | `state.json is unreadable (permissions - was hzl run under sudo?)` | The state file is owned by root | `sudo chown $(id -un) ~/.heinzel/state.json`, and never run `hzl` under sudo |
-| `state.json is corrupt` | Interrupted write, or hand-edited | `hzl on` rebuilds it |
+| `state.json is corrupt` | Interrupted write, or hand-edited | `hzl work` rebuilds it |
 | `mode is normal` | No session. Nothing is wrong | Nothing |
 | `halted: auth …` | Credentials failed, so runs stopped | Re-authenticate the engine, then `hzl resume` |
 | `halted: consecutive-failures …` | Three failures in a row | Read `hzl logs`, fix the cause, then `hzl resume` |
 | `expired (…) - run 'hzl off', sleep settings are still changed` | The TTL ran out | **Run `hzl off`.** Runs have stopped on their own, but restoring `pmset` needs your password, so it did not happen |
-| `boot session mismatch (rebooted, or an old state file)` | The machine rebooted | `hzl on` again if you still want a session |
-| `the caffeinate marker (pid N) is gone` | The liveness marker died | `hzl on` again. Killing it is also the documented emergency stop |
-| `posture is travel` | The machine is closed up | `hzl remote` if it is back on the desk |
+| `boot session mismatch (rebooted, or an old state file)` | The machine rebooted | `hzl work` again if you still want a session |
+| `the caffeinate marker (pid N) is gone` | The liveness marker died | `hzl work` again. Killing it is also the documented emergency stop |
+| `<mode> mode does not match <posture> posture` | A mode transition partly failed, or an OS setting moved afterwards | Re-run the intended `hzl work`, `hzl mobile`, or `hzl off` transition |
+| `unknown operating mode: …` | The state file was written by an incompatible build or edited | Run `hzl off`, then choose `hzl work` or `hzl mobile` |
 
 The last one is worth knowing on purpose: **killing the `caffeinate` process
 stops all further runs immediately**, without a password and without finding
@@ -58,7 +61,7 @@ this document.
 
 The posture components disagree — usually a transition that half-failed, or a
 setting changed by hand in System Settings. `hzl doctor` section 8 prints each
-component separately. Re-running `hzl travel` or `hzl remote` settles it.
+component separately. Re-running `hzl off`, `hzl work`, or `hzl mobile` settles it.
 
 ## Reading the logs
 
@@ -101,8 +104,8 @@ Nothing in the ledger tells you which run holds a `[~]`; the claim does.
 
 ### `ORPHANED`
 
-`hzl off` exits non-zero, `hzl travel` closes the machine up and then exits
-non-zero, and the runner log has a `HALT` line naming a run. It means a process
+`hzl off` closes the machine up but exits non-zero, and the runner log has a
+`HALT` line naming a run. It means a process
 was asked to stop and **nothing could confirm that it did**. It is not a failure
 and not a success: it is an unanswered question, and until it is answered that
 run's task claims and its writer lease are deliberately kept, so no new run will
@@ -311,7 +314,7 @@ hzl web
 id の採番も run と同じ。
 
 `127.0.0.1` にしか出ない。LaunchAgent ではないのも意図で、backlog を書ける常駐
-サービスは、誰も見ていない時間帯もずっと動き続け、`hzl travel` を通り抜けて
+サービスは、誰も見ていない時間帯もずっと動き続け、`hzl off` を通り抜けて
 listen し続ける唯一のものになる。ページを開いている間だけ開いていればいい。
 
 python3 が要るのはこのコマンドだけで、`hzl doctor` はそう書く。無人で動く経路は
@@ -351,7 +354,7 @@ agent runs with one working directory, and the sandbox that confines it is
 rooted there.
 
 Run `hzl install` after adding a checkout. The agent's permission file names
-every configured workspace and is generated from this value; `hzl on` refuses a
+every configured workspace and is generated from this value; `hzl work` refuses a
 `--workdir` that is not one of them, so the session and the installed rules
 cannot disagree.
 
@@ -362,8 +365,8 @@ name rather than picking one.
 To run a session against only some of them:
 
 ```sh
-hzl on --workdir beta                  # just this one
-hzl on --workdir alpha --workdir beta  # these two, alpha the default
+hzl work --workdir beta                  # just this one
+hzl work --workdir alpha --workdir beta  # these two, alpha the default
 ```
 
 ## When it runs
@@ -395,9 +398,9 @@ become the names of whatever files were nearby. Run `hzl install` after changing
 it — the plist is generated from this value, and so is the runner's own guard.
 
 Every hour means the agent may work while you are at the machine. Nothing else
-changes: it still runs only while a session is on, still refuses on battery,
-still refuses while the posture is `travel`, and still stops at the session
-budget. What it does mean is that it may be writing in the working directory
+changes: it still runs only in `work` or `mobile`, refuses scheduled battery use
+in `work`, requires travel posture in `mobile`, and stops at the session budget.
+What it does mean is that it may be writing in the working directory
 while you are, so `all` suits a checkout the agent owns better than one you are
 also editing.
 

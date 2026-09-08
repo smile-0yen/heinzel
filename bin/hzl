@@ -3,10 +3,11 @@
 #
 # hzl — Heinzel's interactive command line. The only place privilege is used.
 #
-# Two axes, deliberately independent (DESIGN 2):
+# Three public modes combine posture and unattended work (DESIGN 2):
 #
-#   posture   travel | remote    how exposed the machine is
-#   session   on     | off       whether unattended work is running
+#   work     remote posture + session on
+#   off      travel posture + session off
+#   mobile   travel posture + session on (explicit battery consent)
 #
 # Everything here assumes a human is present. The unattended lane is bin/hzl-run
 # and it never calls into this file.
@@ -43,7 +44,7 @@ export PATH="${PATH}:/usr/local/bin:/opt/homebrew/bin:${HOME}/.local/bin"
 . "${HEINZEL_ROOT}/lib/common.sh"
 # shellcheck source=lib/posture.sh
 . "${HEINZEL_ROOT}/lib/posture.sh"
-# The registry, for one reason only: `hzl on` records the session's runtime
+# The registry, for one reason only: a live-mode command records the session's runtime
 # backend in state.json, and a name the registry does not know has to be refused
 # here rather than at 03:00, when the run that reads it aborts and nobody is
 # awake to see why (DESIGN principle 6).
@@ -109,16 +110,16 @@ budget_line() {
 
 # Where the work is, according to whichever source is entitled to say so.
 #
-# A live session owns its paths: `hzl on --backlog X` is a promise for that
+# A live session owns its paths: `hzl work --backlog X` is a promise for that
 # session, and the runner must not be moved out from under it by an edit to
 # `heinzel.conf` at 02:00. Outside a session nothing owns them but the
 # configuration file — and `state.json` keeps a finished session's paths, so
 # reading them unconditionally means an edited `heinzel.conf` is ignored with
-# no sign that it was, until the next `hzl on`. `hzl install` then bakes the
+# no sign that it was, until the next live-mode command. `hzl install` then bakes the
 # stale paths into the agent's permission file, which is the version of this
 # that matters: the deny list ends up naming a backlog nobody uses.
 #
-# `hzl on` writes state before it calls `cmd_install`, so a session's own
+# A live-mode command writes state before it calls `cmd_install`, so a session's own
 # paths are still what gets baked in. That order is load-bearing.
 session_path() {
   local key=$1 fallback=$2 v
@@ -134,7 +135,7 @@ cur_backlog() { session_path .backlog "${DEFAULT_BACKLOG}"; }
 # Every workspace this session may work in, one absolute path per line, in the
 # order that makes the first one the default.
 #
-# A live session owns its list for the same reason it owns its paths: `hzl on
+# A live session owns its list for the same reason it owns its paths: `hzl work
 # --workdir X` is a promise for that session, and an edit to `heinzel.conf` at
 # 02:00 must not add a checkout to a session that was started without it.
 cur_workdirs() {
@@ -147,7 +148,7 @@ cur_workdirs() {
 }
 
 cmd_status() {
-  local json=0 quiet=0 mode rc
+  local json=0 quiet=0 mode operating_mode rc
   while [ $# -gt 0 ]; do
     case $1 in
       --json) json=1 ;;
@@ -159,7 +160,13 @@ cmd_status() {
 
   hzl_eval_mode
   mode=${HZ_MODE}
-  if [ "${mode}" = heinzel ]; then rc=10; else rc=0; fi
+  if [ "${mode}" = heinzel ]; then
+    operating_mode=$(session_operating_mode)
+    rc=10
+  else
+    operating_mode=off
+    rc=0
+  fi
 
   if [ "${json}" = 1 ]; then
     # Reported, never repaired: a v1 file reads as v1 here and stays a v1 file.
@@ -173,7 +180,7 @@ cmd_status() {
     # not depend on the session.
     nxt=$(next_slot_epoch) && next_run=$(iso_at "${nxt}")
     jq -n \
-      --arg mode "${mode}" \
+      --arg mode "${operating_mode}" \
       --argjson schema_version "${schema}" \
       --arg runtime_backend "${backend}" \
       --arg reason "${HZ_REASON}" \
@@ -205,11 +212,11 @@ cmd_status() {
 
   printf '\n'
   if [ "${mode}" = heinzel ]; then
-    field "session" "$(good "on") (expires $(short_at "$(state_get .expires_at_epoch 0)"))"
+    field "mode" "$(good "${operating_mode}") (expires $(short_at "$(state_get .expires_at_epoch 0)"))"
     field "budget" "$(budget_line)"
     field "workdir" "$(workdirs_display "$(cur_workdirs)")"
   else
-    field "session" "off - ${HZ_REASON}"
+    field "mode" "off - ${HZ_REASON}"
   fi
 
   # The other half of "is this doing the right thing". A session that is on
@@ -222,7 +229,7 @@ cmd_status() {
     when="$(short_at "${nxt}") ($(rel_dur $((nxt - $(now_epoch)))))"
     exp_at=$(state_get .expires_at_epoch 0)
     if [ "${mode}" != heinzel ]; then
-      field "next run" "${when} - nothing runs until 'hzl on'"
+      field "next run" "${when} - nothing runs until 'hzl work' or 'hzl mobile'"
     elif [ "${exp_at}" -gt 0 ] &&
          [ $((exp_at - nxt)) -lt "$(state_get .run_timeout_sec "${DEFAULT_RUN_TIMEOUT}")" ]; then
       # Both shapes of the same miss: the slot falls after the session ends, or
@@ -249,7 +256,7 @@ cmd_status() {
   # All four markers, always, even at zero. Three of them was not a shorter
   # version of the same line: `[~]` is a state a task sits in for as long as a
   # run holds it, so leaving it out meant a task the runner had just claimed
-  # left `todo` without arriving anywhere. `hzl on` prints this block and
+  # left `todo` without arriving anywhere. A live-mode command prints this block and
   # launchd starts the run a minute later, which is exactly long enough for
   # "3 todo" and a `next` that finds nothing to look like a contradiction.
   # The counts partition the ledger; that is the property worth reading.
@@ -281,14 +288,21 @@ cmd_status() {
   return ${rc}
 }
 
-# --- session: on -----------------------------------------------------------
+# --- live modes: work and mobile ------------------------------------------
 
-cmd_on() {
+session_start() {
+  local operating_mode=$1
+  shift
   require_not_root
   local duration=${DEFAULT_DURATION} max_tasks=${DEFAULT_MAX_TASKS}
   local max_total=${DEFAULT_MAX_TASKS_TOTAL} timeout=${DEFAULT_RUN_TIMEOUT}
   local backlog=${DEFAULT_BACKLOG} workdir="" wanted=""
-  local use_sudo=1 force=0 kick=1 dry=0
+  local use_sudo=1 force=0 kick=1 dry=0 confirmed=0
+
+  case ${operating_mode} in
+    work|mobile) ;;
+    *) die "internal error: cannot start mode '${operating_mode}'" ;;
+  esac
 
   while [ $# -gt 0 ]; do
     case $1 in
@@ -305,9 +319,10 @@ cmd_on() {
 "; shift ;;
       --no-sudo) use_sudo=0 ;;
       --force) force=1 ;;
+      --yes) confirmed=1 ;;
       --no-kick) kick=0 ;;
       --dry-run) dry=1 ;;
-      *) die "on: unknown option $1" ;;
+      *) die "${operating_mode}: unknown option $1" ;;
     esac
     shift
   done
@@ -333,7 +348,7 @@ cmd_on() {
   # was the sharpest edge in the tool: the agent's permission file is generated
   # by `hzl install` from `DEFAULT_WORKDIR`, so a session pointed somewhere else
   # started, ran, and had every write refused by rules naming a tree it was no
-  # longer in. Refusing here is what makes `hzl on` and the installed rules
+  # longer in. Refusing here is what makes live modes and the installed rules
   # incapable of disagreeing.
   local one resolved configured
   configured=$(abspath_lines "$(workdirs_list)")
@@ -395,18 +410,29 @@ EOF
   runtime_known "${runtime_backend}" ||
     die "HEINZEL_RUNTIME names no runtime backend this build has: '${runtime_backend}' (have: $(runtime_backends | tr '\n' ' ' | sed 's/ *$//'))"
 
-  # 2. Posture. The refused cell of the matrix, and the one refusal with no
-  # --force: this is about where the machine is, and a flag cannot move it.
-  if [ "$(posture_now)" = travel ]; then
-    err "posture is travel - refusing to start an unattended session."
-    err "the machine is closed up (screen sharing off, inbound blocked), which"
-    err "means it is probably in a bag or on an untrusted network."
-    err "run 'hzl remote' first if it is back on the desk."
-    exit 1
+  if [ "${operating_mode}" = work ] && [ "${confirmed}" = 1 ]; then
+    die "work: unknown option --yes"
   fi
 
-  # 3. Power.
-  if ! on_ac_power; then
+  # Mobile is the exceptional choice: it keeps scheduled runs eligible on
+  # battery. The warning is unconditional because a machine plugged in now
+  # may be unplugged after this command returns.
+  if [ "${operating_mode}" = mobile ]; then
+    warn "mobile mode lets scheduled runs continue on battery and may drain it while travelling."
+    if [ "${dry}" = 0 ] && [ "${confirmed}" != 1 ]; then
+      if [ ! -t 0 ]; then
+        die "mobile: confirmation required; re-run with --yes"
+      fi
+      printf 'Continue with mobile mode? [y/N] ' >&2
+      local answer=""
+      IFS= read -r answer
+      case ${answer} in y|Y|yes|YES|Yes) ;; *) die "mobile mode cancelled" ;; esac
+    fi
+  fi
+
+  # Work keeps the old battery rule. Mobile is itself the explicit consent,
+  # and the runner reads the recorded mode so later scheduled runs agree.
+  if [ "${operating_mode}" = work ] && ! on_ac_power; then
     if [ "${force}" = 1 ]; then
       warn "on battery ($(battery_pct)), continuing because --force was given"
       warn "scheduled runs will still skip while on battery; 'hzl run-now' will not"
@@ -415,11 +441,10 @@ EOF
     fi
   fi
 
-  # 4. Restarting an existing session resets the budget; say so rather than
-  # letting the counter quietly go back to zero.
-  if [ "$(effective_mode)" = heinzel ]; then
-    warn "a session is already running - reconfiguring it"
-    warn "tasks completed so far ($(state_get .tasks_done_total 0)) will be reset to 0"
+  # Switching between live modes is a real stop/start transition. The old
+  # session is stopped below, after dry-run has had its early return.
+  if [ "$(state_get .mode normal)" = heinzel ]; then
+    warn "a session is already configured - it will be stopped before entering ${operating_mode} mode"
   fi
 
   local now expires slots
@@ -436,8 +461,13 @@ EOF
   [ "${todo}" -eq 0 ] && warn "the backlog has no todo items - runs will do nothing"
 
   if [ "${dry}" = 1 ]; then
+    case ${operating_mode} in
+      work) mode_apply_posture remote 1 1 || return 1 ;;
+      mobile) mode_apply_posture travel 0 1 || return 1 ;;
+    esac
     printf '\n'
-    say "would start a session:"
+    say "would enter ${operating_mode} mode:"
+    field "mode" "${operating_mode}"
     field "expires" "$(short_at "${expires}") (${duration})"
     field "budget" "${max_total} tasks total, ${max_tasks} per run, ${timeout}s wall clock"
     field "workdir" "$(workdirs_display "${workdir}")"
@@ -447,6 +477,20 @@ EOF
     printf '\n'
     return 0
   fi
+
+  # A live mode owns both sides of the transition. Stop any prior session
+  # before changing posture so work -> mobile cannot strand a runner behind a
+  # newly closed firewall, and mobile -> work cannot reset a live budget.
+  if [ "$(state_get .mode normal)" = heinzel ]; then
+    local stop_rc=0
+    session_stop || stop_rc=$?
+    [ "${stop_rc}" -eq 0 ] || return "${stop_rc}"
+  fi
+
+  case ${operating_mode} in
+    work) mode_apply_posture remote 1 0 || return 1 ;;
+    mobile) mode_apply_posture travel 0 0 || return 1 ;;
+  esac
 
   # 6. The liveness marker. Started before the privileged step so that a
   # cancelled password prompt has something to roll back to. No -d: the lid is
@@ -494,6 +538,7 @@ EOF
   state=$(jq -n \
     --argjson schema_version "${HEINZEL_STATE_SCHEMA}" \
     --arg runtime_backend "${runtime_backend}" \
+    --arg operating_mode "${operating_mode}" \
     --arg activated_at "$(iso_at "${now}")" \
     --argjson activated_at_epoch "${now}" \
     --arg expires_at "$(iso_at "${expires}")" \
@@ -512,7 +557,7 @@ EOF
     --argjson sudo_used "$([ "${use_sudo}" = 1 ] && echo true || echo false)" \
     --argjson ticket_suspended "${ticket_suspended}" \
     '{schema_version: $schema_version, runtime_backend: $runtime_backend,
-      mode: "heinzel",
+      mode: "heinzel", operating_mode: $operating_mode,
       activated_at: $activated_at, activated_at_epoch: $activated_at_epoch,
       expires_at: $expires_at, expires_at_epoch: $expires_at_epoch,
       duration: $duration, boot_id: $boot_id,
@@ -541,8 +586,12 @@ EOF
       warn "could not kickstart the agent; it will still fire on schedule"
   fi
 
-  log_event ok "session on until $(iso_at "${expires}") budget=${max_total} workdir=$(oneline "${workdir}")"
-  cmd_status
+  log_event ok "mode=${operating_mode} until $(iso_at "${expires}") budget=${max_total} workdir=$(oneline "${workdir}")"
+  local status_rc=0
+  cmd_status || status_rc=$?
+  # A live status exits 10 for scripts; successfully entering a mode exits 0.
+  [ "${status_rc}" -eq 10 ] && status_rc=0
+  return "${status_rc}"
 }
 
 # --- session: off ----------------------------------------------------------
@@ -606,7 +655,7 @@ off_orphan() { # run-id why
   log_event HALT "run ${r} is ORPHANED after 'hzl off': ${why}"
 }
 
-cmd_off() {
+session_stop() {
   require_not_root
   local unload=0 use_sudo=1
   while [ $# -gt 0 ]; do
@@ -698,15 +747,6 @@ EOF
     rm -f "${CAFFEINATE_PID_FILE}"
   fi
 
-  # 5. Reopen the sudo ticket window if this session closed it and the machine
-  # is still on the desk.
-  if [ "$(state_get .ticket_suspended false)" = true ] && [ "${HEINZEL_POSTURE}" = 1 ]; then
-    if [ "$(posture_sudoers)" = remote ]; then
-      posture_install_sudoers ticket && say "the relaxed sudo ticket window is open again"
-    fi
-    with_backlog_lock state_update '.ticket_suspended = false' >/dev/null 2>&1
-  fi
-
   [ "${unload}" = 1 ] && cmd_uninstall --quiet
 
   printf '\n'
@@ -786,87 +826,61 @@ cmd_set() {
   good "${key} = ${val}"
 }
 
-# --- posture ---------------------------------------------------------------
+# --- combined modes --------------------------------------------------------
 
-posture_guard() {
-  [ "${HEINZEL_POSTURE}" = 1 ] || {
-    err "posture management is off."
-    err "these commands change screen sharing, the packet filter, wake-on-LAN,"
-    err "the screen lock delay and sudo policy. Review etc/heinzel.conf.example,"
-    err "then set HEINZEL_POSTURE=1 in etc/heinzel.conf to enable them."
-    exit 1
-  }
+# Apply the OS half of a mode when posture management is enabled. It remains
+# opt-in because these settings can disconnect remote access; with it disabled
+# the session half still works and status reports the posture as unmanaged.
+mode_apply_posture() { # travel|remote allow-ticket dry-run
+  local want=$1 allow_ticket=$2 dry=$3
+  if [ "${HEINZEL_POSTURE}" != 1 ]; then
+    if [ "${dry}" = 1 ]; then
+      dim "posture management is off; OS posture would remain unmanaged."
+    else
+      dim "posture management is off; OS posture remains unmanaged."
+    fi
+    return 0
+  fi
+
+  POSTURE_DRY_RUN=${dry}
+  if posture_apply "${want}" "${allow_ticket}"; then
+    if [ "${dry}" = 1 ]; then
+      good "${want} posture would be applied."
+    else
+      good "${want} posture applied."
+    fi
+    return 0
+  fi
+  bad "${want} posture applied with ${POSTURE_FAILED} problem(s) - see above."
+  return 1
 }
 
-cmd_travel() {
+cmd_work() {
+  session_start work "$@"
+}
+
+cmd_mobile() {
+  session_start mobile "$@"
+}
+
+cmd_off() {
   require_not_root
-  posture_guard
-  local dry=0
-  while [ $# -gt 0 ]; do
-    case $1 in
-      --dry-run) dry=1 ;;
-      *) die "travel: unknown option $1" ;;
-    esac
-    shift
-  done
-  POSTURE_DRY_RUN=${dry}
 
-  # A live session cannot survive travel, and leaving one running would keep
-  # firing runs from a bag. Stop it first, and say so (DESIGN 2.2).
-  local stop_rc=0
-  if [ "${dry}" = 0 ] && [ "$(effective_mode)" = heinzel ]; then
-    say "a session is running; stopping it before closing the machine up."
-    cmd_off || stop_rc=$?
-  fi
+  # Stop first, but close the machine up even when a runner cannot be
+  # confirmed gone. An inbound firewall left open is the worse failure; the
+  # non-zero stop status is still returned so ORPHANED is never called success.
+  local stop_rc=0 posture_rc=0
+  session_stop "$@" || stop_rc=$?
+  mode_apply_posture travel 0 0 || posture_rc=$?
 
-  if posture_apply travel; then
-    good "travel posture applied."
-  else
-    bad "travel posture applied with ${POSTURE_FAILED} problem(s) - see above."
-  fi
-  [ "${dry}" = 0 ] && cmd_status
-
-  # The posture change is never skipped and never rolled back: a machine going
-  # into a bag is closed up whatever the runner did, and a firewall left open
-  # because a process would not die is the worse of the two failures. But a stop
-  # that could not be confirmed is not reported as a success — travel exits
-  # non-zero with the posture applied and the run named (§14.4).
   if [ "${stop_rc}" -ne 0 ]; then
     printf '\n'
-    bad "the machine is closed up, but a run could not be confirmed stopped."
+    bad "off mode closed the machine up, but a run could not be confirmed stopped."
     err "it is ORPHANED and still owns its checkout - see the message above."
     return "${stop_rc}"
   fi
-  return 0
-}
-
-cmd_remote() {
-  require_not_root
-  posture_guard
-  local dry=0
-  while [ $# -gt 0 ]; do
-    case $1 in
-      --dry-run) dry=1 ;;
-      *) die "remote: unknown option $1" ;;
-    esac
-    shift
-  done
-  POSTURE_DRY_RUN=${dry}
-
-  # The ticket window stays shut while unattended work is running.
-  local allow_ticket=1
-  [ "$(effective_mode)" = heinzel ] && allow_ticket=0
-
-  if posture_apply remote "${allow_ticket}"; then
-    good "remote posture applied."
-  else
-    bad "remote posture applied with ${POSTURE_FAILED} problem(s) - see above."
-  fi
-  if [ "${dry}" = 0 ]; then
-    cmd_status
-    [ "${allow_ticket}" = 1 ] &&
-      dim "  for sudo that writes, run 'sudo -v' once in a Terminal (${HEINZEL_TICKET_TIMEOUT:-480} min ticket)"
-  fi
+  [ "${posture_rc}" -eq 0 ] || return "${posture_rc}"
+  good "off mode applied."
   return 0
 }
 
@@ -929,7 +943,7 @@ cmd_next() {
   row=$(backlog_next_row "${b}")
   # `backlog_next_row` only ever returns a `[ ]`, so "empty" here is both "the
   # ledger is finished" and "a run has claimed everything that was left".
-  # Reporting the first when the second is true is how a `hzl on` that says
+  # Reporting the first when the second is true is how a `hzl work` that says
   # 3 todo and a `hzl next` a minute later that says nothing to do end up
   # looking like they disagree about the same file.
   [ -n "${row}" ] || { next_in_progress "${b}"; return 0; }
@@ -1496,7 +1510,7 @@ cmd_doctor() {
       # doctor diagnoses, it does not migrate.
       doc_ok "state.json is valid (schema v$(state_schema_version), runtime backend $(state_runtime_backend))"
     else
-      doc_bad "state.json is corrupt - 'hzl on' will rebuild it"
+      doc_bad "state.json is corrupt - 'hzl work' or 'hzl mobile' will rebuild it"
     fi
     local owner
     owner=$(stat -f '%Su' "${STATE_FILE}" 2>/dev/null)
@@ -1507,7 +1521,7 @@ cmd_doctor() {
     doc_warn "no state file yet"
   fi
   if [ "${mode}" = heinzel ]; then
-    doc_ok "session on, expires $(short_at "$(state_get .expires_at_epoch 0)"), $(budget_line)"
+    doc_ok "$(session_operating_mode) mode, expires $(short_at "$(state_get .expires_at_epoch 0)"), $(budget_line)"
   else
     doc_ok "session off (${HZ_REASON})"
   fi
@@ -1518,7 +1532,13 @@ cmd_doctor() {
   fi
 
   printf '\n5. power and sleep\n'
-  if on_ac_power; then doc_ok "on AC power"; else doc_warn "on battery ($(battery_pct)) - runs will skip"; fi
+  if on_ac_power; then
+    doc_ok "on AC power"
+  elif [ "${mode}" = heinzel ] && session_allows_battery; then
+    doc_warn "on battery ($(battery_pct)) - mobile mode allows scheduled runs"
+  else
+    doc_warn "on battery ($(battery_pct)) - scheduled runs will skip"
+  fi
   if [ "${mode}" != heinzel ] && [ "$(sleep_disabled)" = 1 ]; then
     doc_bad "sleep is suppressed with no session running - run 'hzl off' to restore it"
   else
@@ -1543,11 +1563,11 @@ cmd_doctor() {
         doc_bad "workspace ${w} is inside ${HEINZEL_HOME} - the agent is denied all of it"
         printf '       %s holds state.json, the lock and the logs. An agent working\n' "${HEINZEL_HOME}"
         printf '       there can write nothing, and the run looks like a capable agent failing.\n'
-        printf "       point DEFAULT_WORKDIR at the code you want worked on. 'hzl on' refuses this.\n"
+        printf "       point DEFAULT_WORKDIR at the code you want worked on. 'hzl work' refuses this.\n"
       elif [ ! -d "${w}" ]; then
         doc_bad "workspace ${w} does not exist"
         printf '       create it, or take it out of DEFAULT_WORKDIR.\n'
-        printf "       'hzl on' refuses to start without it, because launchd runs with cwd=/\n"
+        printf "       'hzl work' refuses to start without it, because launchd runs with cwd=/\n"
       else
         ws_ok=$((ws_ok + 1))
         if [ "${first}" = 1 ]; then
@@ -1583,8 +1603,8 @@ EOF
     if [ -r "${b}" ]; then
       doc_ok "${b}: $(backlog_count "${b}" " ") todo, $(backlog_count "${b}" "~") in progress, $(backlog_count "${b}" x) done, $(ledger_count "${b}" "!") blocked"
     else
-      # Not a fault: `hzl on` creates it from a template.
-      doc_warn "no backlog at ${b} yet - 'hzl on' will create it"
+      # Not a fault: a live-mode command creates it from a template.
+      doc_warn "no backlog at ${b} yet - 'hzl work' will create it"
     fi
   fi
 
@@ -1642,7 +1662,7 @@ EOF
       done
       if [ -n "${leaky}" ]; then
         doc_bad "another sudoers file keeps a ticket window open: ${leaky}"
-        printf '       hzl on removes its own heinzel-ticket, but these grant the same thing,\n'
+        printf '       a live work/mobile mode removes its own heinzel-ticket, but these grant the same thing,\n'
         printf '       so the write-capable sudo window is NOT closed during a session.\n'
       elif sudo -n true 2>/dev/null; then
         doc_ok "no other sudoers file grants a ticket window (${others})"
@@ -1817,7 +1837,7 @@ cmd_install() {
   # filesystem rather than about nothing.
   bl=$(cur_backlog)
   [ -n "${bl}" ] || die "no backlog configured - set DEFAULT_BACKLOG in etc/heinzel.conf"
-  # Through abspath, exactly as `on` stores it. Without this, installing before
+  # Through abspath, exactly as a live mode stores it. Without this, installing before
   # the first session writes allow rules for /tmp/x while the agent runs in
   # /private/tmp/x, and the rules match nothing. Every workspace, not the first:
   # a rule that matches nothing is silent, and it would be silent for whichever
@@ -2157,7 +2177,7 @@ EOF
 # runs unattended and is confined for it; this is a window a person opens while
 # they are sitting there, and the moment it becomes a service it is a service
 # that can write the backlog, running all day, whether or not anyone is looking.
-# `hzl travel` closes inbound access to this machine — a resident web server
+# `hzl off` closes inbound access to this machine — a resident web server
 # would be the one thing that stayed listening through it.
 #
 # python3 is the only new dependency in the whole program, and it is confined
@@ -2305,7 +2325,7 @@ cmd_schedule() {
   if [ "${loaded}" != 1 ]; then
     verdict="$(bad no) - the launch agent is not loaded; run 'hzl install'"
   elif [ "${live}" != 1 ]; then
-    verdict="$(bad no) - ${HZ_REASON}; start a session with 'hzl on'"
+    verdict="$(bad no) - ${HZ_REASON}; use 'hzl work' or 'hzl mobile'"
   elif [ -n "${next}" ] && [ "${expires}" -gt 0 ] && [ "${next}" -ge "${expires}" ]; then
     verdict="$(bad no) - the session expires $(short_at "${expires}"), before that slot"
   elif [ -n "${next}" ] && [ "${expires}" -gt 0 ] && [ $((expires - next)) -lt "${to}" ]; then
@@ -2316,8 +2336,10 @@ cmd_schedule() {
     verdict="$(bad no) - only $((expires - next))s of session left at that slot, and a run is given ${to}s"
   elif [ "$(state_get .tasks_done_total 0)" -ge "$(state_get .max_tasks_total 0)" ]; then
     verdict="$(bad no) - the session budget is spent ($(budget_line))"
-  elif ! on_ac_power; then
+  elif ! on_ac_power && ! session_allows_battery; then
     verdict="$(bad "not while on battery") ($(battery_pct)) - scheduled runs skip; 'hzl run-now' does not"
+  elif ! on_ac_power; then
+    verdict="$(good yes) - mobile mode permits battery use ($(battery_pct)), unless the backlog is empty or the machine is asleep"
   else
     # Everything knowable now is open. What is left is knowable only then: an
     # empty backlog, a sleeping machine, a run still holding the lease.
@@ -2335,7 +2357,7 @@ cmd_schedule() {
     field "backlog" "$(state_get .backlog "")"
   else
     # The defaults, labelled as defaults: outside a session these are what the
-    # next `hzl on` would start with, not what anything is running under.
+    # next `hzl work` would start with, not what anything is running under.
     printf '\nwhat the next session will start with\n'
     field "session length" "${DEFAULT_DURATION}"
     field "tasks per session" "${DEFAULT_MAX_TASKS_TOTAL}"
@@ -2361,16 +2383,10 @@ cmd_schedule() {
 
 usage() {
   cat <<USAGE
-hzl ${HEINZEL_VERSION} - unattended backlog work, and a machine that knows
-whether it is at home or on the road.
+hzl ${HEINZEL_VERSION} - unattended backlog work in one of three modes.
 
-posture (needs a human at the machine)
-  hzl travel [--dry-run]     close the machine up: screen sharing off, inbound
-                             blocked, wake-on-LAN off, sudo policy reset
-  hzl remote [--dry-run]     open it back up for remote use
-
-session (unattended work)
-  hzl on [options]           start a session. Options:
+modes
+  hzl work [options]         remote posture + unattended work. Options:
                                --duration 10h     TTL, max 24h
                                --max-total N      tasks for the whole session
                                --max-tasks N      tasks per run
@@ -2383,8 +2399,15 @@ session (unattended work)
                                --no-sudo          do not suppress sleep
                                --no-kick          do not run one immediately
                                --dry-run          say what would happen
-  hzl off [--unload]         stop it and restore what it changed. Exits non-zero
-                             if a run could not be confirmed stopped
+  hzl mobile [options]       travel posture + unattended work. Accepts the
+                             work options above, plus:
+                               --yes              confirm battery use without
+                                                  an interactive prompt
+  hzl off [--unload]         stop work, restore sleep, and apply travel posture.
+                             Exits non-zero if a run could not be confirmed
+                             stopped
+
+session controls
   hzl resume                 clear a halt
   hzl set [key N]            show or change limits mid-session
   hzl run-now [--dry-run]    run once now, ignoring the schedule window
@@ -2439,12 +2462,23 @@ case ${cmd} in
   add) cmd_add "$@" ;;
   dashboard) cmd_dashboard "$@" ;;
   web) cmd_web "$@" ;;
-  on) cmd_on "$@" ;;
+  work) cmd_work "$@" ;;
+  mobile) cmd_mobile "$@" ;;
   off) cmd_off "$@" ;;
   resume) cmd_resume "$@" ;;
   set) cmd_set "$@" ;;
-  travel) cmd_travel "$@" ;;
-  remote) cmd_remote "$@" ;;
+  on)
+    err "'hzl on' was replaced; choose 'hzl work' or 'hzl mobile'."
+    exit 1
+    ;;
+  remote)
+    err "'hzl remote' was replaced by 'hzl work'."
+    exit 1
+    ;;
+  travel)
+    err "'hzl travel' was replaced by 'hzl off'."
+    exit 1
+    ;;
   next) cmd_next "$@" ;;
   take) cmd_take "$@" ;;
   done) cmd_done "$@" ;;

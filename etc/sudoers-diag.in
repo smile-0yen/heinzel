@@ -1,9 +1,9 @@
 # Heinzel - read-only diagnostics, no password. Managed by hzl(1).
-# Installed while posture is `remote`, removed by `hzl travel`.
+# Installed while posture is `remote`, removed by `hzl off` or `hzl mobile`.
 #
 # Every command here is read-only. Nothing in this file can change the system,
 # which is why it is safe to leave in place while an unattended session runs.
-# The write-capable half lives in sudoers-ticket and is suspended by `hzl on`.
+# The write-capable half lives in sudoers-ticket and is suspended by a live mode.
 
 Cmnd_Alias HEINZEL_DIAG = /usr/sbin/lsof, \
                           /usr/bin/pmset -g, \

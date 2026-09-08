@@ -29,7 +29,7 @@ FW=/usr/libexec/ApplicationFirewall/socketfilterfw
 # --- observation -----------------------------------------------------------
 
 # The launchd job's own enable/disable state survives reboots, which is what
-# `hzl travel` relies on. Port 5900 tells us whether it is actually up now.
+# `hzl off` and `hzl mobile` rely on. Port 5900 tells us whether it is actually up now.
 posture_screensharing() {
   local disabled
   disabled=$(launchctl print-disabled system 2>/dev/null |

@@ -70,16 +70,16 @@ runtime_backends() {
 # The backend this run goes to: the one the session promised, and only failing
 # that the one the environment asks for.
 #
-# The session's answer comes first because `hzl on` recorded it while someone
+# The session's answer comes first because its live-mode command recorded it while someone
 # was there to choose it, and the run that keeps that promise starts at 03:00
 # from launchd — which passes a minimal environment and none of ours
 # (docs/SPEC.md §9.0, §14). `HEINZEL_RUNTIME` read at that moment could only
 # ever say `local`, whatever the session asked for, and the run would then
 # record a backend it had not used. So the environment variable is what selects
 # a backend when there is no session to have selected one: a run started by
-# hand, or a `hzl on` choosing what to write down in the first place.
+# hand, or a live-mode command choosing what to write down in the first place.
 #
-# The key is not validated here. `hzl on` refuses one the registry does not
+# The key is not validated here. Live-mode commands refuse one the registry does not
 # know, and `runtime_run_batch` refuses it again at the moment of use — a state
 # file written by a build that had a backend this one does not must fail the
 # run, not fall back to the backend that happens to be here.

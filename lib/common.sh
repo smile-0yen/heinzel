@@ -11,7 +11,7 @@
 # Multibyte truncation is locale-dependent (DESIGN 6.3). Fix it once, here.
 export LC_CTYPE=UTF-8
 
-HEINZEL_VERSION="0.3.24"
+HEINZEL_VERSION="0.3.25"
 
 # The TTL ceiling is deliberately not configurable. A session that can be
 # created with an unbounded lifetime is not a session, it is a mode.
@@ -30,7 +30,7 @@ MAX_DURATION_SEC=86400
 #     where it lies. Nothing migrates a file on the way past. `hzl status` is
 #     read-only, and a status command that rewrote the state file would make a
 #     rollback to the previous build unreadable — for a field it only printed.
-HEINZEL_STATE_SCHEMA=2
+HEINZEL_STATE_SCHEMA=3
 HEINZEL_RESULT_SCHEMA=2
 HEINZEL_RUN_RECORD_SCHEMA=2
 
@@ -419,7 +419,7 @@ hzl_validate_conf() {
   # Workspaces: shape only, and deliberately not existence. This function runs
   # before every command, and a checkout that is on an unmounted disk this
   # morning must not stop `hzl status` from answering questions about the
-  # session. `hzl on` refuses to start without the directory and `hzl doctor`
+  # session. Live-mode commands refuse to start without the directory and `hzl doctor`
   # reports each one; those are the places where a missing directory matters.
   #
   # Empty is allowed here too, for the same reason: a fresh install has no
@@ -655,7 +655,7 @@ workdir_name() { # path -> name
 # The path of a named workspace within a given set, or nothing and non-zero.
 #
 # The set is passed in rather than read from configuration because the question
-# is almost always about a *session's* workspaces, which are what `hzl on`
+# is almost always about a *session's* workspaces, which are what a live-mode command
 # recorded and not what `heinzel.conf` says this morning. The runner resolves a
 # task's `(dir:)` through this and so does `hzl next`, so the two cannot
 # disagree about which checkout a task is headed for.
@@ -699,7 +699,7 @@ EOF
 }
 
 # name -> the absolute path, or nothing and non-zero. The lookup a task's
-# `(dir:)` goes through, and the one `hzl on --workdir` goes through.
+# `(dir:)` goes through, and the one `hzl work --workdir` goes through.
 workdir_of_name() {
   local want=$1 p
   [ -n "${want}" ] || return 1
@@ -833,7 +833,7 @@ last_run_started_epoch() {
   printf '%s' "${v}"
 }
 
-# How many scheduled slots fall between now and a deadline. `on` uses this to
+# How many scheduled slots fall between now and a deadline. Live modes use this to
 # warn that a TTL will expire before anything can possibly run.
 slots_within() {
   local until=$1 n=0 probe h hh
@@ -907,7 +907,7 @@ rel_dur() {
 # Read one field, given a jq path. The jq `//` operator must never be used
 # here: `false // $d` yields $d, so every boolean field would silently read as
 # its default.
-# The session's workspaces, one absolute path per line, in the order `hzl on`
+# The session's workspaces, one absolute path per line, in the order a live mode
 # recorded them.
 #
 # A state file written by a build before this one carries a single `.workdir`
@@ -980,7 +980,7 @@ state_schema_version() {
 
 # The same value as a JSON scalar, for the records that report it: a number
 # when there is a file to have a schema, and null when there is none. A machine
-# that never ran `hzl on` has no state schema, and saying `1` there would be a
+# that never ran a live mode has no state schema, and saying `1` there would be a
 # claim about a file that does not exist.
 state_schema_json() {
   if [ -r "${STATE_FILE}" ]; then
@@ -1020,6 +1020,22 @@ state_write() {
 HZ_MODE=""
 HZ_REASON=""
 
+# The public mode of a live session. Files written before v0.3.25 have no such
+# field and describe the only live mode that existed then, which is `work`.
+# An unknown value is kept visible to the composed gate below rather than
+# silently rounded to work: hand-edited state must fail closed.
+session_operating_mode() {
+  state_get .operating_mode work
+}
+
+# `mobile` is the explicit decision to spend battery on scheduled runs. Work
+# sessions keep the old rule: a manual run may continue, a scheduled one may
+# not. Keeping this predicate here gives the CLI, runner and schedule one
+# spelling of that decision.
+session_allows_battery() {
+  [ "$(session_operating_mode)" = mobile ]
+}
+
 # Sets HZ_MODE and HZ_REASON. It assigns rather than prints because a caller
 # that wraps this in $( ) runs it in a subshell, and the reason string set
 # there would be discarded - which is exactly how `status` came to report a
@@ -1027,7 +1043,7 @@ HZ_REASON=""
 hzl_eval_mode() {
   HZ_MODE=normal
   HZ_REASON=""
-  local v now exp saved_boot
+  local v now exp saved_boot operating_mode posture
 
   if [ ! -e "${STATE_FILE}" ]; then
     HZ_REASON="no state file (never started)"
@@ -1076,11 +1092,26 @@ hzl_eval_mode() {
     HZ_MODE=normal; return
   fi
 
-  # Gate 7: where the machine is, not what state it is in. The runner's AC gate
-  # catches the bag; this one catches the cafe.
-  if [ "$(posture_now)" = travel ]; then
-    HZ_REASON="posture is travel"
-    HZ_MODE=normal; return
+  # Gate 7: the observed posture has to match the mode that opened the
+  # session. Posture management remains opt-in; when it is disabled there is
+  # no OS posture for Heinzel to claim it has observed.
+  operating_mode=$(session_operating_mode)
+  case ${operating_mode} in
+    work|mobile) ;;
+    *)
+      HZ_REASON="unknown operating mode: ${operating_mode}"
+      HZ_MODE=normal; return
+      ;;
+  esac
+  posture=$(posture_now)
+  if [ "${posture}" != unmanaged ]; then
+    case ${operating_mode}:${posture} in
+      work:remote|mobile:travel) ;;
+      *)
+        HZ_REASON="${operating_mode} mode does not match ${posture} posture"
+        HZ_MODE=normal; return
+        ;;
+    esac
   fi
 
   HZ_MODE=heinzel

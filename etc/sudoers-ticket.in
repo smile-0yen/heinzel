@@ -5,7 +5,7 @@
 # once and keep working remotely.
 #
 # This is a standing, write-capable sudo window. It is installed only while
-# posture is `remote`, and `hzl on` removes it for the duration of an
+# posture is `remote`, and a live work/mobile mode removes it for the duration of an
 # unattended session (DESIGN 4.3). `hzl doctor` reports its presence during a
 # session as a defect, because the only way to get there is a failed restore.
 

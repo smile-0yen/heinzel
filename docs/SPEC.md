@@ -14,7 +14,8 @@ Version: 0.1.0-dev. Target: macOS, `/bin/bash` 3.2.
 | Term | Meaning |
 |---|---|
 | posture | How exposed the machine is: `travel`, `remote`, `mixed`, `unmanaged`. Observed, never stored |
-| session | A period of unattended work, from `hzl on` to `hzl off` or TTL expiry. The unit the budget is counted over |
+| operating mode | One of `work`, `off`, or `mobile`; the public combination of posture and session state |
+| session | A period of unattended work, from `hzl work`/`hzl mobile` to `hzl off` or TTL expiry. The unit the budget is counted over |
 | run | One firing of the runner, up to one engine call |
 | slot | A scheduled time at which launchd starts the runner |
 | no-op | Started, found a closed gate, exited without calling an engine |
@@ -100,12 +101,11 @@ Privileged subcommands escalate internally.
 |---|---|---|
 | `status` | `--json`, `--quiet` | **0** no session, **10** session live, 1 error |
 | `schedule` | — | 0 / 1 |
-| `on` | `--duration --max-tasks --max-total --timeout --backlog --workdir --no-sudo --force --no-kick --dry-run` | 0 / 1 |
+| `work` | `--duration --max-tasks --max-total --timeout --backlog --workdir --no-sudo --force --no-kick --dry-run` | 0 / 1 |
+| `mobile` | the `work` arguments plus `--yes` | 0 / 1 |
 | `off` | `--unload --no-sudo` | 0 / 1 |
 | `resume` | — | 0 / 1 |
 | `set` | `[max-total\|max-tasks\|timeout] N` | 0 / 1 |
-| `travel` | `--dry-run` | 0 / 1 |
-| `remote` | `--dry-run` | 0 / 1 |
 | `add` | `--priority N`, `--dir NAME`, `<text>` | 0 / 1 / **4** already in the ledger |
 | `next` | — | 0 / 1 |
 | `take` | `[id]` | 0 / 1 / **3** no such id |
@@ -131,8 +131,8 @@ says which half stands and what to run to finish it. A sweep that failed prints
 the same count as a sweep with nothing to do, so callers read the status and not
 only the number (§8).
 
-`on --workdir` is **repeatable** and takes a configured workspace, by name or
-by path; each occurrence adds one and the first is that session's default. It
+`work --workdir` and `mobile --workdir` are **repeatable** and take a configured
+workspace, by name or by path; each occurrence adds one and the first is that session's default. It
 **must** name a workspace `DEFAULT_WORKDIR` lists, and is refused otherwise.
 Given none, the session gets every configured workspace. An arbitrary path used
 to be accepted, and was the sharpest edge in the tool: `hzl install` generates
@@ -165,10 +165,13 @@ the code. `status --json` carries the same next-slot time as `next_run`.
 `--quiet` produces the code and no output. They answer different questions —
 `status` whether the machine is doing the right thing, `report` whether anything
 is waiting on you — and 10 means "yes" to whichever was asked.
+`status --json` exposes the public `mode` as `work`, `mobile`, or `off`; the
+internal `state.mode` remains the liveness request described in §4.
 
-### 3.1 `hzl on` — order of operations
+### 3.1 `hzl work` and `hzl mobile` — order of operations
 
-Fail-fast, and anything that fails rolls back what came before it.
+The two live modes share session setup. `work` selects remote posture; `mobile`
+selects travel posture and records the explicit battery decision.
 
 1. Refuse if running as root.
 2. Validate arguments. `--duration` ∈ [60s, 24h]; `--max-*` ≥ 1;
@@ -179,9 +182,14 @@ Fail-fast, and anything that fails rolls back what came before it.
    one of them, and not only the first: a checkout that has moved is a class of
    tasks that cannot be worked, and the run that would otherwise find out is
    whichever one a task naming it eventually reaches, which could be weeks.
-3. **Refuse if posture is `travel`.** No override exists.
-4. Refuse if on battery, unless `--force`.
-5. Warn if a session is already live, including that the task counter resets.
+3. In `mobile`, warn that scheduled work may drain the battery and require an
+   interactive confirmation or `--yes`. In `work`, refuse if already on battery
+   unless `--force`.
+4. If a session is configured already, stop it through the full barrier before
+   switching modes.
+5. Apply the mode's posture when `HEINZEL_POSTURE=1`: remote for `work`, travel
+   for `mobile`. A failed read-back refuses to start the new session. With
+   posture management disabled, leave the OS posture unmanaged.
 6. Warn if no slot falls before the TTL expires.
 7. Create the backlog if absent; warn if it has no todo items.
 8. Start `caffeinate -is` (no `-d`: the lid is expected to be closed). Abort if
@@ -194,6 +202,10 @@ Fail-fast, and anything that fails rolls back what came before it.
 12. Generate the plist and the agent permission file; bootstrap the agent.
 13. `launchctl kickstart`, unless `--no-kick`.
 
+`--dry-run` performs validation and prints both the posture and session work,
+but neither changes posture nor starts a session. A `mobile --dry-run` warns
+without requiring confirmation.
+
 ### 3.2 `hzl off`
 
 1. Set `mode = "normal"` **first**, so every later run no-ops regardless of
@@ -203,11 +215,12 @@ Fail-fast, and anything that fails rolls back what came before it.
    order, and the release only on a confirmed stop.
 3. `sudo pmset -a disablesleep 0`, unless `--no-sudo`.
 4. Kill the caffeinate marker.
-5. Restore `sudoers.d/heinzel-ticket` if this session suspended it and posture
-   is still `remote`.
+5. Apply travel posture, including removal of the sudo ticket and diagnostic
+   policies. This posture transition still runs if the stop barrier failed.
 
 > **Normative: `disablesleep` is always restored to `0`.** Never to the value
-> recorded at `on` time, even though that value is kept. Honouring it turns one
+> recorded when the live mode started, even though that value is kept.
+> Honouring it turns one
 > missed `off` into permanent sleep suppression, because the leaked `1` becomes
 > the next session's baseline. `hzl off --no-sudo` is the way to keep a `1`
 > deliberately.
@@ -218,10 +231,10 @@ Fail-fast, and anything that fails rolls back what came before it.
 > says so, its task claims and its writer lease are **kept**, a `HALT` line goes
 > in the runner log, and `off` exits non-zero (`docs/RUNTIME-BACKENDS.md` §14.4).
 
-> **Normative: `hzl travel` applies the posture whatever the barrier said.** A
+> **Normative: `hzl off` applies travel posture whatever the barrier said.** A
 > machine going into a bag is closed up even when a process will not die — a
 > firewall left open is the worse of the two failures. The barrier runs first,
-> the posture change is never skipped or rolled back, and `travel` then exits
+> the posture change is never skipped or rolled back, and `off` then exits
 > with the barrier's status so an unconfirmed stop is not reported as success.
 
 ## §4 State (`~/.heinzel/state.json`)
@@ -231,25 +244,26 @@ Mode 0600. Written by validating with `jq` and replacing with `mv`. Writers are
 
 | Field | Type | Meaning | Written by |
 |---|---|---|---|
-| `schema_version` | number | `2`. **Absent means 1**: the file predates the field | on |
-| `runtime_backend` | string | The backend this session's runs go to, and the one they actually use (§9.0). **Absent means `local`** | on |
-| `mode` | string | `"heinzel"` / `"normal"`. **Alone this does not mean a session is live** (§5) | on / off |
-| `activated_at`, `activated_at_epoch` | string, number | Start time, both forms | on |
-| `workdirs` | array | Every workspace this session may work in, absolute, in the order that makes the first the default. A file written before v0.3.20 has only `workdir`, and reads as the one-workspace list it describes — reported, never repaired, like `schema_version` | on |
-| `expires_at`, `expires_at_epoch` | string, number | TTL. `now >= expires_at_epoch` ⇒ normal | on |
-| `duration` | string | As given, e.g. `"10h"`. Ceiling 24h, not configurable | on |
-| `boot_id` | string | `kern.bootsessionuuid` | on |
-| `workdir`, `backlog` | string | **Always absolute**; launchd runs with `cwd=/`. These are *the session's* paths, and they outlive it in the file | on |
-| `max_tasks_per_run` | number | Per-run ceiling | on / set |
-| `max_tasks_total` | number | Per-session ceiling | on / set |
+| `schema_version` | number | `3`. **Absent means 1**: the file predates the field | work / mobile |
+| `runtime_backend` | string | The backend this session's runs go to, and the one they actually use (§9.0). **Absent means `local`** | work / mobile |
+| `mode` | string | Internal liveness request: `"heinzel"` / `"normal"`. **Alone this does not mean a session is live** (§5) | work / mobile / off |
+| `operating_mode` | string | `"work"` / `"mobile"`. Absent means `work`, the only live mode before v0.3.25 | work / mobile |
+| `activated_at`, `activated_at_epoch` | string, number | Start time, both forms | work / mobile |
+| `workdirs` | array | Every workspace this session may work in, absolute, in the order that makes the first the default. A file written before v0.3.20 has only `workdir`, and reads as the one-workspace list it describes — reported, never repaired, like `schema_version` | work / mobile |
+| `expires_at`, `expires_at_epoch` | string, number | TTL. `now >= expires_at_epoch` ⇒ normal | work / mobile |
+| `duration` | string | As given, e.g. `"10h"`. Ceiling 24h, not configurable | work / mobile |
+| `boot_id` | string | `kern.bootsessionuuid` | work / mobile |
+| `workdir`, `backlog` | string | **Always absolute**; launchd runs with `cwd=/`. These are *the session's* paths, and they outlive it in the file | work / mobile |
+| `max_tasks_per_run` | number | Per-run ceiling | work / mobile / set |
+| `max_tasks_total` | number | Per-session ceiling | work / mobile / set |
 | `tasks_done_total` | number | Completed so far; incremented before the run record is written | run |
 | `counted_runs` | array | Run ids whose completions recovery has already added to `tasks_done_total`, written in the same update that moves it. **Absent means none** (§11.4) | run |
-| `run_timeout_sec` | number | Wall clock per run, ≥ 60 | on / set |
-| `hours` | string | The schedule at activation, for the record | on |
-| `caffeinate_pid` | number | Liveness marker. Killing it stops everything | on |
-| `pmset_restore.disablesleep` | string | The value at activation. **Recorded, never restored to** | on |
-| `sudo_used` | bool | Whether the privileged step ran | on |
-| `ticket_suspended` | bool | Whether this session closed the sudo ticket window | on / off |
+| `run_timeout_sec` | number | Wall clock per run, ≥ 60 | work / mobile / set |
+| `hours` | string | The schedule at activation, for the record | work / mobile |
+| `caffeinate_pid` | number | Liveness marker. Killing it stops everything | work / mobile |
+| `pmset_restore.disablesleep` | string | The value at activation. **Recorded, never restored to** | work / mobile |
+| `sudo_used` | bool | Whether the privileged step ran | work / mobile |
+| `ticket_suspended` | bool | Whether this session closed the sudo ticket window | work / mobile |
 | `halt_reason` | string\|null | `null` / `"auth"` / `"consecutive-failures"` | run / resume |
 | `consecutive_failures` | number | Reset to 0 on `ok`; HALT at 3 | run |
 | `runs_completed` | number | Runs that ended `ok` | run |
@@ -263,7 +277,8 @@ Mode 0600. Written by validating with `jq` and replacing with `mv`. Writers are
 > report the version they found; neither repairs it, and neither does anything
 > else that only reads. A read that migrated would make a rollback to the
 > previous build unreadable, for a field it did no more than print. The schema
-> is rewritten only by an explicit `hzl on`, which writes the whole file anyway
+> is rewritten only by an explicit `hzl work` or `hzl mobile`, which writes the
+> whole file anyway
 > (`docs/RUNTIME-BACKENDS.md` §14.1).
 >
 > A `schema_version` higher than this build's is read for the fields this build
@@ -271,9 +286,9 @@ Mode 0600. Written by validating with `jq` and replacing with `mv`. Writers are
 > is not an unreadable file. Resuming an *active durable run* across a rollback
 > is a different question, and is not supported.
 
-`HEINZEL_RUNTIME` names the session's backend at `hzl on` time and is recorded
-there. A key the registry does not know fails `hzl on`, rather than being
-written into a session whose every run then aborts at 03:00.
+`HEINZEL_RUNTIME` names the session's backend when a live mode starts and is
+recorded there. A key the registry does not know fails `hzl work`/`hzl mobile`,
+rather than being written into a session whose every run then aborts at 03:00.
 
 > **Normative: `workdirs` and `backlog` are read from `state.json` only while a
 > session is live.** With no session the configuration file is authoritative.
@@ -282,7 +297,7 @@ written into a session whose every run then aborts at 03:00.
 > `hzl install` then bakes the stale paths into the agent's permission file, so
 > the deny list names a backlog nobody uses. `hzl` reads them through
 > `cur_workdirs` / `cur_backlog`; the runner reads `state.json` directly and
-> must, because it only ever runs inside a session and `hzl on --backlog X` is
+> must, because it only ever runs inside a session and `hzl work --backlog X` is
 > a promise for the length of that session.
 
 ## §5 `effective_mode()` (normative)
@@ -295,7 +310,9 @@ Short-circuit AND, cheapest first. Any single false yields `normal`.
 4. `now < expires_at_epoch`
 5. `boot_id` matches the current boot session
 6. `caffeinate_pid` is alive
-7. posture is not `travel`
+7. `operating_mode` is `work` with remote posture, or `mobile` with travel
+   posture. `unmanaged` posture bypasses this match because posture management
+   is explicitly disabled.
 
 Reason strings are normative; each maps to exactly one row in the RUNBOOK.
 
@@ -309,7 +326,8 @@ Reason strings are normative; each maps to exactly one row in the RUNBOOK.
 | expired | `expired (<MM-DD HH:MM>) - run 'hzl off', sleep settings are still changed` |
 | rebooted | `boot session mismatch (rebooted, or an old state file)` |
 | marker dead | `the caffeinate marker (pid <N>) is gone` |
-| travelling | `posture is travel` |
+| unknown operating mode | `unknown operating mode: <value>` |
+| mode/posture mismatch | `<mode> mode does not match <posture> posture` |
 
 > **Normative: `kern.boottime` must not be used to detect reboots.** Its value
 > changes without a reboot, which makes every run after the first sleep/wake
@@ -375,12 +393,14 @@ engine call.
 | 2 | `in_window()` | `skip` |
 | 2b | ≥ `HEINZEL_MIN_RUN_GAP_SEC` since the last run started | `skip` |
 | 3 | session budget remaining > 0 | `skip` |
-| 4 | on AC power **or** `--from manual` | `skip` |
+| 4 | on AC power, `operating_mode == mobile`, **or** `--from manual` | `skip` |
 | 5 | time to expiry ≥ `run_timeout_sec` | `skip` |
 | 6 | **every** workspace, backlog, engine, and **valid settings JSON** — plus, when `HEINZEL_SAFE_MODE=1`, that the settings file actually carries the safe-mode denials (§13.1) | `abort` |
 | 7 | at least one `[ ]` task | `skip` |
 
-`--from manual` bypasses gates 2, 2b and 4. The other five apply unchanged.
+`--from manual` bypasses gates 2, 2b and 4. Mobile mode also bypasses gate 4,
+after the confirmation recorded when the mode was entered. The other five
+apply unchanged.
 
 > **Normative: a run works in exactly one workspace, and the queue chooses it.**
 > Past gate 7 and after `backlog_assign_ids`, the run reads the highest-priority
@@ -771,7 +791,7 @@ started it holds it. It is **not** a LaunchAgent and must not become one:
 everything else Heinzel installs runs unattended and is confined for it, while
 this is a window a person opens while they are sitting there. A resident service
 that can write the backlog would run all day whether or not anyone was looking,
-and would be the one thing still listening through `hzl travel`.
+and would be the one thing still listening through `hzl off`.
 
 `lib/web/server.py` is transport and nothing else. It parses no ledger, reads no
 state file and knows no rule: `GET /api/dashboard` runs `hzl dashboard` and
@@ -857,7 +877,7 @@ once another one exists; a name the registry does not know fails the run.
 > **Normative: a run goes to the backend its session recorded.**
 > `runtime_selected` answers with `state.json`'s `runtime_backend` whenever
 > there is a state file, and reads `HEINZEL_RUNTIME` only when there is not —
-> a run started by hand, or `hzl on` deciding what to write down. Everything
+> a run started by hand, or a live-mode command deciding what to write down. Everything
 > that names a backend at run time goes through it: `engine_run`, the run
 > snapshot's `runtime_backend`, and the backend a run with no `result.json`
 > reports. A run starts from launchd, which passes a minimal environment and
@@ -1475,7 +1495,7 @@ the review and model keys, which are environment > conf > default so that
 | `DEFAULT_MAX_TASKS_TOTAL` / `DEFAULT_MAX_TASKS` | `3` / `3` | ≥ 1 |
 | `DEFAULT_RUN_TIMEOUT` | `3600` | ≥ 1 (`set timeout` ≥ 60) |
 | `DEFAULT_DURATION` | `"10h"` | `10h`/`90m`/`3600`, in [60s, 24h] |
-| `DEFAULT_WORKDIR` | *(none)* | one absolute path **per line**; required. One line is one workspace, several lines are several, and the first is the default. The separator is a newline and not a space, because a path may contain a space and this is not a list of integers like `HEINZEL_HOURS` — a single-line value therefore means exactly what it always meant. Validated for shape only: absolute, and no two sharing a last path component, which would make `(dir:x)` ambiguous. Existence is `hzl on`'s and `hzl doctor`'s business, because this is checked before every command and a checkout on an unmounted disk must not stop `hzl status` answering. Every workspace is baked into the generated permission file, so adding or moving one needs `hzl install` again |
+| `DEFAULT_WORKDIR` | *(none)* | one absolute path **per line**; required. One line is one workspace, several lines are several, and the first is the default. The separator is a newline and not a space, because a path may contain a space and this is not a list of integers like `HEINZEL_HOURS` — a single-line value therefore means exactly what it always meant. Validated for shape only: absolute, and no two sharing a last path component, which would make `(dir:x)` ambiguous. Existence is `hzl work`/`hzl mobile`'s and `hzl doctor`'s business, because this is checked before every command and a checkout on an unmounted disk must not stop `hzl status` answering. Every workspace is baked into the generated permission file, so adding or moving one needs `hzl install` again |
 | `HEINZEL_WEB_PORT` | `3151` | the port `hzl web` listens on, 1024–65535. Loopback only, and never privileged: `hzl` refuses to run as root |
 | `DEFAULT_BACKLOG` | *(none)* | absolute path; required. One queue, whatever the number of workspaces. It should sit **outside** every workspace — `hzl doctor` warns if it does not — and is baked into the generated permission file, so moving it needs `hzl install` again |
 | `HEINZEL_MODEL` / `HEINZEL_EFFORT` | `claude-opus-5` / `xhigh` | effort: `low\|medium\|high\|xhigh\|max` |
@@ -1594,8 +1614,8 @@ Honest as of 2026-08-29.
 | **A complete unattended task, end to end** | Verified 2026-08-30, run `20260830-001340`: the agent took the task from the backlog, created and verified the file, marked the line `[x]` with `run:<id>`, and the runner counted one completion from the ledger and wrote the handover. 14s, $0.35 |
 | **Every posture component applies and reads back** | Verified 2026-08-30 once the screen-lock delay was unblocked: screen sharing, wake-on-LAN, idle sleep, sudoers, packet filter and screen lock all move with the posture and all read back as expected |
 | **`travel` blocks inbound traffic** | Verified 2026-08-30: `pfctl` reports `Status: Enabled` with `block drop in all`, and port 5900 becomes unreachable. Screen sharing closes and reopens with the posture |
-| **`hzl on` refuses under `travel`** | Verified: exit 1, naming the posture and telling the operator to run `hzl remote` first. The refused cell of the matrix is unreachable in practice, not only by design |
-| **The sudo ticket interlock** | Verified 2026-08-30 on the real machine: `heinzel-ticket` present under `remote`, removed by `hzl on`, restored by `hzl off`, and `doctor` section 8 reported no defect while the session was live |
+| **Mode/posture interlock** | The `work` + remote and `mobile` + travel combinations, both mismatches, unknown mode rejection, and battery opt-in are covered by the regression suite; the combined privileged transitions still require the manual plan in `docs/VERIFICATION.md` |
+| **The sudo ticket interlock** | The underlying transition was verified 2026-08-30 on the real machine: `heinzel-ticket` present under remote posture, removed by a live session, and `doctor` section 8 reported no defect while the session was live. Reverify through the combined commands after v0.3.25 |
 | **`travel` / `remote` transitions** | Verified: screen sharing closes and reopens, posture reports `travel` and `remote`, and `mixed` was correctly reported for a half-configured machine before the first transition |
 | **The timeout path** | Verified 2026-08-30 with a stand-in engine that claims a task then hangs: killed at 61s, `result: "timeout"`, `exit_code: 124`, the task rolled back from `[~]` to `[ ]`, no orphaned process. A *real* engine killed mid-call is still not reproduced |
 | **Capability inside the boundary under `dontAsk`** | Verified: commands never explicitly allowed (`python3`, a `tee` pipeline) still run and write inside the working directory, because a sandboxed command needs no prompt |

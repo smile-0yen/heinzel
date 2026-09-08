@@ -43,7 +43,7 @@
 #
 # The working directory must not be ~/.heinzel or anything inside it: that is
 # Heinzel's own state, denied to the agent wholesale, so a run there could
-# write nothing. `hzl on` refuses it.
+# write nothing. `hzl work` and `hzl mobile` refuse it.
 #
 # Editing either path takes effect when there is no live session. A running
 # session keeps the paths it was started with, and `hzl install` bakes whatever
@@ -102,9 +102,10 @@ HEINZEL_REVIEW_MAX_PATCH_BYTES=200000
 HEINZEL_CODEX_IGNORE_USER_CONFIG=0
 
 # --- posture (opt-in) ------------------------------------------------------
-# `hzl travel` and `hzl remote` change screen sharing, the packet filter,
-# wake-on-LAN, the screen lock delay and sudo policy. They refuse to run unless
-# this is 1, because guessing at someone else's firewall is not acceptable.
+# The posture half of `hzl work`, `hzl off`, and `hzl mobile` changes screen
+# sharing, the packet filter, wake-on-LAN, the screen lock delay and sudo
+# policy. When this is 0, the session half still works and OS posture is
+# reported as unmanaged; Heinzel does not guess at someone else's firewall.
 HEINZEL_POSTURE=0
 HEINZEL_REMOTE_SCREENLOCK=300          # seconds, or "immediate"
 HEINZEL_TRAVEL_SCREENLOCK="immediate"

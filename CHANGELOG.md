@@ -6,6 +6,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.25] - 2026-09-08
+
+Three intent-based modes replace the independent posture and session commands.
+This is a breaking CLI and status-JSON change: `hzl on`, `hzl remote`, and
+`hzl travel` now exit with migration guidance instead of changing state.
+
+### Changed
+
+- **`hzl work`** combines remote posture with a live unattended session.
+- **`hzl off`** stops the session, restores sleep, and applies travel posture.
+  The posture transition still runs when the stop barrier reports an ORPHANED
+  process, and the command preserves that non-zero result.
+- **`hzl mobile`** combines travel posture with a live session. It warns on
+  every invocation and requires interactive confirmation or `--yes`, because
+  the recorded mode permits scheduled runs to continue on battery.
+- **Mode transitions stop an existing session before switching posture.** The
+  mode/posture pair is checked by `effective_mode`; either mismatch and an
+  unknown stored mode fail closed. State schema v3 adds `operating_mode`, with
+  missing values read as `work` for old state files.
+- **`hzl status --json` reports `mode` as `work`, `mobile`, or `off`.** The
+  dashboard consumes the same public values. The internal `state.mode` remains
+  `heinzel`/`normal` for liveness and backwards-readable state.
+- **Posture management remains opt-in.** With `HEINZEL_POSTURE=0`, the session
+  half of each mode still works and the OS posture is reported as unmanaged.
+- **33 regression assertions** cover command dispatch, dry-run UX, old-state compatibility,
+  both valid live pairs, both mismatches, invalid stored values, and the mobile
+  battery decision.
+
 ## [0.3.24] - 2026-09-08
 
 Safe mode: an unattended run may not call the commands that reach a cluster, a

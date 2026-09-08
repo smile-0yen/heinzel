@@ -6,18 +6,13 @@ anything unsafe switched on.**
 > *Heinzelmännchen* — the house gnomes of Cologne, who did the townspeople's work overnight and
 > were gone before anyone woke up.
 
-Heinzel is a macOS command-line tool with two jobs:
-
-- **posture** — flip the machine between *travel* (locked down for the bag) and *remote*
-  (open for remote use from elsewhere).
-- **session** — run Claude Code unattended against a `backlog.md` on a schedule, with the sleep
-  suppression, budget and stop conditions that makes safe.
+Heinzel is a macOS command-line tool with three modes. Each combines how the
+machine is exposed with whether unattended work is running:
 
 ```
-hzl travel                # lock it down: screen sharing off, firewall closed, sudo policy reset
-hzl remote                # open it up:   screen sharing on, wake-on-LAN, read-only sudo helpers
-hzl on --duration 10h     # start an unattended session (expires by itself)
-hzl off                   # stop it, and restore what it changed
+hzl work --duration 10h   # remote posture + unattended work (the normal mode)
+hzl off                   # travel posture + no unattended work
+hzl mobile                # travel posture + unattended work; confirms battery use
 hzl status                # what is actually true right now
 hzl schedule              # when the next run is, and whether it will do anything
 hzl next                  # what it would pick up next, and in which checkout
@@ -26,9 +21,9 @@ hzl web                   # the same, in a browser, on 127.0.0.1 only
 hzl report                # the morning read: what is blocked, what got done
 ```
 
-The two axes are independent: you can open the machine without starting a session, and you can run
-a session on a machine that is not exposed. What you cannot do is run one while the machine is in
-travel posture — that combination is refused rather than merely discouraged.
+There is deliberately no command for an idle machine left open for remote use.
+`work`, `off`, and `mobile` are the three useful combinations; `mobile` is the
+exceptional one and requires confirmation because scheduled runs continue on battery.
 
 ## Status
 
@@ -51,8 +46,8 @@ design is about bounding it.
   engine — has no path to root at all. Not a narrowed one; an absent one. No `sudoers` entry that
   can write anything.
 - **State is a composed function, not a stored flag.** Expiry, a reboot, a dead liveness marker,
-  an authentication failure or the machine going into travel posture each independently drop the
-  session to "do nothing". There is only one direction to fall.
+  an authentication failure or a mismatch between the selected mode and observed posture each
+  independently drop the session to "do nothing". There is only one direction to fall.
 - **Cost is bounded three ways** — tasks per run, tasks per session, wall clock — plus a schedule
   that structurally excludes the working day.
 - **When in doubt, it stops.** A task the agent cannot verify, or that needs a human judgement, a
@@ -172,20 +167,20 @@ hzl next
 
 which tells you what would be picked up next, and in which checkout.
 
-### 7. See what starting a session would do, without starting one
+### 7. See what work mode would do, without starting it
 
 ```sh
-hzl on --dry-run
+hzl work --dry-run
 ```
 
 Prints the session it would create — TTL, budgets, working directory, backlog — and changes
 nothing. This is also the cheapest way to find a configuration mistake, because it fails on
-exactly what a real `hzl on` would fail on.
+exactly what a real `hzl work` would fail on.
 
 ### 8. Start it
 
 ```sh
-hzl on --duration 10h
+hzl work --duration 10h
 ```
 
 The session expires by itself after ten hours; there is a 24-hour ceiling that is not
@@ -213,9 +208,10 @@ working, not the exception.
 
 ### What you have not switched on
 
-`hzl travel` and `hzl remote` change your firewall, screen sharing and sudo policy, and they
-refuse to touch anything until you set `HEINZEL_POSTURE=1` deliberately. Review by a second
-engine is off until you set `HEINZEL_REVIEW=1`. Neither is needed for any of the above.
+The posture half of `hzl work`, `hzl off`, and `hzl mobile` changes your firewall, screen sharing
+and sudo policy only after you set `HEINZEL_POSTURE=1` deliberately. Until then the OS posture is
+reported as unmanaged, while the unattended-session half still works. Review by a second engine
+is off until you set `HEINZEL_REVIEW=1`.
 
 The one switch that is on already is safe mode, and it is on because nobody would think to look
 for it: an unattended run may not call `gcloud`, `kubectl`, `terraform`, `ssh`, `docker push`,
@@ -301,13 +297,13 @@ morning.
 You do not have to wait for 03:00, and for the first one you should not.
 
 ```sh
-hzl on --duration 2h --max-tasks 1 --dry-run
+hzl work --duration 2h --max-tasks 1 --dry-run
 ```
 
 Prints the session it would create and changes nothing. When it looks right, drop `--dry-run`:
 
 ```sh
-hzl on --duration 2h --max-tasks 1
+hzl work --duration 2h --max-tasks 1
 ```
 
 Starting a session kicks a run immediately (`--no-kick` if you would rather wait for the
@@ -441,8 +437,9 @@ When you are done for the night, or want the machine back:
 hzl off
 ```
 
-Stops the session, restores what it changed, and exits non-zero if it could not confirm a run had
-stopped — which is your signal to look, not to shrug.
+Stops the session, restores what it changed, applies the closed travel posture when posture
+management is enabled, and exits non-zero if it could not confirm a run had stopped — which is
+your signal to look, not to shrug.
 
 ### 7. When something looks wrong
 
