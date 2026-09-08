@@ -4,10 +4,11 @@
 # otherwise apply to it. Dropping tty scoping is what lets a human authenticate
 # once and keep working remotely.
 #
-# This is a standing, write-capable sudo window. It is installed only while
-# posture is `remote`, and a live work/mobile mode removes it for the duration of an
-# unattended session (DESIGN 4.3). `hzl doctor` reports its presence during a
-# session as a defect, because the only way to get there is a failed restore.
+# This is a standing, write-capable sudo window. It is allowed only while
+# posture is `remote` and no session is running (DESIGN 4.3) - a pair none of
+# the three modes produces, so nothing installs this file today. Every mode
+# removes it, and `hzl doctor` reports its presence during a session as a
+# defect, because the only way to get there is another tool or a failed restore.
 
 Defaults !tty_tickets
 Defaults timestamp_timeout=__TIMEOUT__

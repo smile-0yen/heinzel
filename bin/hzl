@@ -319,7 +319,9 @@ session_start() {
 "; shift ;;
       --no-sudo) use_sudo=0 ;;
       --force) force=1 ;;
-      --yes) confirmed=1 ;;
+      --yes)
+        [ "${operating_mode}" = mobile ] || die "work: unknown option --yes"
+        confirmed=1 ;;
       --no-kick) kick=0 ;;
       --dry-run) dry=1 ;;
       *) die "${operating_mode}: unknown option $1" ;;
@@ -410,10 +412,6 @@ EOF
   runtime_known "${runtime_backend}" ||
     die "HEINZEL_RUNTIME names no runtime backend this build has: '${runtime_backend}' (have: $(runtime_backends | tr '\n' ' ' | sed 's/ *$//'))"
 
-  if [ "${operating_mode}" = work ] && [ "${confirmed}" = 1 ]; then
-    die "work: unknown option --yes"
-  fi
-
   # Mobile is the exceptional choice: it keeps scheduled runs eligible on
   # battery. The warning is unconditional because a machine plugged in now
   # may be unplugged after this command returns.
@@ -445,6 +443,7 @@ EOF
   # session is stopped below, after dry-run has had its early return.
   if [ "$(state_get .mode normal)" = heinzel ]; then
     warn "a session is already configured - it will be stopped before entering ${operating_mode} mode"
+    warn "tasks completed so far ($(state_get .tasks_done_total 0)) will be reset to 0"
   fi
 
   local now expires slots
@@ -462,7 +461,7 @@ EOF
 
   if [ "${dry}" = 1 ]; then
     case ${operating_mode} in
-      work) mode_apply_posture remote 1 1 || return 1 ;;
+      work) mode_apply_posture remote 0 1 || return 1 ;;
       mobile) mode_apply_posture travel 0 1 || return 1 ;;
     esac
     printf '\n'
@@ -487,8 +486,14 @@ EOF
     [ "${stop_rc}" -eq 0 ] || return "${stop_rc}"
   fi
 
+  # Neither live mode may leave the write-capable sudo window open: the ticket
+  # is allowed under remote posture only while the session is off (DESIGN 4.3),
+  # and both of these are starting one. Passing `allow_ticket=1` here installed
+  # the drop-in and step 8 removed it seconds later - two privileged writes for
+  # a file that must not exist, and a session left with it open whenever the
+  # second one failed.
   case ${operating_mode} in
-    work) mode_apply_posture remote 1 0 || return 1 ;;
+    work) mode_apply_posture remote 0 0 || return 1 ;;
     mobile) mode_apply_posture travel 0 0 || return 1 ;;
   esac
 
@@ -525,8 +530,13 @@ EOF
   fi
 
   # 8. Close the write-capable sudo window for the duration (DESIGN 4.3).
+  # The posture transition above has already removed the drop-in, and neither
+  # mode installs it - but a ticket granted before this command outlives the
+  # file it came from, so the outstanding timestamps go too. The removal is
+  # repeated rather than assumed: it is a no-op when the file is absent, and
+  # this is the step the guarantee is written against.
   local ticket_suspended=false
-  if [ "${HEINZEL_POSTURE}" = 1 ] && [ -f "${SUDOERS_TICKET}" ]; then
+  if [ "${HEINZEL_POSTURE}" = 1 ]; then
     if posture_remove_sudoers ticket && posture_purge_tickets; then
       ticket_suspended=true
       say "the relaxed sudo ticket window is closed for the duration of this session"
@@ -1523,7 +1533,7 @@ cmd_doctor() {
   if [ "${mode}" = heinzel ]; then
     doc_ok "$(session_operating_mode) mode, expires $(short_at "$(state_get .expires_at_epoch 0)"), $(budget_line)"
   else
-    doc_ok "session off (${HZ_REASON})"
+    doc_ok "off mode (${HZ_REASON})"
   fi
   local halt
   halt=$(state_get .halt_reason "")

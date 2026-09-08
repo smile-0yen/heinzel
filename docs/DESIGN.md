@@ -155,7 +155,7 @@ rules that contradict each other. Principle 8 resolves it by key — no key has 
 | screen-lock grace | posture | immediate | configurable | — | — |
 | `~/.claude/settings.json` remote control | posture | off | on | — | — |
 | `sudoers.d/heinzel-diag` (read-only NOPASSWD) | posture | removed | installed | — | — |
-| `sudoers.d/heinzel-ticket` (`!tty_tickets`) | posture, **suspended by session** (§4.3) | removed | installed | removed | — |
+| `sudoers.d/heinzel-ticket` (`!tty_tickets`) | posture, **suspended by session** (§4.3) | removed | *unreachable* (§4.3) | removed | — |
 | `caffeinate` | session | — | — | started | killed |
 
 Two notes carried from the ancestors, both load-bearing:
@@ -200,6 +200,14 @@ It is fine while a human is driving. It is not fine while the runner is.
 (`/var/db/sudo/ts/<user>`). `hzl off` selects travel posture, where the file is absent. So during an unattended session the
 write-capable sudo window is *structurally closed*, and defence layer 1 (unprivileged) holds on
 its own instead of leaning on layers 2–3.
+
+Since v0.3.25 the row above has no reachable cell: remote posture belongs to `work`, `work`
+starts a session, and the file is allowed only with the session off. **No mode installs it.**
+`posture_apply remote` is therefore always called with the ticket half suppressed — installing it
+and removing it again one step later would be the same guarantee resting on a step that can fail.
+What remains is the keeping-absent, which every mode does, and `hzl doctor`'s report of a file
+some other tool left behind. Reopening the window would need a fourth public mode, and that is a
+decision to take deliberately rather than by leaving an argument at `1`.
 
 The read-only half stays: it cannot write, and the deny layer blocks `Bash(sudo *)` for the agent
 independently. Two reasons, either sufficient.

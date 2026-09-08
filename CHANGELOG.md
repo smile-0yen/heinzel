@@ -30,9 +30,19 @@ This is a breaking CLI and status-JSON change: `hzl on`, `hzl remote`, and
   `heinzel`/`normal` for liveness and backwards-readable state.
 - **Posture management remains opt-in.** With `HEINZEL_POSTURE=0`, the session
   half of each mode still works and the OS posture is reported as unmanaged.
-- **33 regression assertions** cover command dispatch, dry-run UX, old-state compatibility,
-  both valid live pairs, both mismatches, invalid stored values, and the mobile
-  battery decision.
+- **No mode installs `sudoers.d/heinzel-ticket`.** The write-capable sudo window
+  is allowed only under remote posture with the session off, and none of the
+  three modes is that pair. `work` applies remote posture with the ticket half
+  already suppressed rather than installing the file and removing it one step
+  later, which put the guarantee of DESIGN §4.3 behind a step that can fail.
+- **Switching modes says that the task counter resets**, as `hzl on` did when it
+  reconfigured a live session. `hzl doctor` names the mode on both branches.
+- **38 regression assertions** cover command dispatch, dry-run UX, old-state compatibility,
+  both valid live pairs, both mismatches, invalid stored values, the mobile
+  battery decision, the sudo ticket interlock, and `--yes` being refused by
+  `work`. The non-interactive `mobile` assertion reads from `/dev/null`: without
+  it the suite inherits the developer's terminal and blocks on the confirmation
+  prompt it is trying to prove exists.
 
 ## [0.3.24] - 2026-09-08
 

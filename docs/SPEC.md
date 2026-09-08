@@ -185,26 +185,33 @@ selects travel posture and records the explicit battery decision.
 3. In `mobile`, warn that scheduled work may drain the battery and require an
    interactive confirmation or `--yes`. In `work`, refuse if already on battery
    unless `--force`.
-4. If a session is configured already, stop it through the full barrier before
+4. Warn if a session is already configured, including that the task counter
+   resets.
+5. Warn if no slot falls before the TTL expires.
+6. Create the backlog if absent; warn if it has no todo items.
+7. If a session is configured already, stop it through the full barrier before
    switching modes.
-5. Apply the mode's posture when `HEINZEL_POSTURE=1`: remote for `work`, travel
-   for `mobile`. A failed read-back refuses to start the new session. With
-   posture management disabled, leave the OS posture unmanaged.
-6. Warn if no slot falls before the TTL expires.
-7. Create the backlog if absent; warn if it has no todo items.
-8. Start `caffeinate -is` (no `-d`: the lid is expected to be closed). Abort if
+8. Apply the mode's posture when `HEINZEL_POSTURE=1`: remote for `work`, travel
+   for `mobile`, **both with the sudo ticket window closed** — the drop-in is
+   allowed under remote posture only while the session is off (§4.3 of
+   `docs/DESIGN.md`), and both of these are starting one. A failed read-back
+   refuses to start the new session. With posture management disabled, leave
+   the OS posture unmanaged.
+9. Start `caffeinate -is` (no `-d`: the lid is expected to be closed). Abort if
    it does not start.
-9. `sudo pmset -a disablesleep 1`, unless `--no-sudo`. Read the value back and
-   warn if it is not 1. On authentication failure, kill the marker and abort.
-10. Remove `sudoers.d/heinzel-ticket` and invalidate outstanding tickets, if
-    posture management is on. Record `ticket_suspended`.
-11. Write `state.json`. On failure, roll back steps 8–9 and abort.
-12. Generate the plist and the agent permission file; bootstrap the agent.
-13. `launchctl kickstart`, unless `--no-kick`.
+10. `sudo pmset -a disablesleep 1`, unless `--no-sudo`. Read the value back and
+    warn if it is not 1. On authentication failure, kill the marker and abort.
+11. Invalidate outstanding sudo tickets and remove `sudoers.d/heinzel-ticket`
+    again, if posture management is on: step 8 removed the file, but a ticket
+    granted before this command outlives it. Record `ticket_suspended`.
+12. Write `state.json`. On failure, roll back steps 9–10 and abort.
+13. Generate the plist and the agent permission file; bootstrap the agent.
+14. `launchctl kickstart`, unless `--no-kick`.
 
-`--dry-run` performs validation and prints both the posture and session work,
-but neither changes posture nor starts a session. A `mobile --dry-run` warns
-without requiring confirmation.
+Steps 1–6 are the ones that can refuse, and `--dry-run` returns after them,
+having printed the posture it would apply and the session it would create. It
+changes no posture and starts no session. A `mobile --dry-run` warns without
+requiring confirmation.
 
 ### 3.2 `hzl off`
 

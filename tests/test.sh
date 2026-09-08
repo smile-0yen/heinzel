@@ -1986,6 +1986,16 @@ t_has "the runner consults the mobile battery decision" \
   "${TEST_ROOT}/bin/hzl-run" 'if session_allows_battery; then'
 t_has "schedule reports with the same battery decision" \
   "${TEST_ROOT}/bin/hzl" 'elif ! on_ac_power && ! session_allows_battery; then'
+# DESIGN 4.3: the write-capable sudo drop-in is allowed under remote posture
+# only while the session is off, and both live modes start one. Installing it
+# and removing it again seconds later is the same defect as leaving it open,
+# because the removal is a step that can fail.
+t_lacks "no live mode installs the sudo ticket window" \
+  "${TEST_ROOT}/bin/hzl" 'mode_apply_posture remote 1'
+t_has "work applies remote posture with the ticket window closed" \
+  "${TEST_ROOT}/bin/hzl" 'work) mode_apply_posture remote 0 0'
+t_has "and mobile applies travel posture the same way" \
+  "${TEST_ROOT}/bin/hzl" 'mobile) mode_apply_posture travel 0 0'
 
 # This suite normally stops before the posture gate and therefore does not
 # source lib/posture.sh. A controlled observation lets the composed gate prove
@@ -4778,10 +4788,19 @@ hzl_db mobile --dry-run >"${DB_MODE_OUT}" 2>&1
 t_ok "mobile dry-run does not demand interactive confirmation" "$?"
 t_has "but still carries the battery warning" "${DB_MODE_OUT}" "may drain it while travelling"
 
-hzl_db mobile >"${DB_MODE_OUT}" 2>&1
+# `</dev/null` is the assertion, not scaffolding: the refusal being checked is
+# the one `mobile` makes when there is no terminal to ask at. Run from a real
+# terminal without it, this line inherits the developer's tty, `mobile` prompts,
+# and the whole suite blocks on a y/N nobody is watching for.
+hzl_db mobile </dev/null >"${DB_MODE_OUT}" 2>&1
 DB_MOBILE_RC=$?
 t_fails "non-interactive mobile requires explicit consent" "${DB_MOBILE_RC}"
 t_has "and tells automation how to give it" "${DB_MODE_OUT}" "re-run with --yes"
+
+hzl_db work --yes </dev/null >"${DB_MODE_OUT}" 2>&1
+t_fails "work has no --yes to give" "$?"
+t_has "and says so before it validates anything else" \
+  "${DB_MODE_OUT}" "work: unknown option --yes"
 
 # JSON before anything else is worth asking: the server hands this to the page
 # verbatim, and a page that cannot parse it shows nothing at all.

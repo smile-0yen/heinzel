@@ -121,7 +121,7 @@ Every privileged thing Heinzel does, and when:
 | `pmset -c sleep/disksleep/womp` | `hzl work` / `hzl mobile` / `hzl off` | Idle sleep and Wake-on-LAN |
 | `sysadminctl -screenLock` | `hzl work` / `hzl mobile` / `hzl off` | Screen-lock grace period |
 | Install/remove `sudoers.d/heinzel-diag` | `hzl work` / `hzl mobile` / `hzl off` | `NOPASSWD` for **read-only** diagnostics only |
-| Install/remove `sudoers.d/heinzel-ticket` | installed during the `work` transition, then suspended by either live mode; removed by `off` | Non-TTY-scoped sudo tickets for interactive remote work |
+| Remove `sudoers.d/heinzel-ticket`, invalidate outstanding tickets | `hzl work` / `hzl mobile` / `hzl off` | The non-TTY-scoped sudo window is allowed only under remote posture with the session off, which is not one of the three modes. No mode installs it |
 
 `hzl` refuses to run as root; the privileged subcommands escalate internally so that state files
 stay owned by the user. Any `sudoers` file is validated with `visudo -c` before installation, so a
