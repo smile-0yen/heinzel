@@ -3,7 +3,7 @@
 #
 # Every command here is read-only. Nothing in this file can change the system,
 # which is why it is safe to leave in place while an unattended session runs.
-# The write-capable half was retired in v0.3.25: no mode installs one, and every
+# The write-capable half was retired in v0.4.0: no mode installs one, and every
 # mode removes the `heinzel-ticket` an older build may have left behind.
 
 Cmnd_Alias HEINZEL_DIAG = /usr/sbin/lsof, \

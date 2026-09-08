@@ -194,13 +194,13 @@ It is fine while a human is driving. It is not fine while the runner is.
 | File | Contents | Present when |
 |---|---|---|
 | `sudoers.d/heinzel-diag` | `NOPASSWD` read-only diagnostics only | posture is `remote` |
-| `sudoers.d/heinzel-ticket` | `!tty_tickets`, `timestamp_timeout` | **never** — retired in v0.3.25 |
+| `sudoers.d/heinzel-ticket` | `!tty_tickets`, `timestamp_timeout` | **never** — retired in v0.4.0 |
 
 The suspend rule survived the split for one release and then ran out of cells. The write-capable
 half was allowed under remote posture with the session *off*, and the three modes of §2 do not
 produce that pair: remote posture belongs to `work`, and `work` starts a session. Rather than
 install the file and remove it again a step later — a guarantee resting on a step that can fail —
-v0.3.25 deleted `etc/sudoers-ticket.in` and the code that installed it. `posture_install_sudoers`
+v0.4.0 deleted `etc/sudoers-ticket.in` and the code that installed it. `posture_install_sudoers`
 now knows one template, and it is the read-only one.
 
 What remains is removal, and it is not vestigial: a machine upgraded from a build that did install
@@ -218,7 +218,7 @@ was the reason `!tty_tickets` existed. Reopening the window means a fourth publi
 session off, which is a decision to take deliberately rather than by leaving an argument at `1`.
 
 `hzl doctor` treats a live mode **and** `heinzel-ticket` present as a defect, not a warning: with
-nothing here able to write that file, it came from another tool or from a build before v0.3.25.
+nothing here able to write that file, it came from another tool or from a build before v0.4.0.
 
 ### 4.4 Defence in depth for the unattended lane
 

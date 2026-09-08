@@ -11,7 +11,18 @@ versioning, pre-1.0:
 
 - **patch** (`0.1.0 -> 0.1.1`): one completed backlog task.
 - **minor** (`0.1.4 -> 0.2.0`): the task that completes a design phase of
-  `docs/RUNTIME-BACKENDS.md` (the backlog task text says when it does).
+  `docs/RUNTIME-BACKENDS.md` (the backlog task text says when it does), **or**
+  any task that breaks something outside this repository: a command removed or
+  renamed, a value in `hzl status --json` changed, a `state.json` schema an
+  older build cannot read, a configuration key that stops being read, a
+  documented behaviour withdrawn. Pre-1.0 the minor digit is where breaking
+  changes go, and **the patch digit must never carry one** — a person reading
+  `0.3.24 -> 0.3.25` is entitled to assume their scripts still run. If one task
+  does both, it is still one minor bump.
+- **1.0.0 is not a size, it is a promise** about the CLI, `status --json` and
+  the state schema. It waits until `docs/SPEC.md` §15 has no unverified row and
+  the command surface has survived real engine runs without moving. Do not
+  reach for it because a change felt large.
 - never re-tag, never move a tag, never `--force` anything.
 
 ## The ritual, per completed task

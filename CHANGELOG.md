@@ -6,11 +6,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.3.25] - 2026-09-08
+## [0.4.0] - 2026-09-08
 
 Three intent-based modes replace the independent posture and session commands.
-This is a breaking CLI and status-JSON change: `hzl on`, `hzl remote`, and
-`hzl travel` now exit with migration guidance instead of changing state.
+
+The minor bump is the point: this is the first release that breaks something on
+purpose, and `docs/RELEASING.md` now says that is where a breaking change goes.
+The two before it, multiple workspaces and the web UI, were features shipped on
+the patch digit, which under-reported them.
+
+### Breaking
+
+- **`hzl on`, `hzl remote` and `hzl travel` are gone.** Each exits 1 naming its
+  replacement rather than doing something approximate. `hzl remote` followed by
+  `hzl on` becomes `hzl work`; `hzl travel` becomes `hzl off`.
+- **`hzl status --json` reports `mode` as `work`, `mobile` or `off`**, not
+  `heinzel` / `normal`. A script testing `.mode == "heinzel"` now reads false in
+  every mode. The exit codes are unchanged: 10 live, 0 not, 1 error.
+- **`state.json` is schema v3.** This build reads a v1 or v2 file as `work`,
+  which is the only live mode those files could describe. An older build reads
+  a v3 file and ignores `operating_mode`, which is the direction that loses the
+  posture interlock — roll the state file back with the build.
+- **`HEINZEL_TICKET_TIMEOUT` is no longer read.** A `heinzel.conf` that sets it
+  still loads; it is an unused key now, not an error.
+- **`sudoers.d/heinzel-ticket` is never installed.** A machine carrying one from
+  an earlier build has it removed by the next transition, and sudo over VNC goes
+  back to the stock per-terminal, tty-scoped ticket.
 
 ### Changed
 
@@ -23,11 +44,12 @@ This is a breaking CLI and status-JSON change: `hzl on`, `hzl remote`, and
   the recorded mode permits scheduled runs to continue on battery.
 - **Mode transitions stop an existing session before switching posture.** The
   mode/posture pair is checked by `effective_mode`; either mismatch and an
-  unknown stored mode fail closed. State schema v3 adds `operating_mode`, with
-  missing values read as `work` for old state files.
-- **`hzl status --json` reports `mode` as `work`, `mobile`, or `off`.** The
-  dashboard consumes the same public values. The internal `state.mode` remains
-  `heinzel`/`normal` for liveness and backwards-readable state.
+  unknown stored mode fail closed. Schema v3 carries the choice as
+  `operating_mode`.
+- **The dashboard reads the same public mode values**, and the internal
+  `state.mode` stays `heinzel`/`normal`: liveness is a separate question from
+  which mode asked for it, and keeping them apart is what lets an older build
+  still read the file.
 - **Posture management remains opt-in.** With `HEINZEL_POSTURE=0`, the session
   half of each mode still works and the OS posture is reported as unmanaged.
 - **Switching modes says that the task counter resets**, as `hzl on` did when it

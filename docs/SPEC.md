@@ -253,7 +253,7 @@ Mode 0600. Written by validating with `jq` and replacing with `mv`. Writers are
 | `schema_version` | number | `3`. **Absent means 1**: the file predates the field | work / mobile |
 | `runtime_backend` | string | The backend this session's runs go to, and the one they actually use (§9.0). **Absent means `local`** | work / mobile |
 | `mode` | string | Internal liveness request: `"heinzel"` / `"normal"`. **Alone this does not mean a session is live** (§5) | work / mobile / off |
-| `operating_mode` | string | `"work"` / `"mobile"`. Absent means `work`, the only live mode before v0.3.25 | work / mobile |
+| `operating_mode` | string | `"work"` / `"mobile"`. Absent means `work`, the only live mode before v0.4.0 | work / mobile |
 | `activated_at`, `activated_at_epoch` | string, number | Start time, both forms | work / mobile |
 | `workdirs` | array | Every workspace this session may work in, absolute, in the order that makes the first the default. A file written before v0.3.20 has only `workdir`, and reads as the one-workspace list it describes — reported, never repaired, like `schema_version` | work / mobile |
 | `expires_at`, `expires_at_epoch` | string, number | TTL. `now >= expires_at_epoch` ⇒ normal | work / mobile |
@@ -1623,7 +1623,7 @@ Honest as of 2026-08-29.
 | **Every posture component applies and reads back** | Verified 2026-08-30 once the screen-lock delay was unblocked: screen sharing, wake-on-LAN, idle sleep, sudoers, packet filter and screen lock all move with the posture and all read back as expected |
 | **`travel` blocks inbound traffic** | Verified 2026-08-30: `pfctl` reports `Status: Enabled` with `block drop in all`, and port 5900 becomes unreachable. Screen sharing closes and reopens with the posture |
 | **Mode/posture interlock** | The `work` + remote and `mobile` + travel combinations, both mismatches, unknown mode rejection, and battery opt-in are covered by the regression suite; the combined privileged transitions still require the manual plan in `docs/VERIFICATION.md` |
-| **The sudo ticket interlock** | The underlying transition was verified 2026-08-30 on the real machine: `heinzel-ticket` present under remote posture, removed by a live session, and `doctor` section 8 reported no defect while the session was live. Reverify through the combined commands after v0.3.25 |
+| **The sudo ticket interlock** | The underlying transition was verified 2026-08-30 on the real machine: `heinzel-ticket` present under remote posture, removed by a live session, and `doctor` section 8 reported no defect while the session was live. Reverify through the combined commands after v0.4.0 |
 | **`travel` / `remote` transitions** | Verified: screen sharing closes and reopens, posture reports `travel` and `remote`, and `mixed` was correctly reported for a half-configured machine before the first transition |
 | **The timeout path** | Verified 2026-08-30 with a stand-in engine that claims a task then hangs: killed at 61s, `result: "timeout"`, `exit_code: 124`, the task rolled back from `[~]` to `[ ]`, no orphaned process. A *real* engine killed mid-call is still not reproduced |
 | **Capability inside the boundary under `dontAsk`** | Verified: commands never explicitly allowed (`python3`, a `tee` pipeline) still run and write inside the working directory, because a sandboxed command needs no prompt |

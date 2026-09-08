@@ -20,7 +20,7 @@
 # Requires lib/common.sh.
 
 SUDOERS_DIAG=/etc/sudoers.d/heinzel-diag
-# Not installed by anything here since v0.3.25 (DESIGN 4.3). The name survives
+# Not installed by anything here since v0.4.0 (DESIGN 4.3). The name survives
 # because a machine upgraded from a build that did install it still has the
 # file, and every transition has to take it away.
 SUDOERS_TICKET=/etc/sudoers.d/heinzel-ticket
@@ -316,7 +316,7 @@ posture_set_screenlock() {
 # visudo -c before installing: a syntax error here breaks sudo itself, and
 # recovering from that needs the very privilege it just removed.
 # `diag` is the only template: it is read-only, and the write-capable half was
-# retired in v0.3.25 rather than left as an argument someone could pass a 1 to.
+# retired in v0.4.0 rather than left as an argument someone could pass a 1 to.
 posture_install_sudoers() {
   local which=$1 src dst tmp user=${SUDO_USER:-$(id -un)}
   case ${which} in

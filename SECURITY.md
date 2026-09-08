@@ -31,7 +31,7 @@ rather than opening a public issue. A first response should take a few days; the
   inert on expiry, reboot, loss of the liveness marker, or the machine entering travel posture.
 - *Unbounded cost.* Three independent budgets plus a schedule window.
 - *A standing write-capable sudo window during unattended work.* The relaxed sudo ticket that made
-  interactive remote work practical was retired in v0.3.25: no mode installs one, and every mode
+  interactive remote work practical was retired in v0.4.0: no mode installs one, and every mode
   removes the file an older build left behind.
 - *An unattended agent touching a real environment.* Safe mode (`HEINZEL_SAFE_MODE`, on by default,
   `docs/SPEC.md` §13.1) denies the commands that reach a cluster, a cloud account, a registry, a

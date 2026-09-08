@@ -11,7 +11,7 @@
 # Multibyte truncation is locale-dependent (DESIGN 6.3). Fix it once, here.
 export LC_CTYPE=UTF-8
 
-HEINZEL_VERSION="0.3.25"
+HEINZEL_VERSION="0.4.0"
 
 # The TTL ceiling is deliberately not configurable. A session that can be
 # created with an unbounded lifetime is not a session, it is a mode.
@@ -1020,7 +1020,7 @@ state_write() {
 HZ_MODE=""
 HZ_REASON=""
 
-# The public mode of a live session. Files written before v0.3.25 have no such
+# The public mode of a live session. Files written before v0.4.0 have no such
 # field and describe the only live mode that existed then, which is `work`.
 # An unknown value is kept visible to the composed gate below rather than
 # silently rounded to work: hand-edited state must fail closed.

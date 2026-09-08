@@ -435,7 +435,7 @@ hzl off
 ls /etc/sudoers.d/
 ```
 
-`heinzel-ticket` must be absent throughout: since v0.3.25 nothing installs it,
+`heinzel-ticket` must be absent throughout: since v0.4.0 nothing installs it,
 and both postures remove one an older build left behind. `doctor` section 8 must
 not report a defect while the session is live.
 
