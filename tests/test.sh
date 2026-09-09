@@ -179,7 +179,7 @@ printf 'tests/test.sh — heinzel %s, bash %s\n' \
 
 # --- backlog_scan: the TSV contract ----------------------------------------
 #
-# Every other function in this file is derived from these seven fields, so the
+# Every other function in this file is derived from these eight fields, so the
 # shape of a row is asserted directly. The row that matters is the one with no
 # id: reading the TSV with `IFS=<tab> read` collapses its empty field, the text
 # arrives in the id column, and the merge then discards a new task as out of
@@ -198,11 +198,12 @@ cat >"${SCAN_LEDGER}" <<'FIXTURE'
 - [ ] (dir:heinzel) routed before it has an id
 - [ ] (id:h-0003) a (dir:...) that is not at the front stays in the text
 - [!] (id:h-0005) blocked, with metadata <!-- blocked:2026-09-08T01:00:00+09:00 reason:needs a person run:20260908-010000 -->
+- [ ] (id:h-0006) (dir:heinzel) (roles:reviewer,planner) inspect before writing
 FIXTURE
 
 SCAN_ROW=$(backlog_scan "${SCAN_LEDGER}" | sed -n 2p)
-t_eq "a row has seven fields" \
-  7 "$(printf '%s\n' "${SCAN_ROW}" | awk -F'\t' '{print NF}')"
+t_eq "a row has eight fields" \
+  8 "$(printf '%s\n' "${SCAN_ROW}" | awk -F'\t' '{print NF}')"
 t_eq "an id-less row keeps an empty id field rather than shifting left" \
   "" "$(printf '%s' "${SCAN_ROW}" | cut -f4)"
 t_eq "an id-less row keeps its text in field 5" \
@@ -251,6 +252,16 @@ t_eq "and is not left in the text" \
   "blocked, with metadata" "$(printf '%s' "${SCAN_META}" | cut -f5)"
 t_eq "a task with no comment has an empty field 7, not a missing one" \
   "" "$(printf '%s' "${SCAN_ROW}" | cut -f7)"
+
+SCAN_ROLES=$(backlog_scan "${SCAN_LEDGER}" | sed -n 7p)
+t_eq "a leading roles directive is field 8" \
+  "reviewer,planner" "$(printf '%s' "${SCAN_ROLES}" | cut -f8)"
+t_eq "roles and workspace directives both come off the task text" \
+  "inspect before writing" "$(printf '%s' "${SCAN_ROLES}" | cut -f5)"
+t_eq "the workspace still parses before the roles directive" \
+  "heinzel" "$(printf '%s' "${SCAN_ROLES}" | cut -f6)"
+t_eq "a task with no roles directive uses an empty field 8" \
+  "" "$(printf '%s' "${SCAN_ROW}" | cut -f8)"
 
 # --- backlog_count ---------------------------------------------------------
 #
@@ -395,6 +406,39 @@ cat >"${WS_EMPTY}" <<'FIXTURE'
 FIXTURE
 worksheet_write "${WS_EMPTY}" 3 "${TMPROOT}/never.md" >/dev/null 2>&1
 t_fails "a ledger with nothing to do is refused" "$?"
+
+group 'per-task roles'
+
+t_eq "configured role switches have one canonical order" \
+  "planner,executor" \
+  "$(HEINZEL_PLANNER=1 HEINZEL_EXECUTOR=1 HEINZEL_REVIEWER=0 task_roles_default)"
+t_eq "a task directive is canonicalised regardless of its order" \
+  "planner,executor,reviewer" \
+  "$(task_roles_effective reviewer,executor,planner)"
+task_roles_effective none >/dev/null 2>&1
+t_fails "a task cannot turn every role off" "$?"
+task_roles_effective reviewer >/dev/null 2>&1
+t_fails "a reviewer-only task is refused because there is nothing to review" "$?"
+task_roles_effective planner,reviewer >/dev/null 2>&1
+t_fails "a reviewer without an executor is refused because it reviews changes" "$?"
+task_roles_effective planner,typo >/dev/null 2>&1
+t_fails "an unknown role is refused" "$?"
+
+ROLE_LEDGER=${TMPROOT}/role-ledger.md
+cat >"${ROLE_LEDGER}" <<'FIXTURE'
+## P1
+- [ ] (id:h-0101) (roles:planner,executor) plan and execute one
+- [ ] (id:h-0102) default-role task
+- [ ] (id:h-0103) (roles:executor,planner) plan and execute two
+- [ ] (id:h-0104) (roles:reviewer) review only
+FIXTURE
+HEINZEL_PLANNER=0 HEINZEL_EXECUTOR=1 HEINZEL_REVIEWER=0 \
+  worksheet_write "${ROLE_LEDGER}" 3 "${TMPROOT}/role-ws.md" "" \
+    planner,executor >"${TMPROOT}/role-ids"
+t_eq "one worksheet groups only tasks with the same effective role set" \
+  "h-0101 h-0103" "$(tr '\n' ' ' <"${TMPROOT}/role-ids" | sed 's/ $//')"
+t_lacks "the roles directive itself is not handed to an agent" \
+  "${TMPROOT}/role-ws.md" '(roles:'
 
 # --- worksheet_render ------------------------------------------------------
 #
@@ -927,6 +971,21 @@ t_argv "claude reviewer: no write tools, and the schema as one argument" \
   --json-schema "${REVIEW_SCHEMA}" \
   --model test-model --effort test-effort
 
+AR_CP=${TMPROOT}/argv-claude-planner
+HEINZEL_PLANNER_MODEL="test-planner-model"
+HEINZEL_PLANNER_EFFORT="high"
+dry_run claude planner "${AR_CP}"
+t_argv "claude planner: read-only without the reviewer's output schema" \
+  "${AR_CP}/dry-run.cmd" \
+  claude -p "${PROMPT_ARG}" \
+  --output-format json \
+  --setting-sources user \
+  --settings "${SETTINGS}" \
+  --permission-mode dontAsk \
+  --disallowedTools Write Edit NotebookEdit Bash \
+  --model test-planner-model --effort high
+unset HEINZEL_PLANNER_MODEL HEINZEL_PLANNER_EFFORT
+
 AR_CF=${TMPROOT}/argv-claude-fixer
 dry_run claude fixer "${AR_CF}"
 # The third role, and the reason the streaming branch names `executor` instead
@@ -966,6 +1025,20 @@ t_argv "codex reviewer: read-only, by the sandbox and not by the model" \
   -m test-codex-model \
   -c 'model_reasoning_effort="test-codex-effort"' \
   "${PROMPT_ARG}"
+
+AR_XP=${TMPROOT}/argv-codex-planner
+HEINZEL_PLANNER_MODEL="test-codex-planner"
+HEINZEL_PLANNER_EFFORT="medium"
+dry_run codex planner "${AR_XP}"
+t_argv "codex planner: the read-only sandbox and its own model" \
+  "${AR_XP}/dry-run.cmd" \
+  codex exec --skip-git-repo-check -C "${ARGV_WORK}" --json \
+  -o "${AR_XP}/last.txt" \
+  -s read-only \
+  -m test-codex-planner \
+  -c 'model_reasoning_effort="medium"' \
+  "${PROMPT_ARG}"
+unset HEINZEL_PLANNER_MODEL HEINZEL_PLANNER_EFFORT
 
 AR_XI=${TMPROOT}/argv-codex-ignore-conf
 HEINZEL_CODEX_IGNORE_USER_CONFIG=1
@@ -1796,6 +1869,57 @@ oc_validate typo "anthropic/claude-sonnet-4-5"
 t_fails "an unknown executor is still refused" "$?"
 
 unset HEINZEL_HOURS
+
+group 'role configuration'
+
+role_validate() { # planner executor reviewer
+  (
+    HEINZEL_MODEL="" HEINZEL_EFFORT=""
+    HEINZEL_CODEX_MODEL="" HEINZEL_CODEX_EFFORT=""
+    HEINZEL_ROOT=${SC_ROOT}
+    hzl_load_conf >/dev/null 2>&1
+    HEINZEL_PLANNER=$1 HEINZEL_EXECUTOR=$2 HEINZEL_REVIEWER=$3
+    HEINZEL_REVIEW=${HEINZEL_REVIEWER}
+    hzl_validate_conf >/dev/null 2>&1
+  )
+}
+
+t_eq "fresh defaults keep the extra billed planner off" \
+  "0 1 0" "$(
+    HEINZEL_MODEL="" HEINZEL_EFFORT="" HEINZEL_CODEX_MODEL="" HEINZEL_CODEX_EFFORT=""
+    HEINZEL_ROOT=${SC_ROOT}; hzl_load_conf >/dev/null 2>&1
+    printf '%s %s %s' "${HEINZEL_PLANNER}" "${HEINZEL_EXECUTOR}" "${HEINZEL_REVIEWER}"
+  )"
+role_validate 1 0 0
+t_ok "planner-only defaults are valid" "$?"
+role_validate 0 1 0
+t_ok "executor-only defaults are valid" "$?"
+role_validate 0 0 1
+t_fails "reviewer-only defaults are invalid because no role produces work" "$?"
+role_validate 1 0 1
+t_fails "planner plus reviewer is invalid because no executor changes exist" "$?"
+role_validate 0 0 0
+t_fails "all three roles off is a configuration error" "$?"
+role_validate typo 1 0
+t_fails "a misspelled role switch is refused" "$?"
+
+ROLE_CONF_ROOT=${TMPROOT}/role-conf-root
+mkdir -p "${ROLE_CONF_ROOT}/etc"
+printf '%s\n' 'HEINZEL_REVIEW=1' >"${ROLE_CONF_ROOT}/etc/heinzel.conf"
+t_eq "the pre-0.5 review switch still enables the reviewer" 1 "$(
+  unset HEINZEL_REVIEW HEINZEL_REVIEWER
+  HEINZEL_MODEL="" HEINZEL_EFFORT="" HEINZEL_CODEX_MODEL="" HEINZEL_CODEX_EFFORT=""
+  HEINZEL_ROOT=${ROLE_CONF_ROOT}; hzl_load_conf >/dev/null 2>&1
+  printf '%s' "${HEINZEL_REVIEWER}"
+)"
+t_eq "the new reviewer environment switch overrides an old config" 0 "$(
+  unset HEINZEL_REVIEW
+  HEINZEL_REVIEWER=0
+  HEINZEL_MODEL="" HEINZEL_EFFORT="" HEINZEL_CODEX_MODEL="" HEINZEL_CODEX_EFFORT=""
+  HEINZEL_ROOT=${ROLE_CONF_ROOT}; hzl_load_conf >/dev/null 2>&1
+  printf '%s' "${HEINZEL_REVIEWER}"
+)"
+unset ROLE_CONF_ROOT
 
 # --- the next slot, as a time ----------------------------------------------
 #
@@ -5025,6 +5149,11 @@ for pr_ph in $(grep -o '{{[A-Z_]*}}' "${TEST_ROOT}/prompts/backlog-run.md" | sor
   grep -q -- "render '${pr_ph}'" "${TEST_ROOT}/bin/hzl-run" || PR_MISSING="${PR_MISSING} ${pr_ph}"
 done
 t_eq "every placeholder in the run prompt is rendered by bin/hzl-run" "" "${PR_MISSING}"
+PR_MISSING=""
+for pr_ph in $(grep -o '{{[A-Z_]*}}' "${TEST_ROOT}/prompts/plan.md" | sort -u); do
+  grep -q -- "render '${pr_ph}'" "${TEST_ROOT}/bin/hzl-run" || PR_MISSING="${PR_MISSING} ${pr_ph}"
+done
+t_eq "every placeholder in the planner prompt is rendered by bin/hzl-run" "" "${PR_MISSING}"
 unset PR_MISSING pr_ph
 
 # --- what the web UI is served ---------------------------------------------
@@ -5134,6 +5263,9 @@ for db_k in generated_at host version backlog session schedule workspaces tasks 
   t_eq "it carries .${db_k}" 1 \
     "$(jq --arg k "${db_k}" 'if has($k) then 1 else 0 end' "${DB_OUT}" 2>/dev/null)"
 done
+t_eq "the dashboard exposes the three configured role defaults" \
+  'false true false' \
+  "$(jq -r '[.engines.planner_enabled, .engines.executor_enabled, .engines.reviewer_enabled] | join(" ")' "${DB_OUT}")"
 
 # Markers and routing come from the ledger's own parse, so a task reads the
 # same on the page as it does in `hzl next`.
@@ -5147,6 +5279,8 @@ t_eq "and no task carries its raw comment through to the page" \
   "0" "$(jq '[.tasks[] | select(has("meta"))] | length' "${DB_OUT}" 2>/dev/null)"
 t_eq "an untagged task is shown in the workspace a run would use" \
   "$(basename "${DB_WORK}")" "$(jq -r '[.tasks[] | select(.marker == " ")][0].workspace' "${DB_OUT}" 2>/dev/null)"
+t_eq "a task without a directive shows the configured role defaults" \
+  "executor" "$(jq -r '[.tasks[] | select(.marker == " ")][0].roles | join(",")' "${DB_OUT}" 2>/dev/null)"
 
 # `status --json` exits 10 while a session is live. Taken as a failure, the
 # document gained the word `null` after a perfectly good body — valid nowhere,
@@ -5171,6 +5305,14 @@ hzl_db add --priority 2 "フォームから積んだ仕事" >/dev/null 2>&1
 t_eq "the same task word for word is refused, not queued twice" 4 "$?"
 t_eq "and the ledger still holds exactly one of it" \
   1 "$(grep -c 'フォームから積んだ仕事' "${DB_BACKLOG}")"
+
+hzl_db add --roles reviewer,executor "レビュー付き" >/dev/null 2>&1
+t_ok "a task can select its roles through hzl add" "$?"
+t_has "and the canonical directive is written after routing metadata" \
+  "${DB_BACKLOG}" '(roles:executor,reviewer) レビュー付き'
+hzl_db add --roles reviewer "作る人なし" >/dev/null 2>&1
+t_fails "hzl add refuses a reviewer-only task before queueing it" "$?"
+t_lacks "and the refused task never reaches the ledger" "${DB_BACKLOG}" '作る人なし'
 
 hzl_db add --priority 0 "範囲外" >/dev/null 2>&1
 t_fails "a priority outside 1..99 is refused" "$?"

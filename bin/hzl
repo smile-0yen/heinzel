@@ -1381,7 +1381,7 @@ doc_bad()  { printf '  %s %s\n' "$(bad XX)" "$*"; DOC_PROBLEMS=$((DOC_PROBLEMS +
 
 cmd_doctor() {
   printf '\n1. prerequisites\n'
-  local c
+  local c role enabled engine seen_engines=""
   # Reported, not required: `hzl web` is a window a person opens, and every
   # unattended path in this program runs without it. A machine that never
   # serves the dashboard is not misconfigured for lacking python3.
@@ -1393,19 +1393,25 @@ cmd_doctor() {
   for c in jq caffeinate pmset launchctl lockf; do
     if have "${c}"; then doc_ok "${c}"; else doc_bad "${c} is missing"; fi
   done
-  if have "${HEINZEL_EXECUTOR_ENGINE}"; then
-    doc_ok "${HEINZEL_EXECUTOR_ENGINE} ($(${HEINZEL_EXECUTOR_ENGINE} --version 2>/dev/null | head -1))"
-    if [ "${HEINZEL_EXECUTOR_ENGINE}" = opencode ]; then
-      doc_warn "opencode confinement is permission-layer, not the OS boundary Claude/Codex provide (see SECURITY.md)"
+  for role in planner executor reviewer; do
+    case ${role} in
+      planner) enabled=${HEINZEL_PLANNER}; engine=${HEINZEL_PLANNER_ENGINE} ;;
+      executor) enabled=${HEINZEL_EXECUTOR}; engine=${HEINZEL_EXECUTOR_ENGINE} ;;
+      reviewer) enabled=${HEINZEL_REVIEWER}; engine=${HEINZEL_REVIEWER_ENGINE} ;;
+    esac
+    [ "${enabled}" = 1 ] || continue
+    case " ${seen_engines} " in *" ${engine} "*) continue ;; esac
+    seen_engines="${seen_engines}${engine} "
+    if have "${engine}"; then
+      doc_ok "${engine} ($(${engine} --version 2>/dev/null | head -1))"
+      if [ "${engine}" = opencode ]; then
+        doc_warn "opencode confinement is permission-layer, not the OS boundary Claude/Codex provide (see SECURITY.md)"
+      fi
+    else
+      doc_bad "enabled engine '${engine}' is not on PATH"
+      printf '       searched: %s\n' "${PATH}"
     fi
-  else
-    # "not on PATH" is not a diagnosis, and this is the one prerequisite whose
-    # absence depends on how hzl was invoked rather than on what is installed.
-    # Print what was actually searched, so the next report is answerable.
-    doc_bad "executor engine '${HEINZEL_EXECUTOR_ENGINE}' is not on PATH"
-    printf '       searched: %s\n' "${PATH}"
-    printf '       set HEINZEL_EXECUTOR_ENGINE in etc/heinzel.conf, or put the CLI on PATH.\n'
-  fi
+  done
   # Absence is expected on stock macOS and is not a problem: we ship our own.
   if have timeout || have gtimeout; then
     doc_ok "coreutils timeout present (unused - hzl carries its own watchdog)"
@@ -1619,7 +1625,7 @@ EOF
   fi
 
   printf '\n7. review pipeline\n'
-  if [ "${HEINZEL_REVIEW}" = 1 ]; then
+  if [ "${HEINZEL_REVIEWER}" = 1 ]; then
     if have "${HEINZEL_REVIEWER_ENGINE}"; then
       doc_ok "reviewer '${HEINZEL_REVIEWER_ENGINE}' is present"
     else
@@ -1632,7 +1638,7 @@ EOF
       doc_bad "review-schema.json is missing or invalid"
     fi
   else
-    doc_ok "review is off (HEINZEL_REVIEW=0)"
+    doc_ok "reviewer is off by default (HEINZEL_REVIEWER=0)"
   fi
 
   printf '\n8. posture\n'
@@ -1916,11 +1922,12 @@ _add_locked() { # backlog priority text
 }
 
 cmd_add() {
-  local b prio=99 dir="" text=""
+  local b prio=99 dir="" roles="" text=""
   while [ $# -gt 0 ]; do
     case $1 in
       --priority|-p) prio=${2:-}; shift ;;
       --dir|-d) dir=${2:-}; shift ;;
+      --roles|-r) roles=${2:-}; shift ;;
       --) shift; break ;;
       -*) die "add: unknown option $1" ;;
       *) break ;;
@@ -1929,7 +1936,7 @@ cmd_add() {
   done
 
   text=$(oneline "$*")
-  [ -n "${text}" ] || die "add: nothing to add. Usage: hzl add [--priority N] [--dir NAME] <text>"
+  [ -n "${text}" ] || die "add: nothing to add. Usage: hzl add [--priority N] [--dir NAME] [--roles LIST] <text>"
   case ${prio} in
     ""|*[!0-9]*) die "add: --priority must be an integer in 1..99" ;;
   esac
@@ -1946,6 +1953,10 @@ cmd_add() {
       exit 1
     }
   fi
+  if [ -n "${roles}" ]; then
+    roles=$(task_roles_effective "${roles}") ||
+      die "add: --roles must include planner or executor; reviewer also requires executor"
+  fi
 
   b=$(cur_backlog)
   [ -n "${b}" ] || die "no backlog configured (DEFAULT_BACKLOG in etc/heinzel.conf)"
@@ -1960,7 +1971,8 @@ cmd_add() {
     exit 4
   fi
 
-  with_backlog_lock _add_locked "${b}" "${prio}" "${dir:+(dir:${dir}) }${text}" ||
+  with_backlog_lock _add_locked "${b}" "${prio}" \
+    "${dir:+(dir:${dir}) }${roles:+(roles:${roles}) }${text}" ||
     die "could not add to ${b}"
 
   # `LC_ALL=C`: this looks the task up by its own text, which is routinely
@@ -1974,6 +1986,7 @@ cmd_add() {
   field "added" "${id:-(no id allocated)}"
   field "priority" "P${prio}"
   field "workspace" "${dir:-$(workdir_name "$(workdir_default)") (default)}"
+  field "roles" "${roles:-$(task_roles_default) (default)}"
   field "backlog" "${b}"
   printf '\n'
   return 0
@@ -2004,7 +2017,8 @@ dashboard_tasks_json() { # backlog days
     ledger_scan_live "${b}" | awk '{print "live\t" $0}'
     backlog_scan "$(ledger_archive "${b}")" 2>/dev/null | awk '{print "archive\t" $0}'
   } |
-  jq -R -s --arg def "${def}" --arg cutoff "${cutoff}" '
+  jq -R -s --arg def "${def}" --arg cutoff "${cutoff}" \
+    --arg default_roles "$(task_roles_default)" '
     def after(k): if (.meta | test(k + ":")) then
         (.meta | sub(".*" + k + ":"; "") | sub("[ ].*"; ""))
       else null end;
@@ -2017,7 +2031,8 @@ dashboard_tasks_json() { # backlog days
       id:        (if .[4] == "" then null else .[4] end),
       text:      .[5],
       workspace: (if .[6] == "" then $def else .[6] end),
-      meta:      (.[7] // "")
+      meta:      (.[7] // ""),
+      roles:     ((if (.[8] // "") == "" then $default_roles else .[8] end) | split(","))
     })
     | map(. + {
         done_at:    after("done"),
@@ -2163,9 +2178,15 @@ EOF
     --argjson tasks "$(dashboard_tasks_json "${b}" "${days}")" \
     --argjson runs "$(dashboard_runs_json 40)" \
     --argjson log "$(dashboard_log_json 200)" \
-    --arg review "$([ "${HEINZEL_REVIEW}" = 1 ] && echo "${HEINZEL_REVIEWER_ENGINE}" || echo "")" \
+    --arg review "$([ "${HEINZEL_REVIEWER}" = 1 ] && echo "${HEINZEL_REVIEWER_ENGINE}" || echo "")" \
     --arg executor "${HEINZEL_EXECUTOR_ENGINE}" \
-    --arg model "$(engine_config_model "${HEINZEL_EXECUTOR_ENGINE}")" \
+    --arg model "$(engine_role_model "${HEINZEL_EXECUTOR_ENGINE}" executor)" \
+    --arg planner "$([ "${HEINZEL_PLANNER}" = 1 ] && echo "${HEINZEL_PLANNER_ENGINE}" || echo "")" \
+    --arg planner_model "$(engine_role_model "${HEINZEL_PLANNER_ENGINE}" planner)" \
+    --arg reviewer_model "$(engine_role_model "${HEINZEL_REVIEWER_ENGINE}" reviewer)" \
+    --argjson planner_enabled "${HEINZEL_PLANNER}" \
+    --argjson executor_enabled "${HEINZEL_EXECUTOR}" \
+    --argjson reviewer_enabled "${HEINZEL_REVIEWER}" \
     '{generated_at: $generated_at, generated_at_epoch: $generated_at_epoch,
       host: $host, version: $version, backlog: $backlog,
       session: $session,
@@ -2174,7 +2195,13 @@ EOF
                  next_run: (if $next_run == "" then null else $next_run end),
                  agent_loaded: $agent_loaded, slots: $slots},
       engines: {executor: $executor, model: $model,
-                reviewer: (if $review == "" then null else $review end)},
+                executor_enabled: ($executor_enabled == 1),
+                planner: (if $planner == "" then null else $planner end),
+                planner_enabled: ($planner_enabled == 1),
+                planner_model: $planner_model,
+                reviewer: (if $review == "" then null else $review end),
+                reviewer_enabled: ($reviewer_enabled == 1),
+                reviewer_model: $reviewer_model},
       workspaces: $workspaces, tasks: $tasks, runs: $runs, log: $log}'
 }
 
@@ -2378,15 +2405,22 @@ cmd_schedule() {
   fi
 
   printf '\nengines\n'
-  local executor_model executor_effort
-  executor_model=$(engine_config_model "${HEINZEL_EXECUTOR_ENGINE}")
-  executor_effort=$(engine_config_effort "${HEINZEL_EXECUTOR_ENGINE}")
-  field "executor" "${HEINZEL_EXECUTOR_ENGINE} (${executor_model:-default}, ${executor_effort:-default})"
-  if [ "${HEINZEL_REVIEW}" = 1 ]; then
-    field "review" "on - ${HEINZEL_REVIEWER_ENGINE}, on revise: ${HEINZEL_REVIEW_ON_REVISE}"
+  if [ "${HEINZEL_PLANNER}" = 1 ]; then
+    field "planner" "on - ${HEINZEL_PLANNER_ENGINE} ($(engine_role_model "${HEINZEL_PLANNER_ENGINE}" planner), $(engine_role_effort "${HEINZEL_PLANNER_ENGINE}" planner)), read-only"
   else
-    field "review" "off (HEINZEL_REVIEW=0)"
+    field "planner" "off by default"
   fi
+  if [ "${HEINZEL_EXECUTOR}" = 1 ]; then
+    field "executor" "on - ${HEINZEL_EXECUTOR_ENGINE} ($(engine_role_model "${HEINZEL_EXECUTOR_ENGINE}" executor), $(engine_role_effort "${HEINZEL_EXECUTOR_ENGINE}" executor))"
+  else
+    field "executor" "off by default"
+  fi
+  if [ "${HEINZEL_REVIEWER}" = 1 ]; then
+    field "reviewer" "on - ${HEINZEL_REVIEWER_ENGINE} ($(engine_role_model "${HEINZEL_REVIEWER_ENGINE}" reviewer), $(engine_role_effort "${HEINZEL_REVIEWER_ENGINE}" reviewer)), on revise: ${HEINZEL_REVIEW_ON_REVISE}"
+  else
+    field "reviewer" "off by default"
+  fi
+  field "task override" "(roles:planner,executor,reviewer), any non-empty subset"
 
   printf '\n'
   return 0
@@ -2429,6 +2463,7 @@ backlog
   hzl add [options] <text>   put a task in the queue. Options:
                                --priority N       1..99, default 99
                                --dir NAME         which checkout it is about
+                               --roles LIST       planner,executor,reviewer subset
   hzl next                   what would be picked up next
   hzl take [id]              list blocked tasks, or print one with its steps
   hzl done <id> [note]       close a task out by hand

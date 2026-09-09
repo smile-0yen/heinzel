@@ -6,7 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-10
+
+Planner, executor, and reviewer are now explicit, independently configurable
+roles. This is a minor release because it adds a new billed workflow stage, a
+new task directive, and new public configuration keys while preserving the old
+executor-only default and the `HEINZEL_REVIEW` compatibility switch.
+
 ### Added
+
 - **OpenCode as an executor or reviewer.** `HEINZEL_EXECUTOR_ENGINE` and
   `HEINZEL_REVIEWER_ENGINE` now accept `opencode`. Model and provider-specific
   variant are configured with `HEINZEL_OPENCODE_MODEL` and
@@ -20,8 +28,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   step cost/tokens, turn count and final text reach the existing `result.json`
   contract, including a stream cut off mid-line. The full suite uses a fake
   `opencode` and makes no API call.
+- **A read-only planner stage.** It runs before the executor with write and
+  shell tools removed for Claude or the read-only sandbox for Codex. Its plan
+  is kept under the run's `exec-*/planner/` directory and passed verbatim to
+  the executor. A planner-only task treats the non-empty plan as its artifact.
+- **Role-specific engines, models, and efforts.** A high-capability planner can
+  use Opus while a faster executor uses Sonnet, without either inheriting the
+  reviewer's Codex settings. The former engine-wide variables remain fallbacks
+  for existing configurations.
+- **Per-task role selection.** `(roles:planner,executor)`, placed after an
+  optional `(dir:...)`, replaces the configured defaults for that task. Tasks
+  with different effective role sets are separated into different worksheets.
+- **Regression coverage** for the eight-field backlog parse, role
+  canonicalisation and grouping, invalid empty/reviewer-only sets, global
+  validation, read-only planner launches on both engines, and role-specific
+  model selection.
 
-### Fixed
+### Changed
+
+- The public defaults are `HEINZEL_PLANNER=0`, `HEINZEL_EXECUTOR=1`, and
+  `HEINZEL_REVIEWER=0`. At least planner or executor must be enabled; all-off
+  and reviewer-only configurations fail validation.
+- `HEINZEL_REVIEWER` supersedes `HEINZEL_REVIEW`; the old name remains an
+  environment/configuration compatibility alias.
 - Engine, model and effort/variant displays now use the selected engine's
   values instead of always showing the Claude settings.
 

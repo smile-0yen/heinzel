@@ -226,8 +226,14 @@ working, not the exception.
 
 The posture half of `hzl work`, `hzl off`, and `hzl mobile` changes your firewall, screen sharing
 and sudo policy only after you set `HEINZEL_POSTURE=1` deliberately. Until then the OS posture is
-reported as unmanaged, while the unattended-session half still works. Review by a second engine
-is off until you set `HEINZEL_REVIEW=1`.
+reported as unmanaged, while the unattended-session half still works. The read-only planner and
+reviewer are both off on a fresh install; enable their role defaults with `HEINZEL_PLANNER=1` and
+`HEINZEL_REVIEWER=1`.
+
+Planner, executor, and reviewer each have their own engine, model, and effort setting. For example,
+`HEINZEL_PLANNER_MODEL="claude-opus-5"` can plan for an executor using
+`HEINZEL_EXECUTOR_MODEL="claude-sonnet-5"`. The planner runs first without write or shell tools,
+and its final answer is inserted verbatim into the executor prompt.
 
 The one switch that is on already is safe mode, and it is on because nobody would think to look
 for it: an unattended run may not call `gcloud`, `kubectl`, `terraform`, `ssh`, `docker push`,
@@ -239,6 +245,12 @@ for it: an unattended run may not call `gcloud`, `kubectl`, `terraform`, `ssh`, 
 backlog and a task picks its checkout by name — `- [ ] (dir:beta) fix the redirect` — with the
 first line of the list as the default for tasks that name none. A run works one checkout per
 night, whichever the highest-priority task names. `docs/RUNBOOK.md` has the details.
+
+A task can also replace the three role defaults: `(roles:planner,executor)` plans and implements
+without review, while `(roles:executor,reviewer)` skips planning and keeps the review gate. The
+directive names the complete enabled set. Tasks with different effective role sets are put in
+different runs. At least planner or executor must be enabled, and reviewer requires executor
+because it reviews the executor's workspace changes rather than the planner's prose.
 
 ## Tutorial: one night, end to end
 

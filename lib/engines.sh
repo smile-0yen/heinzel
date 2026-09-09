@@ -185,6 +185,16 @@ _engine_opencode_config() { # role -> inline opencode config on stdout
 
 # --- Agent Driver: the launch ----------------------------------------------
 
+# Model choice belongs to a role, not to an executable. The legacy settings
+# remain the fallback for callers and configurations written before v0.5.0.
+_engine_role_model() { # engine role
+  engine_role_model "$1" "$2"
+}
+
+_engine_role_effort() { # engine role
+  engine_role_effort "$1" "$2"
+}
+
 # Throughout this file, `([0] | implode)` is jq for one NUL byte. It is written
 # that way rather than as a unicode escape because the escape is invisible in a
 # diff and an editor that mangled it would produce a launch that still looked
@@ -216,8 +226,8 @@ engine_build_launch() {
   case ${engine} in
     claude)
       executable=claude
-      model=${HEINZEL_MODEL}
-      effort=${HEINZEL_EFFORT}
+      model=$(_engine_role_model "${engine}" "${role}")
+      effort=$(_engine_role_effort "${engine}" "${role}")
       # The executor streams, so that a person can watch a run that is still
       # going: `stream-json` writes one event per line as it happens, and
       # `raw` becomes a file `tail -f` has something to say about, instead of
@@ -249,13 +259,19 @@ engine_build_launch() {
             "${format[@]}"
             --setting-sources user
             --settings "${HEINZEL_ROOT}/etc/heinzel-settings.json")
-      if [ "${role}" = reviewer ]; then
-        # The reviewer has no way to write. A classifier deciding not to write
-        # is not the same guarantee as not having the tool.
-        profile=review-read-only-v1
+      if [ "${role}" = reviewer ] || [ "${role}" = planner ]; then
+        # Read-only roles have no way to write. A classifier deciding not to
+        # write is not the same guarantee as not having the tool.
+        if [ "${role}" = planner ]; then
+          profile=plan-read-only-v1
+        else
+          profile=review-read-only-v1
+        fi
         argv+=(--permission-mode dontAsk
-               --disallowedTools Write Edit NotebookEdit Bash
-               --json-schema "$(cat "${HEINZEL_ROOT}/etc/review-schema.json")")
+               --disallowedTools Write Edit NotebookEdit Bash)
+        if [ "${role}" = reviewer ]; then
+          argv+=(--json-schema "$(cat "${HEINZEL_ROOT}/etc/review-schema.json")")
+        fi
       else
         # dontAsk, not auto. auto approves whatever its classifier judges to
         # match the request, which measurably included writing outside the
@@ -278,14 +294,19 @@ engine_build_launch() {
       ;;
     codex)
       executable=codex
-      model=$(engine_config_model codex)
-      effort=$(engine_config_effort codex)
+      model=$(_engine_role_model "${engine}" "${role}")
+      effort=$(_engine_role_effort "${engine}" "${role}")
       argv=(exec --skip-git-repo-check -C "${workdir}" --json
             -o "${outdir}/last.txt")
-      if [ "${role}" = reviewer ]; then
+      if [ "${role}" = reviewer ] || [ "${role}" = planner ]; then
         # read-only is enforced by the OS sandbox, not by the model.
-        profile=review-read-only-v1
-        argv+=(-s read-only --output-schema "${HEINZEL_ROOT}/etc/review-schema.json")
+        if [ "${role}" = planner ]; then
+          profile=plan-read-only-v1
+          argv+=(-s read-only)
+        else
+          profile=review-read-only-v1
+          argv+=(-s read-only --output-schema "${HEINZEL_ROOT}/etc/review-schema.json")
+        fi
       else
         profile=execute-workspace-write-v1
         argv+=(-s workspace-write)
@@ -297,8 +318,8 @@ engine_build_launch() {
       ;;
     opencode)
       executable=opencode
-      model=$(engine_config_model opencode)
-      effort=$(engine_config_effort opencode)
+      model=$(_engine_role_model "${engine}" "${role}")
+      effort=$(_engine_role_effort "${engine}" "${role}")
       opencode_config=$(_engine_opencode_config "${role}") || return 1
       if [ "${role}" = reviewer ]; then
         profile=review-read-only-v1

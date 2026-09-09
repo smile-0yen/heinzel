@@ -79,32 +79,60 @@ DEFAULT_MAX_TASKS=3              # per run
 DEFAULT_RUN_TIMEOUT=3600         # wall clock per run, seconds
 DEFAULT_DURATION="10h"           # session TTL; the 24h ceiling is not configurable
 
-# --- engines ---------------------------------------------------------------
-# Choose claude or codex here. To use OpenCode as the executor, uncomment the
-# example below. OpenCode model IDs use provider/model; its provider-specific
-# reasoning setting is called a variant (for example low, high or max).
+# --- roles and engines -----------------------------------------------------
+# Each role has a default on/off switch and its own engine, model and effort.
+# Model and effort are always passed explicitly: leaving them to interactive
+# settings would let an editor preference silently change overnight cost.
+#
+# A task may replace these three switches without changing the session:
+#
+#   - [ ] (roles:planner,executor) plan first, then implement without review
+#   - [ ] (dir:beta) (roles:executor,reviewer) fix and independently review
+#
+# The directive is the complete enabled set, in any order. Omitting it uses
+# these defaults. `(roles:none)` and a configuration with all three switches
+# off are errors. The reviewer also requires the executor because its artifact
+# is the executor's workspace change, not the planner's prose.
+#
+# Planning is opt-in on a fresh install because it adds a billed call. The
+# planner is always launched read-only, and its final plan is handed verbatim
+# to the executor. This split permits a strong planner and a faster writer.
+HEINZEL_PLANNER=0
+HEINZEL_PLANNER_ENGINE="claude"
+HEINZEL_PLANNER_MODEL="claude-opus-5"
+HEINZEL_PLANNER_EFFORT="xhigh"          # low|medium|high|xhigh|max
+HEINZEL_PLANNER_TIMEOUT=900
+
+HEINZEL_EXECUTOR=1
 HEINZEL_EXECUTOR_ENGINE="claude"
-HEINZEL_MODEL="claude-opus-5"
-HEINZEL_EFFORT="xhigh"           # low|medium|high|xhigh|max
+HEINZEL_EXECUTOR_MODEL="claude-sonnet-5"
+HEINZEL_EXECUTOR_EFFORT="high"
 
-# OpenCode executor example:
+# OpenCode is supported for executor and reviewer roles. Its model IDs use
+# provider/model and its provider-specific reasoning setting is a variant.
+# To select it, change the role's engine and either its role model/effort above
+# or these compatibility fallbacks:
 # HEINZEL_EXECUTOR_ENGINE="opencode"
-# HEINZEL_OPENCODE_MODEL="anthropic/claude-sonnet-4-5"  # required
-# HEINZEL_OPENCODE_VARIANT="high"                       # optional
+# HEINZEL_EXECUTOR_MODEL="anthropic/claude-sonnet-4-5"
+# HEINZEL_EXECUTOR_EFFORT="high"
+HEINZEL_OPENCODE_MODEL=""
+HEINZEL_OPENCODE_VARIANT=""
 
-# --- review (opt-in) -------------------------------------------------------
-# Off by default: it needs a second engine and it costs money. When enabled,
-# the executor's changes are re-read by a different engine in read-only mode.
-# A missing or failing reviewer never drops a task; it is a quality gate, not
-# an availability dependency.
-HEINZEL_REVIEW=0
+# Review is also opt-in. The executor's changes are re-read by a different
+# engine in read-only mode. A missing or failing reviewer never drops a task;
+# it is a quality gate, not an availability dependency.
+HEINZEL_REVIEWER=0
 HEINZEL_REVIEWER_ENGINE="codex"
-HEINZEL_CODEX_MODEL="gpt-5.6-sol"
-HEINZEL_CODEX_EFFORT="xhigh"
+HEINZEL_REVIEWER_MODEL="gpt-5.6-sol"
+HEINZEL_REVIEWER_EFFORT="xhigh"
 HEINZEL_REVIEW_ON_REVISE="note-only"   # note-only|fix-once|block
 HEINZEL_REVIEW_TIMEOUT=900
 HEINZEL_REVIEW_MAX_PATCH_BYTES=200000
 HEINZEL_CODEX_IGNORE_USER_CONFIG=0
+
+# Compatibility for pre-0.5 configurations: HEINZEL_REVIEW still aliases
+# HEINZEL_REVIEWER, while HEINZEL_MODEL / HEINZEL_EFFORT and the CODEX pair
+# remain fallbacks when a role-specific model is omitted.
 
 # --- posture (opt-in) ------------------------------------------------------
 # The posture half of `hzl work`, `hzl off`, and `hzl mobile` changes screen

@@ -138,6 +138,18 @@ could have surfaced (`docs/DESIGN.md` §4.5 and §4.6), and again the same day o
 the worksheet path (§4.7). Run it again on your own backlog: the value is in
 the checking, not in the record of it having once worked.
 
+For v0.5.0, run this phase once with `HEINZEL_PLANNER=1`. After it completes,
+check the planner handoff as well:
+
+1. `exec-*/planner/launch.json` names `role: planner` and
+   `security_profile: plan-read-only-v1`.
+2. `exec-*/planner/last.txt` contains the plan, and the same text appears under
+   “Plan from the read-only planner” in `exec-*/prompt.md`.
+3. Ask the task to consider creating a harmless marker during planning. The
+   plan may describe it, but the planner must not create it; only the executor
+   may write. This is the live half of the read-only guarantee that an argv
+   test against a stand-in engine cannot establish.
+
 Seed **two** tasks and keep `--max-total 1`. One task tells you the run works;
 the second tells you the run stayed inside its worksheet, which is the property
 that matters now — it should still be `[ ]` afterwards, untouched.
