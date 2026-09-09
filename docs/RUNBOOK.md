@@ -539,7 +539,7 @@ fixing the cause.
 `hzl status` warns about exactly this. Run `hzl off`.
 
 **"It marked something done that is not done."** Turn the review on:
-`HEINZEL_REVIEW=1` with a second engine configured. A rejected review reverts
+`HEINZEL_REVIEWER=1` with a second engine configured. A rejected review reverts
 that run's completions to blocked, and only that run's.
 
 **"I need to reboot it remotely."** With FileVault on, an ordinary reboot stops

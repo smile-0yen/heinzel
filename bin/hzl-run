@@ -689,7 +689,26 @@ while :; do
   # by the loop below. Either way there is nothing to work.
   [ -n "${RUN_WS}" ] || skip "nothing to do (0 todo)"
 
-  WORKDIR=$(workdir_path_in "${RUN_WS}" "${WORKDIRS}") && break
+  if WORKDIR=$(workdir_path_in "${RUN_WS}" "${WORKDIRS}"); then
+    RUN_ROLES_RAW=$(backlog_next_roles "${BACKLOG}")
+    if RUN_ROLES=$(task_roles_effective "${RUN_ROLES_RAW}"); then
+      break
+    fi
+    BAD_ID=$(backlog_next_id "${BACKLOG}")
+    [ -n "${BAD_ID}" ] || abort "the next task has an invalid roles directive and no id to block it by"
+    if [ "${RUN_ROLES_RAW}" = none ] || [ -z "${RUN_ROLES_RAW}" ]; then
+      ROLE_REASON="the roles directive has no producer; choose planner or executor, with reviewer optional"
+    else
+      ROLE_REASON="invalid roles directive '${RUN_ROLES_RAW}'; use a comma-separated subset of planner,executor,reviewer"
+    fi
+    if with_backlog_lock ledger_set_state "${BACKLOG}" "${BAD_ID}" "!" \
+         "blocked:$(iso_at) reason:$(oneline "${ROLE_REASON}") run:${RUN_ID}"; then
+      log_event skip "blocked ${BAD_ID}: ${ROLE_REASON}"
+      WORKDIR=""
+      continue
+    fi
+    abort "cannot block ${BAD_ID}, which has ${ROLE_REASON}"
+  fi
   WORKDIR=""
 
   BAD_ID=$(backlog_next_id "${BACKLOG}")
@@ -704,6 +723,11 @@ while :; do
     abort "cannot block ${BAD_ID}, which names workspace '${RUN_WS}' that this session does not have"
   fi
 done
+
+RUN_PLANNER=0 RUN_EXECUTOR=0 RUN_REVIEWER=0
+task_role_enabled "${RUN_ROLES}" planner && RUN_PLANNER=1
+task_role_enabled "${RUN_ROLES}" executor && RUN_EXECUTOR=1
+task_role_enabled "${RUN_ROLES}" reviewer && RUN_REVIEWER=1
 
 # The identity of the one workspace this run chose, out of the several it holds
 # leases on. Claims, the quiesce generation and the merge are all about the
@@ -741,7 +765,7 @@ WS_DIR="${WORKDIR}/.heinzel"
 WORKSHEET="${WS_DIR}/worksheet.md"
 WORKSHEET_IDS="${EXEC_DIR}/worksheet-ids.txt"
 mkdir -p "${WS_DIR}" || abort "cannot create ${WS_DIR}"
-worksheet_write "${BACKLOG}" "${MAX_TASKS}" "${WORKSHEET}" "${RUN_WS}" >"${WORKSHEET_IDS}" ||
+worksheet_write "${BACKLOG}" "${MAX_TASKS}" "${WORKSHEET}" "${RUN_WS}" "${RUN_ROLES}" >"${WORKSHEET_IDS}" ||
   abort "could not build a worksheet from ${BACKLOG}"
 # `TODO_BEFORE` counts the whole queue and the worksheet is one workspace's
 # slice of it, so the two differ whenever more than one checkout has work. The
@@ -816,13 +840,19 @@ if ! cmp -s "${CLAIMED_IDS}" "${WORKSHEET_IDS}"; then
 fi
 
 {
-  RUN_ENGINE_MODEL=$(engine_config_model "${HEINZEL_EXECUTOR_ENGINE}")
-  RUN_ENGINE_EFFORT=$(engine_config_effort "${HEINZEL_EXECUTOR_ENGINE}")
   printf '=== run %s (%s)\n' "${RUN_ID}" "${TRIGGER}"
   printf 'workdir  %s\n' "${WORKDIR}"
   printf 'budget   %s task(s) this run, %s/%s this session\n' "${MAX_TASKS}" "${DONE_TOTAL}" "${MAX_TOTAL}"
-  printf 'engine   %s %s effort=%s\n' "${HEINZEL_EXECUTOR_ENGINE}" \
-    "${RUN_ENGINE_MODEL:-default}" "${RUN_ENGINE_EFFORT:-default}"
+  printf 'roles    %s\n' "${RUN_ROLES}"
+  [ "${RUN_PLANNER}" = 1 ] && printf 'planner  %s %s effort=%s\n' \
+    "${HEINZEL_PLANNER_ENGINE}" "$(_engine_role_model "${HEINZEL_PLANNER_ENGINE}" planner)" \
+    "$(_engine_role_effort "${HEINZEL_PLANNER_ENGINE}" planner)"
+  [ "${RUN_EXECUTOR}" = 1 ] && printf 'executor %s %s effort=%s\n' \
+    "${HEINZEL_EXECUTOR_ENGINE}" "$(_engine_role_model "${HEINZEL_EXECUTOR_ENGINE}" executor)" \
+    "$(_engine_role_effort "${HEINZEL_EXECUTOR_ENGINE}" executor)"
+  [ "${RUN_REVIEWER}" = 1 ] && printf 'reviewer %s %s effort=%s\n' \
+    "${HEINZEL_REVIEWER_ENGINE}" "$(_engine_role_model "${HEINZEL_REVIEWER_ENGINE}" reviewer)" \
+    "$(_engine_role_effort "${HEINZEL_REVIEWER_ENGINE}" reviewer)"
   printf 'mode     %s\n' "$(session_operating_mode)"
   # Written on every run, including the runs where it is on, because "was safe
   # mode on that night?" is a question asked of a log after the fact and the
@@ -871,6 +901,52 @@ else
   push` or an `npm publish`: run one only where the task text asks for it by
   name, and block rather than improvise'
 fi
+
+STARTED=$(now_epoch)
+[ "${DRY_RUN}" = 1 ] && export HEINZEL_DRY_RUN=1
+
+# The claimed ids are on the worksheet by now, so the snapshot written here is
+# the one that matters for recovery: it names what a run that never comes back
+# was holding. A planner is read-only, but it is still a paid part of the run
+# and therefore starts only after this durable record exists.
+store_snapshot running
+
+PLANNER_HANDOFF="No separate planner ran. Inspect the repository and make the implementation plan before editing."
+PLANNER_DIR="${EXEC_DIR}/planner"
+PLANNER_RC=0
+PLANNER_VERDICT=disabled
+if [ "${RUN_PLANNER}" = 1 ]; then
+  mkdir -p "${PLANNER_DIR}" || abort "cannot create ${PLANNER_DIR}"
+  < "${HEINZEL_ROOT}/prompts/plan.md" \
+    render '{{WORKDIR}}' "${WORKDIR}" |
+    render '{{WORKSHEET}}' "${WORKSHEET}" |
+    render '{{MAX_TASKS}}' "${MAX_TASKS}" |
+    render '{{RUN_ID}}' "${RUN_ID}" >"${PLANNER_DIR}/prompt.md"
+  [ -s "${PLANNER_DIR}/prompt.md" ] || abort "the rendered planner prompt is empty"
+  if grep -q '{{[A-Z_]*}}' "${PLANNER_DIR}/prompt.md"; then
+    abort "planner prompt still contains placeholders"
+  fi
+  store_event engine.started \
+    "${HEINZEL_PLANNER_ENGINE} planner, ${HEINZEL_PLANNER_TIMEOUT}s, tasks $(store_task_ids)"
+  engine_run "${HEINZEL_PLANNER_ENGINE}" planner "${WORKDIR}" \
+    "${PLANNER_DIR}/prompt.md" "${PLANNER_DIR}" "${HEINZEL_PLANNER_TIMEOUT}" \
+    >>"${RUN_LOG}" 2>&1
+  PLANNER_RC=$?
+  if [ -r "${PLANNER_DIR}/result.json" ]; then
+    PLANNER_VERDICT=$(jq -r '.verdict // "error"' "${PLANNER_DIR}/result.json")
+  else
+    PLANNER_VERDICT=error
+  fi
+  if [ "${PLANNER_VERDICT}" = ok ] && [ -s "${PLANNER_DIR}/last.txt" ]; then
+    PLANNER_HANDOFF=$(cat "${PLANNER_DIR}/last.txt")
+  else
+    PLANNER_HANDOFF="The requested planner did not produce a usable plan (verdict: ${PLANNER_VERDICT}). Inspect and plan the work yourself before editing."
+    log_event skip "planner ended with '${PLANNER_VERDICT}'; the executor will plan for itself"
+  fi
+  store_event engine.ended \
+    "planner verdict ${PLANNER_VERDICT}, exit ${PLANNER_RC}"
+fi
+
 < "${HEINZEL_ROOT}/prompts/backlog-run.md" \
   render '{{SAFE_MODE_NOTE}}' "${SAFE_NOTE}" |
   render '{{WORKDIR}}' "${WORKDIR}" |
@@ -879,7 +955,8 @@ fi
   render '{{TODO_COUNT}}' "${TODO_BEFORE}" |
   render '{{RUN_ID}}' "${RUN_ID}" |
   render '{{DEADLINE}}' "$(short_at "${EXPIRES}")" |
-  render '{{RUN_TIMEOUT_MIN}}' "$((RUN_TIMEOUT / 60))" >"${PROMPT_FILE}"
+  render '{{RUN_TIMEOUT_MIN}}' "$((RUN_TIMEOUT / 60))" |
+  render '{{PLANNER_HANDOFF}}' "${PLANNER_HANDOFF}" >"${PROMPT_FILE}"
 
 # An empty prompt would sail past the placeholder check below and be sent as a
 # blank instruction. Check for substance before checking for leftovers.
@@ -892,24 +969,43 @@ if grep -q '{{[A-Z_]*}}' "${PROMPT_FILE}"; then
 fi
 
 # A shell-only snapshot, so the review stage can diff without an LLM.
-if [ -x "${HEINZEL_ROOT}/bin/hzl-changeset" ] && [ "${HEINZEL_REVIEW}" = 1 ]; then
+if [ -x "${HEINZEL_ROOT}/bin/hzl-changeset" ] && [ "${RUN_REVIEWER}" = 1 ]; then
   "${HEINZEL_ROOT}/bin/hzl-changeset" snapshot "${WORKDIR}" "${SNAP_DIR}" \
     >>"${RUN_LOG}" 2>&1 || log_event skip "snapshot failed; review will be skipped"
 fi
 
-STARTED=$(now_epoch)
-[ "${DRY_RUN}" = 1 ] && export HEINZEL_DRY_RUN=1
-
-# The claimed ids are on the worksheet by now, so the snapshot written here is
-# the one that matters for recovery: it names what a run that never comes back
-# was holding.
-store_snapshot running
-store_event engine.started \
-  "${HEINZEL_EXECUTOR_ENGINE} executor, ${RUN_TIMEOUT}s, tasks $(store_task_ids)"
-
-engine_run "${HEINZEL_EXECUTOR_ENGINE}" executor "${WORKDIR}" \
-  "${PROMPT_FILE}" "${EXEC_DIR}" "${RUN_TIMEOUT}" >>"${RUN_LOG}" 2>&1
-ENGINE_RC=$?
+if [ "${RUN_EXECUTOR}" = 1 ]; then
+  store_event engine.started \
+    "${HEINZEL_EXECUTOR_ENGINE} executor, ${RUN_TIMEOUT}s, tasks $(store_task_ids)"
+  engine_run "${HEINZEL_EXECUTOR_ENGINE}" executor "${WORKDIR}" \
+    "${PROMPT_FILE}" "${EXEC_DIR}" "${RUN_TIMEOUT}" >>"${RUN_LOG}" 2>&1
+  ENGINE_RC=$?
+elif [ "${RUN_PLANNER}" = 1 ]; then
+  # A planner-only task has a plan as its artifact. The read-only agent cannot
+  # edit the worksheet, so the runner closes the assigned rows only when a real
+  # (not dry-run) planner produced a non-empty handoff.
+  if [ "${DRY_RUN}" != 1 ] && [ "${PLANNER_VERDICT}" = ok ] &&
+     [ -s "${PLANNER_DIR}/last.txt" ]; then
+    awk '{ if ($0 ~ /^- \[ \] \(id:/) sub(/^- \[ \]/, "- [x]"); print }' \
+      "${WORKSHEET}" >"${WORKSHEET}.planned" &&
+      mv -f "${WORKSHEET}.planned" "${WORKSHEET}"
+  fi
+  cp "${PLANNER_DIR}/result.json" "${EXEC_DIR}/result.json" 2>/dev/null || true
+  cp "${PLANNER_DIR}/last.txt" "${EXEC_DIR}/last.txt" 2>/dev/null || true
+  ENGINE_RC=${PLANNER_RC}
+else
+  # Defensive only: task_roles_effective refuses a set without a producer.
+  # Record a failed attempt rather than silently closing work nobody performed
+  # if those two decisions ever drift apart.
+  ENGINE_RC=1
+  jq -n --argjson schema_version "${HEINZEL_RESULT_SCHEMA}" \
+    '{schema_version: $schema_version, engine: "none", role: "executor",
+      verdict: "error", exit_code: 1, duration_sec: 0, text: "",
+      backend: "local", runtime_state: "EXITED", native_exit_code: null,
+      attempt_outcome: "FAILED"}' >"${EXEC_DIR}/result.json"
+  : >"${EXEC_DIR}/last.txt"
+  log_event skip "reviewer-only task has no planner or executor to produce work"
+fi
 ENDED=$(now_epoch)
 
 # --- the quiesce: the write barrier between working and being read -----------
@@ -1100,10 +1196,10 @@ REVIEW_TRUNCATED=false
 REVIEW_FIXED=false
 REVIEW_DIR="${RUN_DIR}/review-$(date +%H%M%S)"
 
-if [ "${HEINZEL_REVIEW}" = 1 ]; then
+if [ "${RUN_REVIEWER}" = 1 ]; then
   if [ "${VERDICT}" != ok ]; then
     REVIEW_VERDICT=skipped
-    REVIEW_ACTION="executor ended with '${VERDICT}', nothing to review"
+    REVIEW_ACTION="the producing role ended with '${VERDICT}', nothing to review"
   else
     "${HEINZEL_ROOT}/bin/hzl-review" "${WORKDIR}" "${SNAP_DIR}" "${RUN_ID}" \
       "${REVIEW_DIR}" "$(backlog_ids_done_by_run "${BACKLOG}" "${RUN_ID}" | tr '\n' ' ')" \
@@ -1291,6 +1387,11 @@ fi
 # legacy runner completion — and a new consumer reads the outcome fields
 # instead. `workflow_outcome` is not here because there is no workflow to have
 # one yet; it arrives with Phase 4 (§13.7).
+PLANNER_RESULT_JSON=null
+if [ -r "${PLANNER_DIR}/result.json" ]; then
+  PLANNER_RESULT_JSON=$(jq -c . "${PLANNER_DIR}/result.json" 2>/dev/null) ||
+    PLANNER_RESULT_JSON=null
+fi
 jq -n -c \
   --argjson schema_version "${HEINZEL_RUN_RECORD_SCHEMA}" \
   --arg backend "${ATTEMPT_BACKEND}" \
@@ -1299,6 +1400,8 @@ jq -n -c \
   --arg started_at "$(iso_at "${STARTED}")" --argjson started_at_epoch "${STARTED}" \
   --arg ended_at "$(iso_at "${ENDED}")" --argjson duration_sec "$((ENDED - STARTED))" \
   --arg result "${VERDICT}" --argjson exit_code "${ENGINE_RC}" \
+  --arg roles "${RUN_ROLES}" \
+  --argjson planner_result "${PLANNER_RESULT_JSON}" \
   --argjson tasks_done "${TASKS_DONE}" --argjson tasks_blocked "${TASKS_BLOCKED}" \
   --argjson tasks_done_total "$(state_get .tasks_done_total 0)" \
   --argjson max_tasks_total "${MAX_TOTAL}" \
@@ -1324,6 +1427,7 @@ jq -n -c \
     started_at: $started_at, started_at_epoch: $started_at_epoch,
     ended_at: $ended_at, duration_sec: $duration_sec,
     result: $result, exit_code: $exit_code,
+    roles: ($roles | split(",")),
     tasks_done: $tasks_done, tasks_blocked: $tasks_blocked,
     tasks_done_total: $tasks_done_total, max_tasks_total: $max_tasks_total,
     todo_before: $todo_before, todo_after: $todo_after,
@@ -1339,6 +1443,16 @@ jq -n -c \
     turns: ($engine_result[0].turns // 0),
     tokens_in: ($engine_result[0].tokens_in // 0),
     tokens_out: ($engine_result[0].tokens_out // 0),
+    planner: (if $planner_result == null then null else {
+      engine: ($planner_result.engine // null),
+      model: ($planner_result.model // null),
+      effort: ($planner_result.effort // null),
+      verdict: ($planner_result.verdict // "error"),
+      cost_usd: ($planner_result.cost_usd // null),
+      tokens_in: ($planner_result.tokens_in // 0),
+      tokens_out: ($planner_result.tokens_out // 0),
+      duration_sec: ($planner_result.duration_sec // 0)
+    } end),
     review: {verdict: $review_verdict, engine: $review_engine,
              action: $review_action, findings: $review_findings,
              duration_sec: $review_duration, reverted: $review_reverted,

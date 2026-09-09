@@ -9,6 +9,10 @@ Session deadline:  {{DEADLINE}}
 Wall clock:        {{RUN_TIMEOUT_MIN}} minutes for this run
 Task budget:       {{MAX_TASKS}} task(s) maximum, out of {{TODO_COUNT}} waiting
 
+## Plan from the read-only planner
+
+{{PLANNER_HANDOFF}}
+
 ## How to work the worksheet
 
 The worksheet holds the tasks assigned to this run, and only those. It looks

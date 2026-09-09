@@ -11,7 +11,7 @@
 # Multibyte truncation is locale-dependent (DESIGN 6.3). Fix it once, here.
 export LC_CTYPE=UTF-8
 
-HEINZEL_VERSION="0.4.2"
+HEINZEL_VERSION="0.5.0"
 
 # The TTL ceiling is deliberately not configurable. A session that can be
 # created with an unbounded lifetime is not a session, it is a mode.
@@ -245,9 +245,13 @@ pid_alive() {
 # Review-related keys take environment over conf, because the documented way to
 # try the review pipeline is `HEINZEL_REVIEW=1 hzl run-now`. If conf silently
 # won, that command would produce a run that reviewed nothing while claiming to.
-_HZ_ENV_KEYS="HEINZEL_REVIEW HEINZEL_EXECUTOR_ENGINE HEINZEL_REVIEWER_ENGINE
+_HZ_ENV_KEYS="HEINZEL_PLANNER HEINZEL_EXECUTOR HEINZEL_REVIEWER HEINZEL_REVIEW
+HEINZEL_PLANNER_ENGINE HEINZEL_EXECUTOR_ENGINE HEINZEL_REVIEWER_ENGINE
+HEINZEL_PLANNER_MODEL HEINZEL_PLANNER_EFFORT
+HEINZEL_EXECUTOR_MODEL HEINZEL_EXECUTOR_EFFORT
+HEINZEL_REVIEWER_MODEL HEINZEL_REVIEWER_EFFORT
 HEINZEL_CODEX_MODEL HEINZEL_CODEX_EFFORT HEINZEL_REVIEW_ON_REVISE
-HEINZEL_REVIEW_TIMEOUT HEINZEL_REVIEW_MAX_PATCH_BYTES
+HEINZEL_PLANNER_TIMEOUT HEINZEL_REVIEW_TIMEOUT HEINZEL_REVIEW_MAX_PATCH_BYTES
 HEINZEL_CODEX_IGNORE_USER_CONFIG HEINZEL_OPENCODE_MODEL
 HEINZEL_OPENCODE_VARIANT HEINZEL_MODEL HEINZEL_EFFORT"
 
@@ -277,8 +281,20 @@ hzl_load_conf() {
   LOG_RETENTION_DAYS=14
   HEINZEL_MODEL="claude-opus-5"
   HEINZEL_EFFORT="xhigh"
+  # Roles are independently selectable. Planning is opt-in on an upgrade so a
+  # new release cannot silently add a second billed call to every run.
+  HEINZEL_PLANNER=0
+  HEINZEL_EXECUTOR=1
+  HEINZEL_REVIEWER=""
+  HEINZEL_PLANNER_ENGINE="claude"
   HEINZEL_EXECUTOR_ENGINE="claude"
   HEINZEL_REVIEWER_ENGINE="codex"
+  HEINZEL_PLANNER_MODEL=""
+  HEINZEL_PLANNER_EFFORT=""
+  HEINZEL_EXECUTOR_MODEL=""
+  HEINZEL_EXECUTOR_EFFORT=""
+  HEINZEL_REVIEWER_MODEL=""
+  HEINZEL_REVIEWER_EFFORT=""
   HEINZEL_CODEX_MODEL="gpt-5.6-sol"
   HEINZEL_CODEX_EFFORT="xhigh"
   # OpenCode IDs have the form provider/model and its reasoning control is
@@ -290,6 +306,7 @@ hzl_load_conf() {
   # Review is opt-in on a fresh install: it costs money and needs a second
   # engine, and a tool that bills you by default on first run is impolite.
   HEINZEL_REVIEW=0
+  HEINZEL_PLANNER_TIMEOUT=900
   HEINZEL_REVIEW_ON_REVISE="note-only"
   HEINZEL_REVIEW_TIMEOUT=900
   HEINZEL_REVIEW_MAX_PATCH_BYTES=200000
@@ -319,6 +336,19 @@ hzl_load_conf() {
 ${saved_env}
 EOF
   fi
+
+  # HEINZEL_REVIEW was the public switch before v0.5.0. A new configuration
+  # names the role, while an old one continues to select exactly the same
+  # pipeline. Internally both names are kept equal for old callers.
+  if printf '%s' "${saved_env}" | grep -q '^HEINZEL_REVIEWER '; then
+    : # the new environment switch is authoritative
+  elif printf '%s' "${saved_env}" | grep -q '^HEINZEL_REVIEW '; then
+    HEINZEL_REVIEWER=${HEINZEL_REVIEW}
+  else
+    [ -n "${HEINZEL_REVIEWER}" ] || HEINZEL_REVIEWER=${HEINZEL_REVIEW}
+  fi
+  HEINZEL_REVIEW=${HEINZEL_REVIEWER}
+
   return 0
 }
 
@@ -361,7 +391,8 @@ hzl_validate_conf() {
   esac
 
   for n in DEFAULT_MAX_TASKS_TOTAL DEFAULT_MAX_TASKS DEFAULT_RUN_TIMEOUT \
-           LOG_RETENTION_DAYS HEINZEL_REVIEW_TIMEOUT HEINZEL_REVIEW_MAX_PATCH_BYTES; do
+           LOG_RETENTION_DAYS HEINZEL_PLANNER_TIMEOUT HEINZEL_REVIEW_TIMEOUT \
+           HEINZEL_REVIEW_MAX_PATCH_BYTES; do
     eval "v=\${${n}}"
     case ${v} in
       "") err "${n} is empty"; return 1 ;;
@@ -370,10 +401,21 @@ hzl_validate_conf() {
     [ "${v}" -ge 1 ] || { err "${n} must be >= 1"; return 1; }
   done
 
-  case ${HEINZEL_REVIEW} in
-    0|1) ;;
-    *) err "HEINZEL_REVIEW must be 0 or 1 (got '${HEINZEL_REVIEW}')"; return 1 ;;
-  esac
+  for n in HEINZEL_PLANNER HEINZEL_EXECUTOR HEINZEL_REVIEWER; do
+    eval "v=\${${n}}"
+    case ${v} in
+      0|1) ;;
+      *) err "${n} must be 0 or 1 (got '${v}')"; return 1 ;;
+    esac
+  done
+  if [ "${HEINZEL_PLANNER}" = 0 ] && [ "${HEINZEL_EXECUTOR}" = 0 ]; then
+    err "HEINZEL_PLANNER and HEINZEL_EXECUTOR cannot both be 0 (a reviewer cannot produce work by itself)"
+    return 1
+  fi
+  if [ "${HEINZEL_REVIEWER}" = 1 ] && [ "${HEINZEL_EXECUTOR}" = 0 ]; then
+    err "HEINZEL_REVIEWER=1 requires HEINZEL_EXECUTOR=1 (review checks executor changes)"
+    return 1
+  fi
   case ${HEINZEL_POSTURE} in
     0|1) ;;
     *) err "HEINZEL_POSTURE must be 0 or 1 (got '${HEINZEL_POSTURE}')"; return 1 ;;
@@ -392,14 +434,20 @@ hzl_validate_conf() {
     note-only|fix-once|block) ;;
     *) err "HEINZEL_REVIEW_ON_REVISE must be note-only, fix-once or block"; return 1 ;;
   esac
-  case ${HEINZEL_EXECUTOR_ENGINE} in
-    claude|codex|opencode) ;;
-    *) err "HEINZEL_EXECUTOR_ENGINE must be claude, codex or opencode"; return 1 ;;
-  esac
-  case ${HEINZEL_REVIEWER_ENGINE} in
-    claude|codex|opencode) ;;
-    *) err "HEINZEL_REVIEWER_ENGINE must be claude, codex or opencode"; return 1 ;;
-  esac
+  for n in HEINZEL_PLANNER_ENGINE HEINZEL_EXECUTOR_ENGINE HEINZEL_REVIEWER_ENGINE; do
+    eval "v=\${${n}}"
+    if [ "${n}" = HEINZEL_PLANNER_ENGINE ]; then
+      case ${v} in
+        claude|codex) ;;
+        *) err "${n} must be claude or codex"; return 1 ;;
+      esac
+    else
+      case ${v} in
+        claude|codex|opencode) ;;
+        *) err "${n} must be claude, codex or opencode"; return 1 ;;
+      esac
+    fi
+  done
   # An effort typo degrades differently per engine: claude warns and completes
   # at its default (invisible), codex gets a 400 and the review fails. Neither
   # is allowed to happen at 03:00.
@@ -415,13 +463,37 @@ hzl_validate_conf() {
     ""|?*/?*) ;;
     *) err "HEINZEL_OPENCODE_MODEL must be empty or provider/model"; return 1 ;;
   esac
-  if [ "${HEINZEL_EXECUTOR_ENGINE}" = opencode ] ||
-     { [ "${HEINZEL_REVIEW}" = 1 ] && [ "${HEINZEL_REVIEWER_ENGINE}" = opencode ]; }; then
-    [ -n "${HEINZEL_OPENCODE_MODEL}" ] || {
-      err "HEINZEL_OPENCODE_MODEL is required when opencode is selected"
-      return 1
-    }
-  fi
+  local role role_name engine effort model
+  for role in PLANNER EXECUTOR REVIEWER; do
+    case ${role} in
+      PLANNER) role_name=planner ;;
+      EXECUTOR) role_name=executor ;;
+      REVIEWER) role_name=reviewer ;;
+    esac
+    eval "engine=\${HEINZEL_${role}_ENGINE}"
+    eval "effort=\${HEINZEL_${role}_EFFORT}"
+    case ${engine} in
+      claude)
+        case ${effort} in
+          ""|low|medium|high|xhigh|max) ;;
+          *) err "HEINZEL_${role}_EFFORT: '${effort}' is not valid for claude"; return 1 ;;
+        esac
+        ;;
+      codex)
+        case ${effort} in
+          ""|none|minimal|low|medium|high|xhigh|max) ;;
+          *) err "HEINZEL_${role}_EFFORT: '${effort}' is not valid for codex"; return 1 ;;
+        esac
+        ;;
+      opencode)
+        model=$(engine_role_model "${engine}" "${role_name}")
+        case ${model} in
+          ?*/?*) ;;
+          *) err "HEINZEL_${role}_MODEL or HEINZEL_OPENCODE_MODEL must be provider/model when ${role_name} uses opencode"; return 1 ;;
+        esac
+        ;;
+    esac
+  done
   case ${HEINZEL_WEB_PORT} in
     ""|*[!0-9]*) err "HEINZEL_WEB_PORT must be a port number"; return 1 ;;
   esac
@@ -492,6 +564,30 @@ engine_config_effort() {
     opencode) printf '%s' "${HEINZEL_OPENCODE_VARIANT:-}" ;;
     *) return 1 ;;
   esac
+}
+
+# Resolve the model and effort for a role. Explicit role values win; the
+# engine-wide settings remain compatibility fallbacks for older configs.
+engine_role_model() { # engine role
+  local engine=$1 role=$2 value=""
+  case ${role} in
+    planner) value=${HEINZEL_PLANNER_MODEL:-} ;;
+    executor|fixer) value=${HEINZEL_EXECUTOR_MODEL:-} ;;
+    reviewer) value=${HEINZEL_REVIEWER_MODEL:-} ;;
+  esac
+  [ -n "${value}" ] || value=$(engine_config_model "${engine}") || return 1
+  printf '%s' "${value}"
+}
+
+engine_role_effort() { # engine role
+  local engine=$1 role=$2 value=""
+  case ${role} in
+    planner) value=${HEINZEL_PLANNER_EFFORT:-} ;;
+    executor|fixer) value=${HEINZEL_EXECUTOR_EFFORT:-} ;;
+    reviewer) value=${HEINZEL_REVIEWER_EFFORT:-} ;;
+  esac
+  [ -n "${value}" ] || value=$(engine_config_effort "${engine}") || return 1
+  printf '%s' "${value}"
 }
 
 # Is the schedule every hour? A session that is on may be allowed to work at any
@@ -666,7 +762,7 @@ workdirs_list() {
   # Leading and trailing whitespace goes: a continued value in a shell file is
   # indented by anyone who reads it as a list, and an invisible trailing space
   # would otherwise become part of a path.
-  printf '%s\n' "${DEFAULT_WORKDIR}" |
+  printf '%s\n' "${DEFAULT_WORKDIR:-}" |
     sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' |
     grep -v '^$'
 }
@@ -1207,6 +1303,60 @@ Markers: [ ] todo   [~] in progress   [x] done   [!] blocked
 Ids are assigned automatically; do not write them by hand.
 '
 
+# A task may replace the configured role defaults with a leading directive:
+#
+#   (roles:planner,executor) implement the change
+#
+# The canonical order is fixed so spelling the same set in a different order
+# still groups the tasks into one run. An empty answer is invalid: a task with
+# nobody assigned is a typo, not a quiet no-op.
+task_roles_default() {
+  local out=""
+  [ "${HEINZEL_PLANNER}" = 1 ] && out=planner
+  if [ "${HEINZEL_EXECUTOR}" = 1 ]; then
+    [ -n "${out}" ] && out=${out},executor || out=executor
+  fi
+  if [ "${HEINZEL_REVIEWER}" = 1 ]; then
+    [ -n "${out}" ] && out=${out},reviewer || out=reviewer
+  fi
+  printf '%s' "${out}"
+}
+
+task_roles_effective() { # raw directive value; empty means configured default
+  local raw=${1:-} token planner=0 executor=0 reviewer=0
+  [ -n "${raw}" ] || { task_roles_default; return; }
+  case ${raw} in
+    none) return 2 ;;
+    *,|,*|*,,*) return 1 ;;
+  esac
+  while [ -n "${raw}" ]; do
+    token=${raw%%,*}
+    if [ "${raw}" = "${token}" ]; then raw=""; else raw=${raw#*,}; fi
+    case ${token} in
+      planner) planner=1 ;;
+      executor) executor=1 ;;
+      reviewer) reviewer=1 ;;
+      *) return 1 ;;
+    esac
+  done
+  raw=""
+  [ "${planner}" = 1 ] && raw=planner
+  if [ "${executor}" = 1 ]; then
+    [ -n "${raw}" ] && raw=${raw},executor || raw=executor
+  fi
+  if [ "${reviewer}" = 1 ]; then
+    [ -n "${raw}" ] && raw=${raw},reviewer || raw=reviewer
+  fi
+  [ -n "${raw}" ] || return 2
+  [ "${planner}" = 1 ] || [ "${executor}" = 1 ] || return 2
+  [ "${reviewer}" = 0 ] || [ "${executor}" = 1 ] || return 2
+  printf '%s' "${raw}"
+}
+
+task_role_enabled() { # canonical role list, role
+  case ",${1}," in *",${2},"*) return 0 ;; *) return 1 ;; esac
+}
+
 backlog_ensure() {
   local f=$1
   [ -n "${f}" ] || return 1
@@ -1215,7 +1365,9 @@ backlog_ensure() {
   printf '%s' "${BACKLOG_TEMPLATE}" >"${f}"
 }
 
-# One TSV row per task line: lineno, priority, marker, id, text, workspace, meta.
+# One TSV row per task line: lineno, priority, marker, id, text, workspace,
+# meta, roles. `roles` is the raw value of a leading `(roles:...)` directive;
+# empty means the configured defaults.
 # Everything else is derived from this, so the parse exists in exactly one place.
 #
 # The workspace field is the name inside a leading `(dir:<name>)`, and empty
@@ -1267,6 +1419,15 @@ backlog_scan() {
         sub(/\).*$/, "", dir)
         sub(/^\(dir:[^)]*\)[ \t]*/, "", text)
       }
+
+      roles = ""
+      if (text ~ /^\(roles:[^)]*\)/) {
+        roles = text
+        sub(/^\(roles:/, "", roles)
+        sub(/\).*$/, "", roles)
+        if (roles == "") roles = "none"
+        sub(/^\(roles:[^)]*\)[ \t]*/, "", text)
+      }
       # The trailing comment, kept as field 7 rather than only discarded. It is
       # the whole of what a task records about itself - when it was closed,
       # which run closed it, why it is blocked - and every reader of it used to
@@ -1281,7 +1442,7 @@ backlog_scan() {
       }
       sub(/[ \t]*<!--.*-->[ \t]*$/, "", text)
 
-      printf "%d\t%d\t%s\t%s\t%s\t%s\t%s\n", NR, (prio == 0 ? 99 : prio), marker, id, text, dir, meta
+      printf "%d\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n", NR, (prio == 0 ? 99 : prio), marker, id, text, dir, meta, roles
     }
     BEGIN { prio = 99 }
   ' "${f}"
@@ -1302,6 +1463,7 @@ backlog_next_row() {
 
 backlog_next_id()   { backlog_next_row "$1" | cut -f4; }
 backlog_next_text() { backlog_next_row "$1" | cut -f5; }
+backlog_next_roles(){ backlog_next_row "$1" | cut -f8; }
 
 # Which checkout the next run will work in. The order of attack picks the task
 # first and the workspace follows from it, rather than the other way round: a
@@ -2337,7 +2499,8 @@ worksheet_claim_refusal() { # backlog id
 # is `worksheet_render`, which the runner calls again if the claims it takes
 # turn out to cover fewer tasks than this.
 worksheet_write() {
-  local f=$1 max=$2 out=$3 ws=${4:-} ids tmp rc def
+  local f=$1 max=$2 out=$3 ws=${4:-} role_profile=${5:-}
+  local ids tmp rc def rows row raw effective id n=0
   [ -r "${f}" ] || return 1
   case ${max} in ""|*[!0-9]*) return 1 ;; esac
   [ "${max}" -ge 1 ] || return 1
@@ -2355,15 +2518,30 @@ worksheet_write() {
   # 2026-09-08, `awk -v t=デフォルト '''$2 == t'''` matched a row reading
   # ログイン as well. Byte comparison is exactly what equality wants here, and
   # nothing in this program compares text for anything but equality.
-  ids=$(backlog_scan "${f}" 2>/dev/null |
+  rows=$(backlog_scan "${f}" 2>/dev/null |
     LC_ALL=C awk -F'\t' -v ws="${ws}" -v def="${def}" '
       $3 == " " && $4 != "" {
         d = ($6 == "" ? def : $6)
         if (ws == "" || d == ws) print
       }' |
-    sort -t"$(printf '\t')" -k2,2n -k1,1n |
-    head -n "${max}" |
-    cut -f4)
+    sort -t"$(printf '\t')" -k2,2n -k1,1n)
+  ids=""
+  while IFS= read -r row; do
+    [ -n "${row}" ] || continue
+    if [ -n "${role_profile}" ]; then
+      raw=$(printf '%s' "${row}" | cut -f8)
+      effective=$(task_roles_effective "${raw}") || continue
+      [ "${effective}" = "${role_profile}" ] || continue
+    fi
+    id=$(printf '%s' "${row}" | cut -f4)
+    ids="${ids}${id}
+"
+    n=$((n + 1))
+    [ "${n}" -ge "${max}" ] && break
+  done <<EOF
+${rows}
+EOF
+  ids=$(printf '%s' "${ids}" | sed '/^$/d')
   [ -n "${ids}" ] || return 1
   tmp=$(mktemp "${TMPDIR:-/tmp}/hzl-worksheet.XXXXXX") || return 1
   printf '%s\n' "${ids}" >"${tmp}" || { rm -f "${tmp}"; return 1; }

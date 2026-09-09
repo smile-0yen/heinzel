@@ -620,12 +620,13 @@ The split that matters: **all judgement lives in the runner, all engine knowledg
 `engines.sh`.** Adding an engine touches one file. The runner only ever sees `engine_run` and a
 normalised `result.json`.
 
-The ledger follows that shape too, since §4.7: `worksheet_write` → **executor** → `worksheet_merge`.
+The ledger follows that shape too, since §4.7: `worksheet_write` → optional
+read-only **planner** → optional **executor** → `worksheet_merge`.
 The model moves markers on a file it was given; the shell decides which tasks existed, which ids
 were in scope, and what the ledger says afterwards.
 
 The review pipeline follows the same shape — the LLM decides exactly one step in the middle
-(`snapshot` → executor → `diff` → **reviewer** → gate), and everything before and after it is
+(`snapshot` → executor → `diff` → optional **reviewer** → gate), and everything before and after it is
 deterministic shell. A degraded reviewer cannot corrupt the ledger, and a missing reviewer cannot
 stop it: review is a quality gate, never an availability dependency.
 

@@ -7,7 +7,7 @@ disagree, the code is right and this document is wrong.**
 Items marked **normative** are observable from outside: other scripts branch on
 them. Changing one is a breaking change.
 
-Version: 0.1.0-dev. Target: macOS, `/bin/bash` 3.2.
+Version: 0.5.0. Target: macOS, `/bin/bash` 3.2.
 
 ## §1 Terms
 
@@ -19,7 +19,7 @@ Version: 0.1.0-dev. Target: macOS, `/bin/bash` 3.2.
 | run | One firing of the runner, up to one engine call |
 | slot | A scheduled time at which launchd starts the runner |
 | no-op | Started, found a closed gate, exited without calling an engine |
-| role | `executor`, `reviewer`, or `fixer` |
+| role | `planner`, `executor`, `reviewer`, or `fixer` |
 | engine | Which agent CLI runs: `claude` or `codex` |
 | verdict | The outcome of a run (`ok`/`timeout`/`error`/`auth`) or of a review (a different axis, same word) |
 | HALT | All further runs suppressed. `state.halt_reason` is non-null. Cleared with `hzl resume` |
@@ -76,6 +76,7 @@ Version: 0.1.0-dev. Target: macOS, `/bin/bash` 3.2.
       exec-HHMMSS/       prompt.md, raw, stderr, last.txt, result.json,
                          worksheet.md (as merged), worksheet-ids.txt,
                          claimed-ids.txt
+        planner/         prompt.md, raw, stderr, last.txt, result.json
       snapshot-HHMMSS/   files/, manifest.txt, git-heads.txt, git-roots.txt
       review-HHMMSS/     changeset.patch, prompt.md, verdict.json
 ```
@@ -106,7 +107,7 @@ Privileged subcommands escalate internally.
 | `off` | `--unload --no-sudo` | 0 / 1 |
 | `resume` | — | 0 / 1 |
 | `set` | `[max-total\|max-tasks\|timeout] N` | 0 / 1 |
-| `add` | `--priority N`, `--dir NAME`, `<text>` | 0 / 1 / **4** already in the ledger |
+| `add` | `--priority N`, `--dir NAME`, `--roles LIST`, `<text>` | 0 / 1 / **4** already in the ledger |
 | `next` | — | 0 / 1 |
 | `take` | `[id]` | 0 / 1 / **3** no such id |
 | `done` | `<id> [note]` | 0 / 1 / **3** / **4** |
@@ -536,7 +537,7 @@ engine process group is signalled, and `run.pid` is removed.
 ## P1
 - [ ] (id:h-0007) task text
       note: a continuation line
-- [ ] (id:h-0008) (dir:beta) worked in the `beta` checkout, not the default one
+- [ ] (id:h-0008) (dir:beta) (roles:planner,executor) planned and worked in `beta`
 - [x] (id:h-0003) done <!-- done:<ISO8601> run:<RUN_ID> -->
 - [!] (id:h-0009) blocked <!-- blocked:<ISO8601> reason:<reason> -->
 ```
@@ -547,7 +548,7 @@ checkout — makes "what is next" a question with several answers and priority a
 thing that only orders within a repository.
 
 `backlog_scan` emits one TSV row per task line: **lineno, priority, marker, id,
-text, workspace, meta**. Everything else is derived from it, so the parse exists
+text, workspace, meta, roles**. Everything else is derived from it, so the parse exists
 in exactly one place.
 
 > **Normative: there is one task-line parser.** `meta` is the trailing
@@ -565,6 +566,7 @@ in exactly one place.
 | Priority | The nearest preceding `## P<n>`. Lines before any heading are P99 |
 | Id | `(id:<prefix>-NNNN)`, `%04d`. **Allocated by the runner, never hand-written** |
 | Workspace | `(dir:<name>)`, optional, immediately after the id — or at the front of a line that has no id yet, since the runner writes the id in front of it later. `<name>` is a workspace's last path component (§13). Absent means the default workspace, which is the first line of `DEFAULT_WORKDIR`. Only a leading tag routes: one written mid-text is text, or a task *about* the syntax would reroute itself by being written down. Stripped from the text the way the id is, so what reaches the worksheet, the prompt and the ledger reads as a person wrote it |
+| Roles | `(roles:<list>)`, optional, after `(dir:)` when both are present. `<list>` is a comma-separated subset of `planner,executor,reviewer`; order and duplicates are canonicalised. It is the complete enabled set, not a patch over the defaults. Absent uses the configured defaults. `none`, an unknown name, and a reviewer without an executor are invalid; the runner blocks that task rather than repeatedly doing nothing. Tasks with different effective sets are never put on the same worksheet |
 | Trailing metadata | One `<!-- ... -->`, replaced wholesale on each transition, never appended to |
 | Continuation lines | Indented lines under a task; passed to the prompt verbatim |
 | Order | Priority ascending, then line number ascending |
@@ -860,6 +862,7 @@ depends on the role as well as the engine**:
 | Engine | Role | Launched with | `raw` |
 |---|---|---|---|
 | claude | executor | `--output-format stream-json --verbose` | JSONL, one event per line, appended as the run happens |
+| claude | planner | `--output-format json` | one JSON object, written when the run ends |
 | claude | reviewer | `--output-format json` | one JSON object, written when the run ends |
 | claude | fixer | `--output-format json` | one JSON object, written when the run ends |
 | codex | any | `--json` | JSONL |
@@ -868,15 +871,16 @@ depends on the role as well as the engine**:
 The executor streams so that a run in progress can be watched from a terminal
 (`docs/RUNBOOK.md`, "Watching a run that is still going"); `--verbose` is
 required, not decorative — the CLI refuses `stream-json` under `-p` without
-it. The reviewer does not, because whether `--json-schema` survives being
-combined with `stream-json` is **unverified**, and a reviewer whose schema was
+it. The planner and reviewer do not. The planner has no live writer to watch;
+for the reviewer, whether `--json-schema` survives being combined with
+`stream-json` is **unverified**, and a reviewer whose schema was
 silently dropped would return prose where the runner parses a verdict. That is
 a live-run question (`docs/VERIFICATION.md`), not one to settle by guessing.
 
 The claude rows are **the executor and everything else**, not the executor and
-the reviewer: `lib/engines.sh` names `executor` rather than testing for "not
-the reviewer", so the `fixer` (§10, the one-shot repair pass under
-`HEINZEL_REVIEW_ON_REVISE=fix-once`) and any role added later get the
+the read-only roles: `lib/engines.sh` names `executor` rather than testing for
+"not the reviewer", so the planner, the `fixer` (§10, the one-shot repair pass
+under `HEINZEL_REVIEW_ON_REVISE=fix-once`) and any role added later get the
 single-object form until someone decides otherwise for that role. Streaming is
 a thing done *for a watcher*, and a role nobody watches gains nothing from it
 while quietly changing the shape of the evidence it leaves.
@@ -1046,12 +1050,22 @@ as orphans and keep billing. The child's pid is published as
 `( cd x && cmd ) &`: `$!` would be the subshell, and killing it orphans the
 engine.
 
-## §10 Review
+## §10 Planning and review
 
-Enabled with `HEINZEL_REVIEW=1`; **off by default**. The pipeline is
-snapshot → executor → diff → reviewer → gate, and only the reviewer is a model:
-everything on either side is deterministic shell, so a degraded review cannot
-corrupt the ledger.
+Planning is enabled by `HEINZEL_PLANNER=1` or a task's roles directive. It runs
+before the executor with `plan-read-only-v1`: Claude has `Write`, `Edit`,
+`NotebookEdit`, and `Bash` removed; Codex uses its read-only sandbox. The plan
+is stored under `exec-*/planner/` and handed verbatim to the executor. A failed
+planner degrades to an explicit "plan for yourself" handoff rather than losing
+the task. With planner on and executor off, a non-empty plan is the task's
+artifact and the runner closes the worksheet rows mechanically; a dry run
+never closes them.
+
+Review is enabled by `HEINZEL_REVIEWER=1` or a task's roles directive; **off by
+default**. `HEINZEL_REVIEW` remains a compatibility alias. The full pipeline is
+planner → executor → diff → reviewer → gate, with any optional role omitted.
+The snapshot, diff, and gate are deterministic shell, so a degraded review
+cannot corrupt the ledger.
 
 `hzl-review` exit codes are the gate:
 
@@ -1542,8 +1556,8 @@ One line per event, `<ISO8601> <class> <message>`.
 ## §13 Configuration
 
 `etc/heinzel.conf`, sourced as shell. Precedence is conf > default, **except**
-the review and model keys, which are environment > conf > default so that
-`HEINZEL_REVIEW=1 hzl run-now` cannot be silently overridden by conf.
+the role, engine, review and model keys, which are environment > conf > default
+so that a one-run override cannot be silently overridden by conf.
 
 | Key | Default | Accepted |
 |---|---|---|
@@ -1555,10 +1569,12 @@ the review and model keys, which are environment > conf > default so that
 | `DEFAULT_WORKDIR` | *(none)* | one absolute path **per line**; required. One line is one workspace, several lines are several, and the first is the default. The separator is a newline and not a space, because a path may contain a space and this is not a list of integers like `HEINZEL_HOURS` — a single-line value therefore means exactly what it always meant. Validated for shape only: absolute, and no two sharing a last path component, which would make `(dir:x)` ambiguous. Existence is `hzl work`/`hzl mobile`'s and `hzl doctor`'s business, because this is checked before every command and a checkout on an unmounted disk must not stop `hzl status` answering. Every workspace is baked into the generated permission file, so adding or moving one needs `hzl install` again |
 | `HEINZEL_WEB_PORT` | `3151` | the port `hzl web` listens on, 1024–65535. Loopback only, and never privileged: `hzl` refuses to run as root |
 | `DEFAULT_BACKLOG` | *(none)* | absolute path; required. One queue, whatever the number of workspaces. It should sit **outside** every workspace — `hzl doctor` warns if it does not — and is baked into the generated permission file, so moving it needs `hzl install` again |
-| `HEINZEL_MODEL` / `HEINZEL_EFFORT` | `claude-opus-5` / `xhigh` | effort: `low\|medium\|high\|xhigh\|max` |
-| `HEINZEL_EXECUTOR_ENGINE` / `HEINZEL_REVIEWER_ENGINE` | `claude` / `codex` | `claude\|codex\|opencode` |
-| `HEINZEL_OPENCODE_MODEL` / `HEINZEL_OPENCODE_VARIANT` | *(none)* / *(none)* | model must be `provider/model` when OpenCode is selected; variant is provider-specific |
-| `HEINZEL_REVIEW` | `0` | `0\|1` |
+| `HEINZEL_PLANNER` / `HEINZEL_EXECUTOR` / `HEINZEL_REVIEWER` | `0` / `1` / `0` | `0\|1`; planner and executor cannot both be off, and reviewer requires executor because it reviews workspace changes. Each task may replace the defaults with `(roles:...)` |
+| `HEINZEL_PLANNER_ENGINE` / `HEINZEL_EXECUTOR_ENGINE` / `HEINZEL_REVIEWER_ENGINE` | `claude` / `claude` / `codex` | planner: `claude\|codex`; executor/reviewer: `claude\|codex\|opencode` |
+| `HEINZEL_<ROLE>_MODEL` / `HEINZEL_<ROLE>_EFFORT` | engine legacy default | Explicit per role. The example config uses Opus for planning and Sonnet for execution. `HEINZEL_MODEL` / `HEINZEL_EFFORT`, the Codex pair, and the OpenCode pair remain compatibility fallbacks |
+| `HEINZEL_OPENCODE_MODEL` / `HEINZEL_OPENCODE_VARIANT` | *(none)* / *(none)* | fallback for an OpenCode executor/reviewer; the effective model must be `provider/model`, and variant is provider-specific |
+| `HEINZEL_PLANNER_TIMEOUT` | `900` | ≥ 1 |
+| `HEINZEL_REVIEW` | alias of `HEINZEL_REVIEWER` | compatibility for configurations before v0.5.0 |
 | `HEINZEL_REVIEW_ON_REVISE` | `note-only` | `note-only\|fix-once\|block` |
 | `HEINZEL_REVIEW_TIMEOUT` | `900` | ≥ 1 |
 | `HEINZEL_REVIEW_MAX_PATCH_BYTES` | `200000` | ≥ 1 |
@@ -1696,6 +1712,7 @@ Honest as of 2026-08-29.
 | **The review gate runs after the push** *(open design question, not a gap in verification)* | The release ritual (`docs/RELEASING.md`) has the executor commit, push and tag inside its own run; `bin/hzl-run` applies the review gate afterwards. So a `reject` reverts the backlog line and leaves the commit, the push and the tag in place — review gates the ledger, not the remote. The two behaviours landed the same day and neither is wrong alone. Three ways out, none chosen: move the push behind the gate and have the runner do it on approval; keep the ritual and have a reject `git revert`; or accept it as an after-the-fact record and say so everywhere. Until it is decided, `HEINZEL_REVIEW=1` buys a second opinion and a morning signal, not prevention |
 | HALT in the field | The auth-failure patterns are desk-checked only; a real credential expiry has not been reproduced |
 | **`stream-json` against a real `claude`** | The executor's launch changed in 0.4.1. The suite covers it against fixed JSONL samples and a stand-in engine — normalisation, the verdict, `runs.jsonl`'s `cost_usd`, and a stream cut off mid-line — but no real run has been made since. Two things a fixture cannot show: that the CLI accepts `--output-format stream-json --verbose` alongside these flags, and that its last line is the `"type": "result"` object every figure in `result.json` is read from. `docs/VERIFICATION.md` phase 3 checks both from a second terminal |
+| **The planner against a real engine** | v0.5.0's suite proves the exact Claude and Codex argv against stand-ins, including the read-only profiles and role-specific models, but has not spent a real planner call. A live run must confirm that the plan reaches `planner/last.txt`, appears in the executor prompt unchanged, and that attempted writes are refused |
 | **`--json-schema` combined with `stream-json`** | Unknown, and the reason the reviewer was left on `--output-format json`. It decides whether a review can be watched the way an execution now can. One live reviewer run answers it; guessing wrong costs a schema silently dropped and prose where the runner parses a verdict |
 | **OpenCode against a real provider** | The suite covers exact argv/environment construction, role permissions, completed and truncated JSONL, telemetry, final text and auth classification against a stand-in CLI. A real `opencode run --format json` executor/reviewer pair has not yet been run here. Verify that the selected provider accepts `--variant`, that review prose is only the requested JSON object, and that external-directory/path denials behave as the installed OpenCode version documents before relying on it unattended |
 
