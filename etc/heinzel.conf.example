@@ -80,12 +80,17 @@ DEFAULT_RUN_TIMEOUT=3600         # wall clock per run, seconds
 DEFAULT_DURATION="10h"           # session TTL; the 24h ceiling is not configurable
 
 # --- engines ---------------------------------------------------------------
-# Model and effort are always passed explicitly. Interactive settings are
-# inherited by the unattended run, so leaving these implicit means someone
-# changing their own editor settings silently changes overnight cost.
+# Choose claude or codex here. To use OpenCode as the executor, uncomment the
+# example below. OpenCode model IDs use provider/model; its provider-specific
+# reasoning setting is called a variant (for example low, high or max).
 HEINZEL_EXECUTOR_ENGINE="claude"
 HEINZEL_MODEL="claude-opus-5"
 HEINZEL_EFFORT="xhigh"           # low|medium|high|xhigh|max
+
+# OpenCode executor example:
+# HEINZEL_EXECUTOR_ENGINE="opencode"
+# HEINZEL_OPENCODE_MODEL="anthropic/claude-sonnet-4-5"  # required
+# HEINZEL_OPENCODE_VARIANT="high"                       # optional
 
 # --- review (opt-in) -------------------------------------------------------
 # Off by default: it needs a second engine and it costs money. When enabled,

@@ -8,7 +8,8 @@
 # here is pure shell against fixture files in a temp directory — no real engine
 # is called, no network is touched, and HEINZEL_HOME is redirected before
 # lib/common.sh is sourced, so a test run cannot see, let alone write, the real
-# ~/.heinzel. The engine tests run against a stand-in `claude` / `codex` on a
+# ~/.heinzel. The engine tests run against stand-in `claude`, `codex` and
+# `opencode` CLIs on a
 # temporary PATH, so they are free and work offline.
 #
 # Stock /bin/bash 3.2: no associative arrays, no `mapfile`, no `${var^^}`.
@@ -687,6 +688,16 @@ HEINZEL_EFFORT="test-effort"
 HEINZEL_CODEX_MODEL="test-codex-model"
 HEINZEL_CODEX_EFFORT="test-codex-effort"
 HEINZEL_CODEX_IGNORE_USER_CONFIG=0
+HEINZEL_OPENCODE_MODEL="test-provider/test-opencode-model"
+HEINZEL_OPENCODE_VARIANT="test-variant"
+
+group 'engine configuration'
+t_eq "codex reports its own model instead of Claude's" \
+  test-codex-model "$(engine_config_model codex)"
+t_eq "opencode reports its provider/model" \
+  test-provider/test-opencode-model "$(engine_config_model opencode)"
+t_eq "opencode's variant occupies the normalised effort field" \
+  test-variant "$(engine_config_effort opencode)"
 
 # --- hzl_timeout -----------------------------------------------------------
 
@@ -782,6 +793,7 @@ exit "${FAKE_RC:-0}"
 FAKE
 chmod +x "${FAKE_BIN}/claude"
 cp "${FAKE_BIN}/claude" "${FAKE_BIN}/codex"
+cp "${FAKE_BIN}/claude" "${FAKE_BIN}/opencode"
 PATH=${FAKE_BIN}:${PATH}
 export PATH
 
@@ -831,6 +843,26 @@ PROMPT_ARG='do the thing
 
 and explain why'
 
+# OpenCode's inline agent profile is translated from the installed permission
+# file. Give it a small generated fixture under a temporary root: no test ever
+# reads or writes this checkout's real etc/heinzel-settings.json.
+OC_ROOT=${TMPROOT}/opencode-root
+mkdir -p "${OC_ROOT}/etc"
+jq -n --arg etc_rule "Edit(//${OC_ROOT#/}/etc/**)" '
+  {permissions:{deny:[
+    "Bash(sudo)", "Bash(sudo *)", "Bash(sudo:*)",
+    "Bash(git push --force*)", "Read(//**/.env)", $etc_rule
+  ], allow:[]}}' >"${OC_ROOT}/etc/heinzel-settings.json"
+
+opencode_engine_run() {
+  local saved_root=${HEINZEL_ROOT} rc
+  HEINZEL_ROOT=${OC_ROOT}
+  engine_run "$@"
+  rc=$?
+  HEINZEL_ROOT=${saved_root}
+  return "${rc}"
+}
+
 # Renders a NUL-separated argv one argument per numbered line, for a failure
 # message a reader can act on.
 argv_show() {
@@ -857,7 +889,11 @@ t_argv() { # name actual-file expected-arg...
 dry_run() { # engine role outdir
   fake_reset
   FAKE_ARGV=${3}/must-not-exist.argv
-  HEINZEL_DRY_RUN=1 engine_run "$1" "$2" "${ARGV_WORK}" "${ARGV_PROMPT}" "$3"
+  if [ "$1" = opencode ]; then
+    HEINZEL_DRY_RUN=1 opencode_engine_run "$1" "$2" "${ARGV_WORK}" "${ARGV_PROMPT}" "$3"
+  else
+    HEINZEL_DRY_RUN=1 engine_run "$1" "$2" "${ARGV_WORK}" "${ARGV_PROMPT}" "$3"
+  fi
 }
 
 AR_CE=${TMPROOT}/argv-claude-executor
@@ -944,6 +980,53 @@ t_argv "codex: ignore_user_config goes in before the prompt" \
   -c 'model_reasoning_effort="test-codex-effort"' \
   -c 'ignore_user_config=true' \
   "${PROMPT_ARG}"
+
+AR_OE=${TMPROOT}/argv-opencode-executor
+dry_run opencode executor "${AR_OE}"
+t_ok "a dry run of the opencode executor succeeds" "$?"
+t_argv "opencode executor: JSON batch mode, isolated agent, and prompt last" \
+  "${AR_OE}/dry-run.cmd" \
+  opencode --pure run --dir "${ARGV_WORK}" --format json \
+  --agent heinzel-executor \
+  --model test-provider/test-opencode-model --variant test-variant \
+  "${PROMPT_ARG}"
+t_eq "opencode executor records the writing security profile" \
+  execute-workspace-write-v1 \
+  "$(jq -r '.security_profile' "${AR_OE}/launch.json")"
+t_eq "opencode launch disables unattended updates, downloads and sharing" \
+  'true true false' \
+  "$(jq -r '[.env.OPENCODE_DISABLE_AUTOUPDATE,
+              .env.OPENCODE_DISABLE_LSP_DOWNLOAD,
+              .env.OPENCODE_AUTO_SHARE] | join(" ")' "${AR_OE}/launch.json")"
+t_ok "opencode's inline executor profile parses and is the selected agent" \
+  "$(jq -e '.env.OPENCODE_CONFIG_CONTENT | fromjson
+            | .agent["heinzel-executor"].mode == "primary"' \
+       "${AR_OE}/launch.json" >/dev/null; printf %s $?)"
+t_eq "opencode translates shell and self-hosting denials from Heinzel's file" \
+  'deny deny' \
+  "$(jq -r --arg etc "${OC_ROOT}/etc/**" '
+      .env.OPENCODE_CONFIG_CONTENT | fromjson
+      | .agent["heinzel-executor"].permission
+      | [.bash["sudo *"], .edit[$etc]] | join(" ")' "${AR_OE}/launch.json")"
+t_eq "opencode denies unknown tools and paths outside the worktree" \
+  'deny deny' \
+  "$(jq -r '.env.OPENCODE_CONFIG_CONTENT | fromjson
+      | .agent["heinzel-executor"].permission
+      | [.["*"], .external_directory] | join(" ")' "${AR_OE}/launch.json")"
+
+AR_OR=${TMPROOT}/argv-opencode-reviewer
+dry_run opencode reviewer "${AR_OR}"
+t_argv "opencode reviewer: the dedicated read-only agent" \
+  "${AR_OR}/dry-run.cmd" \
+  opencode --pure run --dir "${ARGV_WORK}" --format json \
+  --agent heinzel-reviewer \
+  --model test-provider/test-opencode-model --variant test-variant \
+  "${PROMPT_ARG}"
+t_eq "opencode reviewer has neither edit, shell nor subagent capability" \
+  'deny deny deny' \
+  "$(jq -r '.env.OPENCODE_CONFIG_CONTENT | fromjson
+      | .agent["heinzel-reviewer"].permission
+      | [.edit, .bash, .task] | join(" ")' "${AR_OR}/launch.json")"
 
 AR_CB=${TMPROOT}/argv-claude-budget
 HEINZEL_MAX_BUDGET_USD=1.50
@@ -1040,6 +1123,10 @@ printf 'You are not logged in. Run codex login.\n' >"${TMPROOT}/codex-auth-stder
 engine_is_auth_error codex 1 "${TMPROOT}/codex-auth-stderr"
 t_ok "codex: not being logged in is" "$?"
 
+printf 'Authentication failed: invalid API key\n' >"${TMPROOT}/opencode-auth-stderr"
+engine_is_auth_error opencode 1 "${TMPROOT}/opencode-auth-stderr"
+t_ok "opencode: a provider authentication failure on stderr is" "$?"
+
 engine_is_auth_error nosuchengine 1 "${AUTH_ERR}"
 t_fails "an unknown engine is never diagnosed as an auth failure" "$?"
 
@@ -1067,6 +1154,14 @@ t_eq "claude's is_error inside a zero exit is still an error" \
   error "$(engine_verdict claude 0 "${TMPROOT}/plain-stderr" "${VD_RAW_ERR}")"
 t_eq "the same body from codex is not read that way" \
   ok "$(engine_verdict codex 0 "${TMPROOT}/plain-stderr" "${VD_RAW_ERR}")"
+
+VD_OPEN_ERROR=${TMPROOT}/opencode-error.jsonl
+printf '%s\n' '{"type":"error","sessionID":"oc-err","error":{"name":"ProviderAuthError","data":{"message":"API key is missing"}}}' \
+  >"${VD_OPEN_ERROR}"
+t_eq "opencode's structured authentication error is recognised from stdout" \
+  auth "$(engine_verdict opencode 1 "${TMPROOT}/plain-stderr" "${VD_OPEN_ERROR}")"
+t_eq "an opencode error event cannot become ok only because the process exited 0" \
+  error "$(engine_verdict opencode 0 "${TMPROOT}/plain-stderr" "${VD_OPEN_ERROR}")"
 
 # --- engine_run against the fake engine ------------------------------------
 
@@ -1189,6 +1284,40 @@ t_eq "codex telemetry is folded into the same shape, with no cost figure" \
              tokens_out, turns, models_used}' "${RUN_XE}/result.json")"
 t_eq "the last message codex wrote for itself is the one reported" \
   "codex had the last word" "$(jq -r '.text' "${RUN_XE}/result.json")"
+
+OPENCODE_OK_RAW=${TMPROOT}/opencode-ok.jsonl
+cat >"${OPENCODE_OK_RAW}" <<'RAWJSONL'
+{"type":"step_start","timestamp":1,"sessionID":"oc-1","part":{"type":"step-start"}}
+{"type":"step_finish","timestamp":2,"sessionID":"oc-1","part":{"type":"step-finish","cost":0.04,"tokens":{"input":7,"output":3,"reasoning":1,"cache":{"read":0,"write":0}}}}
+{"type":"step_start","timestamp":3,"sessionID":"oc-1","part":{"type":"step-start"}}
+{"type":"text","timestamp":4,"sessionID":"oc-1","part":{"type":"text","text":"opencode finished"}}
+{"type":"step_finish","timestamp":5,"sessionID":"oc-1","part":{"type":"step-finish","cost":0.06,"tokens":{"input":11,"output":5,"reasoning":2,"cache":{"read":1,"write":0}}}}
+RAWJSONL
+
+RUN_OE=${TMPROOT}/run-opencode-ok
+fake_reset
+FAKE_OUT_FILE=${OPENCODE_OK_RAW}
+opencode_engine_run opencode executor "${RUN_WORK}" "${RUN_PROMPT}" "${RUN_OE}" 60
+t_status "a clean opencode run returns 0" 0 "$?"
+t_eq "opencode JSON events are folded into the common result shape" \
+  '{"engine":"opencode","role":"executor","model":"test-provider/test-opencode-model","effort":"test-variant","verdict":"ok","session_id":"oc-1","cost_usd":0.1,"tokens_in":18,"tokens_out":8,"turns":2,"models_used":[]}' \
+  "$(jq -c '{engine, role, model, effort, verdict, session_id, cost_usd,
+             tokens_in, tokens_out, turns, models_used}' "${RUN_OE}/result.json")"
+t_eq "opencode's final text event reaches last.txt" \
+  "opencode finished" "$(cat "${RUN_OE}/last.txt")"
+t_eq "and reaches result.json with the common trailing newline" \
+  "$(printf 'opencode finished\n' | od -An -c | tr -s ' ')" \
+  "$(jq -j '.text' "${RUN_OE}/result.json" | od -An -c | tr -s ' ')"
+
+OPENCODE_CUT=${TMPROOT}/opencode-cut.jsonl
+cat >"${OPENCODE_CUT}" <<'RAWJSONL'
+{"type":"step_finish","timestamp":1,"sessionID":"oc-cut","part":{"type":"step-finish","cost":0.02,"tokens":{"input":4,"output":2}}}
+RAWJSONL
+printf '%s' '{"type":"text","sessionID":"oc-cut","part":' >>"${OPENCODE_CUT}"
+t_eq "a partial final opencode event does not discard completed telemetry" \
+  '{"session_id":"oc-cut","cost_usd":0.02,"tokens_in":4,"tokens_out":2,"turns":1,"text":""}' \
+  "$(_engine_result_opencode "${OPENCODE_CUT}" |
+     jq -c '{session_id, cost_usd, tokens_in, tokens_out, turns, text}')"
 
 # --- the claude executor's stream -------------------------------------------
 #
@@ -1355,6 +1484,9 @@ printf 'codex: unexpected failure\n' >"${FAKE_OUT_FILE}"
 engine_auth_ok codex
 t_fails "and a message that says nothing about a session is not a yes" "$?"
 fake_reset
+
+engine_auth_ok opencode
+t_ok "opencode defers provider authentication to the selected model" "$?"
 
 engine_auth_ok nosuchengine
 t_fails "an unknown engine is never authenticated" "$?"
@@ -1640,6 +1772,28 @@ sc_validate "1 2 3" "notanumber"
 t_fails "a gap that is not a number of seconds is refused" "$?"
 sc_validate "1 2 3" "0"
 t_ok "and zero is, because zero turns it off" "$?"
+
+oc_validate() { # engine model
+  (
+    HEINZEL_MODEL="" HEINZEL_EFFORT=""
+    HEINZEL_CODEX_MODEL="" HEINZEL_CODEX_EFFORT=""
+    HEINZEL_OPENCODE_MODEL="" HEINZEL_OPENCODE_VARIANT=""
+    HEINZEL_ROOT=${SC_ROOT}
+    hzl_load_conf >/dev/null 2>&1
+    HEINZEL_EXECUTOR_ENGINE=$1
+    HEINZEL_OPENCODE_MODEL=$2
+    hzl_validate_conf >/dev/null 2>&1
+  )
+}
+
+oc_validate opencode ""
+t_fails "opencode requires an explicit model before it can be selected" "$?"
+oc_validate opencode "anthropic/claude-sonnet-4-5"
+t_ok "and with an explicit provider/model" "$?"
+oc_validate opencode "not-a-provider-model"
+t_fails "an opencode model without its provider is refused at startup" "$?"
+oc_validate typo "anthropic/claude-sonnet-4-5"
+t_fails "an unknown executor is still refused" "$?"
 
 unset HEINZEL_HOURS
 

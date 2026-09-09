@@ -6,6 +6,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **OpenCode as an executor or reviewer.** `HEINZEL_EXECUTOR_ENGINE` and
+  `HEINZEL_REVIEWER_ENGINE` now accept `opencode`. Model and provider-specific
+  variant are configured with `HEINZEL_OPENCODE_MODEL` and
+  `HEINZEL_OPENCODE_VARIANT`; the explicit `provider/model` is required when
+  OpenCode is selected so an interactive default cannot change overnight.
+- **A dedicated OpenCode permission profile.** Unattended launches use
+  `--pure` and an inline, role-specific primary agent. The executor translates
+  Heinzel's generated Read/Edit/Bash denials; the reviewer has no edit, shell,
+  skill or subagent capability. Unknown tools and external paths are denied.
+- **OpenCode JSONL normalisation and offline coverage.** Session id, summed
+  step cost/tokens, turn count and final text reach the existing `result.json`
+  contract, including a stream cut off mid-line. The full suite uses a fake
+  `opencode` and makes no API call.
+
+### Fixed
+- Engine, model and effort/variant displays now use the selected engine's
+  values instead of always showing the Claude settings.
+
 ## [0.4.2] - 2026-09-09
 
 Streaming reaches the executor and stops there. 0.4.1 selected the format by

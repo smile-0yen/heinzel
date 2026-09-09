@@ -816,10 +816,13 @@ if ! cmp -s "${CLAIMED_IDS}" "${WORKSHEET_IDS}"; then
 fi
 
 {
+  RUN_ENGINE_MODEL=$(engine_config_model "${HEINZEL_EXECUTOR_ENGINE}")
+  RUN_ENGINE_EFFORT=$(engine_config_effort "${HEINZEL_EXECUTOR_ENGINE}")
   printf '=== run %s (%s)\n' "${RUN_ID}" "${TRIGGER}"
   printf 'workdir  %s\n' "${WORKDIR}"
   printf 'budget   %s task(s) this run, %s/%s this session\n' "${MAX_TASKS}" "${DONE_TOTAL}" "${MAX_TOTAL}"
-  printf 'engine   %s %s effort=%s\n' "${HEINZEL_EXECUTOR_ENGINE}" "${HEINZEL_MODEL}" "${HEINZEL_EFFORT}"
+  printf 'engine   %s %s effort=%s\n' "${HEINZEL_EXECUTOR_ENGINE}" \
+    "${RUN_ENGINE_MODEL:-default}" "${RUN_ENGINE_EFFORT:-default}"
   printf 'mode     %s\n' "$(session_operating_mode)"
   # Written on every run, including the runs where it is on, because "was safe
   # mode on that night?" is a question asked of a log after the fact and the

@@ -15,11 +15,13 @@ rather than opening a public issue. A first response should take a few days; the
 
 - *An unattended agent escalating privilege.* The unattended lane (launchd → runner → engine) never
   uses `sudo`. This is enforced by the absence of a code path, and independently by the OS.
-- *An unattended agent reaching outside its working directory.* Writes are confined to the
-  configured workdir by the OS: `sandbox.enabled` puts every Bash command and its child processes
-  inside Seatbelt, and `--permission-mode dontAsk` refuses anything not pre-approved, including
-  Claude's own Write tool. The permission file is validated before each run — an invalid one aborts
-  the run instead of running without it.
+- *An unattended agent reaching outside its working directory.* Claude is confined by
+  `sandbox.enabled` plus `--permission-mode dontAsk`; Codex uses its `workspace-write`/`read-only`
+  sandbox. OpenCode receives a dedicated agent whose last-applied permissions deny external
+  directories and translate Heinzel's generated path and command denials. The permission file is
+  validated before each run — an invalid one aborts the run instead of running without it. The
+  OpenCode boundary is permission-layer rather than kernel-enforced; its explicit limitation is
+  recorded under residual risks below.
 
   Until 2026-08-30 this said the confinement came from the deny list under `--permission-mode auto`.
   That was wrong, and testing found it: an `allow` rule pre-approves rather than denying the rest,
@@ -59,6 +61,11 @@ prompt names `origin` as the only remote. The residual risk is real and accepted
 can push can publish whatever is in the workdir to the repository it already works on. History
 rewriting stays denied, so a bad push is revertible.
 
+The domain allowlist statement is the Claude implementation. Codex's sandbox
+and OpenCode's permission layer have their own network behaviour; in
+particular, OpenCode does not supply an equivalent kernel/domain boundary for
+shell subprocesses. Selecting it accepts the residual risk stated below.
+
 **A deliberate carve-out: Heinzel edits its own source (2026-09-01)**
 
 The working directory is the Heinzel repository, so the unattended agent writes the tool that runs
@@ -81,6 +88,14 @@ sandbox, not only in Claude's own file tools.
 
 The residual risks are real and accepted:
 
+- **OpenCode does not provide the same OS-enforced executor boundary.** Heinzel disables external
+  plugins and supplies a private agent that denies unknown tools, external directories, protected
+  paths and dangerous shell commands. OpenCode checks paths it can recognise in shell calls, but a
+  subprocess or script can open a path that the permission parser did not see. Its executor should
+  therefore be selected only when that weaker boundary is acceptable (for example in a disposable
+  account or machine). The OpenCode reviewer has no edit, shell, skill or subagent capability and
+  does not share this particular write path.
+
 - **`bin/hzl` is writable, and a human runs it with `sudo`.** The unattended lane still never gains
   privilege itself, but it can now author code that a person later escalates. Nothing in the
   permission file defends against this. What stands in its place is the git history: every change
@@ -99,7 +114,7 @@ The residual risks are real and accepted:
 
 **What it does not defend against**
 
-- A compromised Claude Code binary, or a compromised model endpoint.
+- A compromised Claude Code, Codex or OpenCode binary, or a compromised model endpoint.
 - Content the agent chooses to commit and push to the working repository's own `origin` — see the
   carve-out above.
 - A malicious task in your own `backlog.md`. The ledger is trusted input; the agent's stop

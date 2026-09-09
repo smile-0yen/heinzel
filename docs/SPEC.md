@@ -863,6 +863,7 @@ depends on the role as well as the engine**:
 | claude | reviewer | `--output-format json` | one JSON object, written when the run ends |
 | claude | fixer | `--output-format json` | one JSON object, written when the run ends |
 | codex | any | `--json` | JSONL |
+| opencode | any | `run --format json` | JSONL, one event per line |
 
 The executor streams so that a run in progress can be watched from a terminal
 (`docs/RUNBOOK.md`, "Watching a run that is still going"); `--verbose` is
@@ -879,6 +880,15 @@ the reviewer", so the `fixer` (§10, the one-shot repair pass under
 single-object form until someone decides otherwise for that role. Streaming is
 a thing done *for a watcher*, and a role nobody watches gains nothing from it
 while quietly changing the shape of the evidence it leaves.
+
+OpenCode is launched with `--pure` and a role-specific primary agent supplied
+through `OPENCODE_CONFIG_CONTENT`. The executor receives the generated
+permission file's Read/Edit/Bash denials translated to OpenCode rules; the
+reviewer additionally denies edits, shell commands, skills and subagents.
+Unknown tools and external directories are denied for both. External plugins,
+automatic sharing, automatic updates and automatic LSP downloads are disabled
+for an unattended launch. `step_finish` events are summed into cost and token
+telemetry, and the last completed `text` event becomes `last.txt`.
 
 > **Normative: `raw` is evidence, not an interface.** Nothing outside
 > `lib/engines.sh` parses it. Both claude shapes end in the same object — the
@@ -1072,7 +1082,9 @@ consistency with surrounding code cannot be judged from a diff.
 `verdict` ∈ {approve, revise, reject}, `summary`, `findings[]` each with
 `severity` ∈ {blocker, major, minor, nit}, `file`, `line`, `what`, `why`.
 A ```` ```json ```` fence is stripped as insurance; output that is still not
-JSON is `failed`, never a guess parsed from prose.
+JSON, or does not match that closed shape, is `failed`, never a guess parsed
+from prose. Claude and Codex also receive the schema at launch; OpenCode has no
+equivalent CLI flag, so the common post-run validation is its enforcement.
 
 ## §11 `runs.jsonl` (normative, one object per line)
 
@@ -1544,7 +1556,8 @@ the review and model keys, which are environment > conf > default so that
 | `HEINZEL_WEB_PORT` | `3151` | the port `hzl web` listens on, 1024–65535. Loopback only, and never privileged: `hzl` refuses to run as root |
 | `DEFAULT_BACKLOG` | *(none)* | absolute path; required. One queue, whatever the number of workspaces. It should sit **outside** every workspace — `hzl doctor` warns if it does not — and is baked into the generated permission file, so moving it needs `hzl install` again |
 | `HEINZEL_MODEL` / `HEINZEL_EFFORT` | `claude-opus-5` / `xhigh` | effort: `low\|medium\|high\|xhigh\|max` |
-| `HEINZEL_EXECUTOR_ENGINE` / `HEINZEL_REVIEWER_ENGINE` | `claude` / `codex` | `claude\|codex` |
+| `HEINZEL_EXECUTOR_ENGINE` / `HEINZEL_REVIEWER_ENGINE` | `claude` / `codex` | `claude\|codex\|opencode` |
+| `HEINZEL_OPENCODE_MODEL` / `HEINZEL_OPENCODE_VARIANT` | *(none)* / *(none)* | model must be `provider/model` when OpenCode is selected; variant is provider-specific |
 | `HEINZEL_REVIEW` | `0` | `0\|1` |
 | `HEINZEL_REVIEW_ON_REVISE` | `note-only` | `note-only\|fix-once\|block` |
 | `HEINZEL_REVIEW_TIMEOUT` | `900` | ≥ 1 |
@@ -1684,6 +1697,7 @@ Honest as of 2026-08-29.
 | HALT in the field | The auth-failure patterns are desk-checked only; a real credential expiry has not been reproduced |
 | **`stream-json` against a real `claude`** | The executor's launch changed in 0.4.1. The suite covers it against fixed JSONL samples and a stand-in engine — normalisation, the verdict, `runs.jsonl`'s `cost_usd`, and a stream cut off mid-line — but no real run has been made since. Two things a fixture cannot show: that the CLI accepts `--output-format stream-json --verbose` alongside these flags, and that its last line is the `"type": "result"` object every figure in `result.json` is read from. `docs/VERIFICATION.md` phase 3 checks both from a second terminal |
 | **`--json-schema` combined with `stream-json`** | Unknown, and the reason the reviewer was left on `--output-format json`. It decides whether a review can be watched the way an execution now can. One live reviewer run answers it; guessing wrong costs a schema silently dropped and prose where the runner parses a verdict |
+| **OpenCode against a real provider** | The suite covers exact argv/environment construction, role permissions, completed and truncated JSONL, telemetry, final text and auth classification against a stand-in CLI. A real `opencode run --format json` executor/reviewer pair has not yet been run here. Verify that the selected provider accepts `--variant`, that review prose is only the requested JSON object, and that external-directory/path denials behave as the installed OpenCode version documents before relying on it unattended |
 
 > The interlock is verified as *implemented*. On the machine it was tested on
 > it currently has **no effect**, because a sudoers drop-in left over from a

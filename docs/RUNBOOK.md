@@ -137,8 +137,8 @@ adds. `hzl doctor` prints the version it found.
 `hzl logs -f` follows the *runner*: the gates it walked, the worksheet it
 handed over, the review at the end. It says nothing about what the agent is
 doing in the half-hour in between, because that is not the runner's log. That
-is the agent's own output, in the run's exec directory, and the executor
-writes it a line at a time as the work happens:
+is the agent's own output, in the run's exec directory. Every supported
+executor writes JSONL as the work happens:
 
 ```sh
 ls -dt ~/.heinzel/logs/*/exec-*/ | head -1     # the run in progress
@@ -158,6 +158,10 @@ tail -f ~/.heinzel/logs/2026-09-08/exec-030001/raw |
        else empty end)
     elif .type == "result" then
       "— " + (.subtype // "done") + "  $" + (.total_cost_usd // 0 | tostring)
+    elif .type == "text" then .part.text
+    elif .type == "tool_use" then "· " + .part.tool
+    elif .type == "step_finish" then
+      "— step  $" + (.part.cost // 0 | tostring)
     else empty end'
 ```
 
@@ -168,16 +172,14 @@ Three things this is not:
 
 - **Not a way to intervene.** It is a read of a file. The run holds the working
   directory and there is nothing to type into. To stop one, `hzl off`.
-- **Not a stable format.** Every line above the last is the `claude` CLI's own
-  event stream, and a CLI upgrade may change it. Nothing in Heinzel reads those
-  lines. The one line Heinzel does read is the last, `"type": "result"`, which
-  carries the session id, the cost, the turn count and the final message — and
-  `result.json` beside it is the form to write anything durable against.
-- **Only the executor.** The review, and the one repair pass a `revise`
-  verdict can run, are launched with `--output-format json` — one object that
-  appears whole when it is over, so there is nothing to follow. It is the long
-  unattended pass that is worth watching, and that one is the executor.
-  `docs/SPEC.md` §9 says which role writes which.
+- **Not a stable format.** Each CLI owns its event stream, and an upgrade may
+  change it. Heinzel normalises the engine-specific fields into `result.json`;
+  that file beside `raw` is the form to write anything durable against.
+- **Primarily for the executor.** Claude reviews and repair passes write one
+  object only when they end. Codex and OpenCode use JSONL for every role, but
+  those shorter passes are normally observed through the runner log. It is the
+  long unattended executor pass that is worth following. `docs/SPEC.md` §9
+  says which role writes which.
 
 ## The backlog
 
