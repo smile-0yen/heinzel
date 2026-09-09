@@ -83,17 +83,33 @@ what you should see, so if you get something else you can stop there rather than
 
 - macOS (developed against 26.6 on Apple silicon)
 - `/bin/bash` 3.2 — the stock one; no newer bash required
-- [Claude Code](https://claude.com/claude-code), installed and signed in
+- one supported agent CLI, installed and signed in: [Claude Code](https://claude.com/claude-code)
+  (the default), [Codex](https://developers.openai.com/codex/cli/) or
+  [OpenCode](https://opencode.ai/docs/cli/)
 - `jq`
 
 ```sh
-sw_vers -productVersion && jq --version && claude --version
+sw_vers -productVersion && jq --version
+claude --version       # or: codex --version / opencode --version
 ```
 
 Three version numbers means you have them. `caffeinate`, `pmset`, `launchctl` and `lockf` are
 already on any Mac. There is no Homebrew dependency: notably, Heinzel does **not** require
 coreutils' `timeout`, which stock macOS does not ship — it carries its own watchdog. A second
 agent CLI, as the reviewer, is optional and off by default.
+
+To use OpenCode, set these in `etc/heinzel.conf` and run `hzl doctor`:
+
+```sh
+HEINZEL_EXECUTOR_ENGINE="opencode"
+HEINZEL_OPENCODE_MODEL="anthropic/claude-sonnet-4-5"  # required provider/model
+HEINZEL_OPENCODE_VARIANT="high"                       # optional, provider-specific
+```
+
+The same `opencode` value may be used for `HEINZEL_REVIEWER_ENGINE`; Heinzel launches a separate
+read-only OpenCode agent for that role. OpenCode's executor confinement is permission-layer rather than the OS-level
+boundary used by Claude/Codex; read the explicit limitation in `SECURITY.md` before leaving it
+unattended.
 
 ### 2. Install
 

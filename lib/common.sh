@@ -248,7 +248,8 @@ pid_alive() {
 _HZ_ENV_KEYS="HEINZEL_REVIEW HEINZEL_EXECUTOR_ENGINE HEINZEL_REVIEWER_ENGINE
 HEINZEL_CODEX_MODEL HEINZEL_CODEX_EFFORT HEINZEL_REVIEW_ON_REVISE
 HEINZEL_REVIEW_TIMEOUT HEINZEL_REVIEW_MAX_PATCH_BYTES
-HEINZEL_CODEX_IGNORE_USER_CONFIG HEINZEL_MODEL HEINZEL_EFFORT"
+HEINZEL_CODEX_IGNORE_USER_CONFIG HEINZEL_OPENCODE_MODEL
+HEINZEL_OPENCODE_VARIANT HEINZEL_MODEL HEINZEL_EFFORT"
 
 hzl_load_conf() {
   local k v line saved_env="" conf="${HEINZEL_ROOT}/etc/heinzel.conf"
@@ -280,6 +281,12 @@ hzl_load_conf() {
   HEINZEL_REVIEWER_ENGINE="codex"
   HEINZEL_CODEX_MODEL="gpt-5.6-sol"
   HEINZEL_CODEX_EFFORT="xhigh"
+  # OpenCode IDs have the form provider/model and its reasoning control is
+  # called a variant rather than an effort, so neither Claude's nor Codex's
+  # default can be reused here. Empty is valid while OpenCode is not selected;
+  # validation requires a value before an OpenCode run can be enabled.
+  HEINZEL_OPENCODE_MODEL=""
+  HEINZEL_OPENCODE_VARIANT=""
   # Review is opt-in on a fresh install: it costs money and needs a second
   # engine, and a tool that bills you by default on first run is impolite.
   HEINZEL_REVIEW=0
@@ -386,12 +393,12 @@ hzl_validate_conf() {
     *) err "HEINZEL_REVIEW_ON_REVISE must be note-only, fix-once or block"; return 1 ;;
   esac
   case ${HEINZEL_EXECUTOR_ENGINE} in
-    claude|codex) ;;
-    *) err "HEINZEL_EXECUTOR_ENGINE must be claude or codex"; return 1 ;;
+    claude|codex|opencode) ;;
+    *) err "HEINZEL_EXECUTOR_ENGINE must be claude, codex or opencode"; return 1 ;;
   esac
   case ${HEINZEL_REVIEWER_ENGINE} in
-    claude|codex) ;;
-    *) err "HEINZEL_REVIEWER_ENGINE must be claude or codex"; return 1 ;;
+    claude|codex|opencode) ;;
+    *) err "HEINZEL_REVIEWER_ENGINE must be claude, codex or opencode"; return 1 ;;
   esac
   # An effort typo degrades differently per engine: claude warns and completes
   # at its default (invisible), codex gets a 400 and the review fails. Neither
@@ -404,6 +411,17 @@ hzl_validate_conf() {
     ""|none|minimal|low|medium|high|xhigh|max) ;;
     *) err "HEINZEL_CODEX_EFFORT: '${HEINZEL_CODEX_EFFORT}' is not a valid effort"; return 1 ;;
   esac
+  case ${HEINZEL_OPENCODE_MODEL} in
+    ""|?*/?*) ;;
+    *) err "HEINZEL_OPENCODE_MODEL must be empty or provider/model"; return 1 ;;
+  esac
+  if [ "${HEINZEL_EXECUTOR_ENGINE}" = opencode ] ||
+     { [ "${HEINZEL_REVIEW}" = 1 ] && [ "${HEINZEL_REVIEWER_ENGINE}" = opencode ]; }; then
+    [ -n "${HEINZEL_OPENCODE_MODEL}" ] || {
+      err "HEINZEL_OPENCODE_MODEL is required when opencode is selected"
+      return 1
+    }
+  fi
   case ${HEINZEL_WEB_PORT} in
     ""|*[!0-9]*) err "HEINZEL_WEB_PORT must be a port number"; return 1 ;;
   esac
@@ -452,6 +470,28 @@ $(workdirs_list)
 EOF
 
   return 0
+}
+
+# What was configured for one engine. The runner, status page and dashboard
+# all use these rather than displaying Claude's values for a Codex or OpenCode
+# run. `effort` is the normalised result field; for OpenCode it carries the
+# provider-specific variant passed with `--variant`.
+engine_config_model() {
+  case $1 in
+    claude) printf '%s' "${HEINZEL_MODEL:-}" ;;
+    codex) printf '%s' "${HEINZEL_CODEX_MODEL:-}" ;;
+    opencode) printf '%s' "${HEINZEL_OPENCODE_MODEL:-}" ;;
+    *) return 1 ;;
+  esac
+}
+
+engine_config_effort() {
+  case $1 in
+    claude) printf '%s' "${HEINZEL_EFFORT:-}" ;;
+    codex) printf '%s' "${HEINZEL_CODEX_EFFORT:-}" ;;
+    opencode) printf '%s' "${HEINZEL_OPENCODE_VARIANT:-}" ;;
+    *) return 1 ;;
+  esac
 }
 
 # Is the schedule every hour? A session that is on may be allowed to work at any

@@ -164,9 +164,10 @@ fi
 
 # --- parse the verdict -----------------------------------------------------
 #
-# The schema is enforced by the engine. Stripping a ```json fence is insurance
-# for the day it is not: what must never happen is falling back to grepping
-# prose for the word "approve".
+# Claude and Codex enforce the schema at the engine; OpenCode has no matching
+# CLI flag and is held to it by the prompt plus this strict parse. Stripping a
+# ```json fence is the only leniency: what must never happen is falling back to
+# grepping prose for the word "approve".
 
 RAW_TEXT=$(jq -r '.text // ""' "${RESULT}" 2>/dev/null)
 [ -n "${RAW_TEXT}" ] || RAW_TEXT=$(cat "${OUTDIR}/last.txt" 2>/dev/null)
@@ -178,6 +179,28 @@ PARSED=$(printf '%s' "${RAW_TEXT}" |
 
 if [ -z "${PARSED}" ]; then
   write_verdict failed "the reviewer's output was not JSON" "${HEINZEL_REVIEWER_ENGINE}"
+  exit 1
+fi
+
+# OpenCode cannot take review-schema.json on its command line. Validate the
+# same closed shape here for every engine, so an OpenCode reviewer does not get
+# a looser gate and an engine-side schema regression still fails closed.
+if ! printf '%s' "${PARSED}" | jq -e '
+  type == "object" and
+  ((keys | sort) == ["findings", "summary", "verdict"]) and
+  (.verdict == "approve" or .verdict == "revise" or .verdict == "reject") and
+  (.summary | type == "string") and
+  (.findings | type == "array") and
+  all(.findings[];
+    type == "object" and
+    ((keys | sort) == ["file", "line", "severity", "what", "why"]) and
+    (.severity == "blocker" or .severity == "major" or
+     .severity == "minor" or .severity == "nit") and
+    (.file | type == "string") and (.line | type == "number" and floor == .) and
+    (.what | type == "string") and (.why | type == "string"))' \
+    >/dev/null 2>&1; then
+  write_verdict failed "the reviewer's JSON did not match review-schema.json" \
+    "${HEINZEL_REVIEWER_ENGINE}"
   exit 1
 fi
 

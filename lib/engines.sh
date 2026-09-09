@@ -38,7 +38,7 @@
 # engine_run leaves in <outdir>:
 #   raw            the engine's own output, in the engine's own format, which
 #                  depends on the role as well as the engine: JSONL for the
-#                  claude executor and for codex, one JSON object for the
+#                  claude executor, codex and opencode, one JSON object for the
 #                  claude reviewer. Nothing outside this file parses it.
 #   last.txt       the final message, in the same place for every engine
 #   stderr         standard error; the input to auth-failure detection
@@ -68,6 +68,13 @@ engine_auth_ok() {
       # way, so reading with 2>/dev/null always looks like "not logged in".
       codex login status 2>&1 | grep -qi "logged in"
       ;;
+    opencode)
+      # A provider may be authenticated by OpenCode's credential store or by
+      # its environment, and an empty model means OpenCode chooses the provider
+      # too. There is no offline yes/no probe that covers those combinations.
+      # The launch's structured error stream is classified below instead.
+      return 0
+      ;;
     *) return 1 ;;
   esac
 }
@@ -89,8 +96,91 @@ engine_is_auth_error() {
       grep -vE 'rmcp::|mcp-client|models_manager' "${errfile}" |
         grep -qiE 'not logged in|codex login|401 unauthorized|refresh token|token expired'
       ;;
+    opencode)
+      grep -qiE 'unauthorized|forbidden|authentication|not authenticated|invalid api key|api key.*(missing|invalid)|credentials.*(missing|invalid)' \
+        "${errfile}"
+      ;;
     *) return 1 ;;
   esac
+}
+
+# OpenCode reads permissions from its ordinary config, including project files
+# in the worktree. Heinzel therefore adds a uniquely named agent in the inline
+# config, which is loaded after project config, and launches that agent by
+# name. Its rules are last and cannot be relaxed by an opencode.json the agent
+# can edit during a self-hosted run.
+#
+# The generated Claude settings remain the source of truth for path and shell
+# denials. Translating them here means `hzl install`, the runner's stale-file
+# check and `hzl doctor` keep describing the protection every engine receives.
+_engine_opencode_rule_map() { # settings.json Read|Edit|Bash default-action
+  local settings=$1 tool=$2 default_action=$3
+  jq -c --arg tool "${tool}" --arg default "${default_action}" '
+    reduce ((.permissions.deny // [])[]
+      | select(startswith($tool + "(") and endswith(")"))
+      | .[($tool | length) + 1:-1]
+      # Claude carries both current Bash wildcard spellings. OpenCode uses the
+      # space form, so discard the duplicate colon form.
+      | select(($tool != "Bash") or (endswith(":*") | not))
+      # A Claude absolute path begins //; OpenCode takes an ordinary absolute
+      # path. Leave ~/ patterns as they are: both expand them.
+      | if ($tool != "Bash") and startswith("//") then .[1:] else . end
+    ) as $pattern ({"*": $default}; .[$pattern] = "deny")' "${settings}"
+}
+
+_engine_opencode_config() { # role -> inline opencode config on stdout
+  local role=$1 settings="${HEINZEL_ROOT}/etc/heinzel-settings.json"
+  local read_rules edit_rules bash_rules permission agent
+
+  [ -r "${settings}" ] || {
+    err "missing ${settings} - cannot build the opencode permission profile"
+    return 1
+  }
+  jq -e . "${settings}" >/dev/null 2>&1 || {
+    err "${settings} is not valid JSON - cannot build the opencode permission profile"
+    return 1
+  }
+
+  read_rules=$(_engine_opencode_rule_map "${settings}" Read allow) || return 1
+  # OpenCode's own provider config and credential record are read by the CLI,
+  # not through an agent tool. Deny the model a second route to the same keys.
+  read_rules=$(printf '%s' "${read_rules}" | jq -c '
+    .["~/.config/opencode/**"] = "deny"
+    | .["~/.local/share/opencode/auth.json"] = "deny"') || return 1
+
+  if [ "${role}" = reviewer ]; then
+    agent=heinzel-reviewer
+    permission=$(jq -cn --argjson read "${read_rules}" '
+      {"*":"deny", read:$read, glob:"allow", grep:"allow", list:"allow",
+       lsp:"deny", webfetch:"deny", websearch:"deny",
+       edit:"deny", bash:"deny", task:"deny", skill:"deny",
+       external_directory:"deny", question:"deny", doom_loop:"deny",
+       plan_enter:"deny", plan_exit:"deny"}') || return 1
+  else
+    agent=heinzel-executor
+    edit_rules=$(_engine_opencode_rule_map "${settings}" Edit allow) || return 1
+    edit_rules=$(printf '%s' "${edit_rules}" | jq -c '
+      .["~/.config/opencode/**"] = "deny"
+      | .["~/.local/share/opencode/**"] = "deny"') || return 1
+    bash_rules=$(_engine_opencode_rule_map "${settings}" Bash allow) || return 1
+    permission=$(jq -cn \
+      --argjson read "${read_rules}" \
+      --argjson edit "${edit_rules}" \
+      --argjson bash "${bash_rules}" '
+      {"*":"deny", read:$read, edit:$edit, bash:$bash,
+       glob:"allow", grep:"allow", list:"allow", lsp:"deny",
+       todowrite:"allow", webfetch:"deny", websearch:"deny", skill:"allow",
+       task:"deny", external_directory:"deny", question:"deny",
+       doom_loop:"deny", plan_enter:"deny", plan_exit:"deny"}') || return 1
+  fi
+
+  jq -cn --arg agent "${agent}" --argjson permission "${permission}" '
+    {"$schema":"https://opencode.ai/config.json", share:"disabled",
+     agent:{($agent):{
+       description:"Heinzel unattended agent",
+       mode:"primary",
+       permission:$permission
+     }}}' || return 1
 }
 
 # --- Agent Driver: the launch ----------------------------------------------
@@ -110,7 +200,7 @@ engine_is_auth_error() {
 # is an argument rather than something written to stdin.
 engine_build_launch() {
   local engine=$1 role=$2 io_mode=$3 workdir=$4 promptfile=$5 outdir=$6 spec=$7
-  local prompt model effort executable profile
+  local prompt model effort executable profile opencode_config opencode_agent
   local -a argv format
 
   case ${io_mode} in
@@ -188,8 +278,8 @@ engine_build_launch() {
       ;;
     codex)
       executable=codex
-      model=${HEINZEL_CODEX_MODEL}
-      effort=${HEINZEL_CODEX_EFFORT}
+      model=$(engine_config_model codex)
+      effort=$(engine_config_effort codex)
       argv=(exec --skip-git-repo-check -C "${workdir}" --json
             -o "${outdir}/last.txt")
       if [ "${role}" = reviewer ]; then
@@ -203,6 +293,28 @@ engine_build_launch() {
       [ -n "${model}" ] && argv+=(-m "${model}")
       [ -n "${effort}" ] && argv+=(-c "model_reasoning_effort=\"${effort}\"")
       [ "${HEINZEL_CODEX_IGNORE_USER_CONFIG}" = 1 ] && argv+=(-c "ignore_user_config=true")
+      argv+=("${prompt}")
+      ;;
+    opencode)
+      executable=opencode
+      model=$(engine_config_model opencode)
+      effort=$(engine_config_effort opencode)
+      opencode_config=$(_engine_opencode_config "${role}") || return 1
+      if [ "${role}" = reviewer ]; then
+        profile=review-read-only-v1
+        opencode_agent=heinzel-reviewer
+      else
+        profile=execute-workspace-write-v1
+        opencode_agent=heinzel-executor
+      fi
+      # --pure disables external plugins, whose code runs in the OpenCode
+      # process rather than through a permission-gated tool. `run` rejects
+      # permission prompts in non-interactive mode; every capability needed by
+      # the selected agent is therefore stated explicitly in the inline config.
+      argv=(--pure run --dir "${workdir}" --format json
+            --agent "${opencode_agent}")
+      [ -n "${model}" ] && argv+=(--model "${model}")
+      [ -n "${effort}" ] && argv+=(--variant "${effort}")
       argv+=("${prompt}")
       ;;
     *)
@@ -230,9 +342,16 @@ engine_build_launch() {
     --arg profile "${profile}" \
     --arg model "${model}" \
     --arg effort "${effort}" \
+    --arg opencode_config "${opencode_config:-}" \
     '{schema_version: 1, engine: $engine, agent_kind: $engine,
       executable: $executable, role: $role,
-      argv: (split(([0] | implode))[:-1]), env: {},
+      argv: (split(([0] | implode))[:-1]),
+      env: (if $engine == "opencode" then {
+        OPENCODE_CONFIG_CONTENT: $opencode_config,
+        OPENCODE_DISABLE_AUTOUPDATE: "true",
+        OPENCODE_DISABLE_LSP_DOWNLOAD: "true",
+        OPENCODE_AUTO_SHARE: "false"
+      } else {} end),
       io_mode: $io_mode, security_profile: $profile,
       model: $model, effort: $effort}' >"${spec}.tmp" || return 1
   mv "${spec}.tmp" "${spec}"
@@ -285,6 +404,28 @@ _engine_claude_result_json() {
   printf '%s' "${out}"
 }
 
+# OpenCode emits one JSON object per line. Read it line by line so a watchdog
+# cut in the middle of the final write does not discard all complete events
+# before it.
+_engine_opencode_events() {
+  jq -R -s -c '[splits("\n") | select(length > 0) | fromjson?]' \
+    "$1" 2>/dev/null || printf '[]'
+}
+
+_engine_opencode_has_error() {
+  _engine_opencode_events "$1" |
+    jq -e 'any(.[]; .type == "error")' >/dev/null 2>&1
+}
+
+_engine_opencode_has_auth_error() {
+  _engine_opencode_events "$1" |
+    jq -e '
+      [.[] | select(.type == "error") | (.error // .)]
+      | any(.[]; tostring
+          | test("auth|unauthorized|forbidden|api[ _-]?key|credential|token expired"; "i"))' \
+      >/dev/null 2>&1
+}
+
 # rc 124/137 come from the watchdog and mean the wall clock ran out.
 engine_verdict() {
   local engine=$1 rc=$2 errfile=$3 rawfile=$4
@@ -294,6 +435,20 @@ engine_verdict() {
   if engine_is_auth_error "${engine}" "${rc}" "${errfile}"; then
     printf auth
     return
+  fi
+  if [ "${engine}" = opencode ] && [ -r "${rawfile}" ]; then
+    if [ "${rc}" -ne 0 ] && _engine_opencode_has_auth_error "${rawfile}"; then
+      printf auth
+      return
+    fi
+    # The current CLI sets a non-zero process status for an error event. Keep
+    # the event check as well: it is the engine's structured statement, and a
+    # future CLI must not turn one into a collected success by changing only
+    # its process-exit convention.
+    if _engine_opencode_has_error "${rawfile}"; then
+      printf error
+      return
+    fi
   fi
   [ "${rc}" -ne 0 ] && { printf error; return; }
   # claude reports a failed run inside a successful process exit, in the same
@@ -409,6 +564,24 @@ _engine_result_codex() {
   }' "${raw}" 2>/dev/null || printf '{}'
 }
 
+_engine_result_opencode() {
+  local raw=$1
+  _engine_opencode_events "${raw}" | jq -c '
+    . as $events
+    | [$events[] | select(.type == "step_finish") | .part] as $steps
+    | {
+        session_id: ([$events[] | .sessionID // empty] | last // null),
+        cost_usd: (if ($steps | length) == 0 then null
+                   else ([$steps[] | .cost // 0] | add) end),
+        turns: ($steps | length),
+        tokens_in: ([$steps[] | .tokens.input // 0] | add // 0),
+        tokens_out: ([$steps[] | .tokens.output // 0] | add // 0),
+        models_used: [],
+        text: ([$events[] | select(.type == "text") | .part.text // empty]
+               | last // "")
+      }' 2>/dev/null || printf '{}'
+}
+
 # Turn what the runtime collected into the engine-independent result. The
 # engine is read from the launch spec rather than passed again, so the two
 # cannot disagree about which engine produced the output being read. The
@@ -447,6 +620,15 @@ engine_normalize_result() {
       ;;
     codex)
       parsed=$(_engine_result_codex "${rawfile}")
+      ;;
+    opencode)
+      parsed=$(_engine_result_opencode "${rawfile}")
+      # Unlike codex, OpenCode has no output-file flag. Put its final completed
+      # text part in the common location before the engine-independent record
+      # is assembled.
+      printf '%s' "${parsed}" |
+        jq -j '(.text // "") | if . == "" then . else . + "\n" end' \
+        >"${lastfile}" 2>/dev/null
       ;;
   esac
   [ -n "${parsed}" ] || parsed='{}'

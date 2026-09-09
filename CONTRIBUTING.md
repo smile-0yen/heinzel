@@ -32,7 +32,7 @@ tests/test.sh --live   # reserved: will exercise the reviewer engine (costs mone
 ```
 
 The engine layer is covered offline: `lib/engines.sh` and `lib/watchdog.sh` are
-exercised against a fake `claude` / `codex` on a temporary `PATH`, which records
+exercised against fake `claude`, `codex` and `opencode` CLIs on a temporary `PATH`, which record
 the argv it was handed and plays back a fixture. `--live` stays refused with
 exit 2 until a test calls a real engine. A flag that is accepted and ignored
 reports a green suite for work it never did.

@@ -1395,6 +1395,9 @@ cmd_doctor() {
   done
   if have "${HEINZEL_EXECUTOR_ENGINE}"; then
     doc_ok "${HEINZEL_EXECUTOR_ENGINE} ($(${HEINZEL_EXECUTOR_ENGINE} --version 2>/dev/null | head -1))"
+    if [ "${HEINZEL_EXECUTOR_ENGINE}" = opencode ]; then
+      doc_warn "opencode confinement is permission-layer, not the OS boundary Claude/Codex provide (see SECURITY.md)"
+    fi
   else
     # "not on PATH" is not a diagnosis, and this is the one prerequisite whose
     # absence depends on how hzl was invoked rather than on what is installed.
@@ -2162,7 +2165,7 @@ EOF
     --argjson log "$(dashboard_log_json 200)" \
     --arg review "$([ "${HEINZEL_REVIEW}" = 1 ] && echo "${HEINZEL_REVIEWER_ENGINE}" || echo "")" \
     --arg executor "${HEINZEL_EXECUTOR_ENGINE}" \
-    --arg model "${HEINZEL_MODEL}" \
+    --arg model "$(engine_config_model "${HEINZEL_EXECUTOR_ENGINE}")" \
     '{generated_at: $generated_at, generated_at_epoch: $generated_at_epoch,
       host: $host, version: $version, backlog: $backlog,
       session: $session,
@@ -2375,7 +2378,10 @@ cmd_schedule() {
   fi
 
   printf '\nengines\n'
-  field "executor" "${HEINZEL_EXECUTOR_ENGINE} (${HEINZEL_MODEL}, ${HEINZEL_EFFORT})"
+  local executor_model executor_effort
+  executor_model=$(engine_config_model "${HEINZEL_EXECUTOR_ENGINE}")
+  executor_effort=$(engine_config_effort "${HEINZEL_EXECUTOR_ENGINE}")
+  field "executor" "${HEINZEL_EXECUTOR_ENGINE} (${executor_model:-default}, ${executor_effort:-default})"
   if [ "${HEINZEL_REVIEW}" = 1 ]; then
     field "review" "on - ${HEINZEL_REVIEWER_ENGINE}, on revise: ${HEINZEL_REVIEW_ON_REVISE}"
   else
