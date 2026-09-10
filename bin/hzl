@@ -2566,7 +2566,21 @@ everything else
   hzl dashboard [--days N]     the same thing as one JSON document
   hzl doctor                   check the whole setup
   hzl logs [-f] [-n N]         recent run logs
-  hzl install / uninstall      the launchd agent
+  hzl install                  write the schedule and the agent's permission
+                               file from etc/heinzel.conf, and load the
+                               schedule into launchd ('hzl work' and 'hzl
+                               mobile' do this for you). Reads DEFAULT_WORKDIR,
+                               DEFAULT_BACKLOG, HEINZEL_HOURS and
+                               HEINZEL_SAFE_MODE; while a session is live, its
+                               own workdirs and backlog are used instead.
+                               Writes:
+                                 ~/Library/LaunchAgents/${HEINZEL_LABEL}.plist
+                                 etc/heinzel-settings.json
+                               Re-run it after changing any of those settings
+  hzl uninstall                unload that launchd job and delete its plist;
+                               no scheduled run starts until the next install.
+                               etc/heinzel-settings.json, the backlog and
+                               ~/.heinzel are left as they are
   hzl version
 
 exit codes: status is 0 when no session is running, 10 when one is, 1 on error.

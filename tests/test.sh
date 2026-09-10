@@ -5260,6 +5260,13 @@ hzl_db help >"${DB_MODE_OUT}" 2>&1
 t_has "help presents work mode" "${DB_MODE_OUT}" "hzl work [options]"
 t_has "help presents mobile mode" "${DB_MODE_OUT}" "hzl mobile [options]"
 
+t_has "install says what it reads" "${DB_MODE_OUT}" "HEINZEL_HOURS"
+t_has "install says what else it reads" "${DB_MODE_OUT}" "DEFAULT_BACKLOG"
+t_has "install says what it writes" "${DB_MODE_OUT}" "etc/heinzel-settings.json"
+t_has "install says where the plist goes" "${DB_MODE_OUT}" "LaunchAgents/local.heinzel.plist"
+t_has "help still lists uninstall" "${DB_MODE_OUT}" "hzl uninstall"
+t_lacks "the old one-line install/uninstall summary is gone" "${DB_MODE_OUT}" "hzl install / uninstall      the launchd agent"
+
 hzl_db on >"${DB_MODE_OUT}" 2>&1
 DB_OLD_RC=$?
 t_fails "the old on command is refused" "${DB_OLD_RC}"

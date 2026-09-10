@@ -6,6 +6,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-11
+
+`hzl help` said `hzl install / uninstall      the launchd agent` and no more,
+which does not say which settings `install` reads, or what it writes and
+`uninstall` leaves behind. Someone deciding whether it is safe to run, or
+where to look after changing a setting, had to read the source. `hzl help`
+now spells out both: `install` reads `DEFAULT_WORKDIR`, `DEFAULT_BACKLOG`,
+`HEINZEL_HOURS` and `HEINZEL_SAFE_MODE` (a live session's own workdirs and
+backlog instead), and writes the launchd plist and
+`etc/heinzel-settings.json`; `uninstall` unloads the job and deletes the
+plist, leaving the settings file, the backlog and `~/.heinzel` alone.
+
+### Fixed
+- `hzl help`'s entries for `hzl install` and `hzl uninstall` now say what each
+  reads and writes, instead of "the launchd agent".
+
 ## [0.6.0] - 2026-09-11
 
 `hzl budget` reports how much of each account's usage limit is left, for every
