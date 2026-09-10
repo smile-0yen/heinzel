@@ -320,6 +320,37 @@ t_eq "a ledger whose remaining task is claimed offers nothing up" \
 t_eq "and it is still one unfinished task, not an empty backlog" \
   1 "$(backlog_count "${CNT_HELD}" "~")"
 
+# `backlog_todo_rows` is where the order of attack is defined; `backlog_next_row`
+# is just its first line, and `hzl status`'s todo count is `backlog_count`'s.
+# All three have to agree on what "todo" means.
+TODO_ROWS=${TMPROOT}/todo-rows.md
+cat >"${TODO_ROWS}" <<'FIXTURE'
+# Backlog
+
+```
+- [ ] an example that must not be counted as anything
+```
+
+## P2
+- [ ] (id:h-0010) second priority, written first
+
+## P1
+- [~] (id:h-0011) claimed by a run <!-- run:20260903-012502 -->
+- [ ] (id:h-0012) first priority
+- [!] (id:h-0013) blocked <!-- blocked:2026-09-02T02:08:20+09:00 -->
+- [x] (id:h-0014) finished <!-- done:2026-09-01T03:09:35+09:00 -->
+- [ ] a hand-typed task with no id
+FIXTURE
+
+t_eq "backlog_todo_rows lists todo tasks in the order runs take them" \
+  "first priority|a hand-typed task with no id|second priority, written first" \
+  "$(backlog_todo_rows "${TODO_ROWS}" | cut -f5 | paste -sd'|' -)"
+t_eq "and the row count is what backlog_count calls todo" \
+  3 "$(backlog_count "${TODO_ROWS}" " ")"
+t_eq "backlog_next_row is still the first of backlog_todo_rows" \
+  "$(backlog_todo_rows "${TODO_ROWS}" | head -1)" \
+  "$(backlog_next_row "${TODO_ROWS}")"
+
 # --- backlog_assign_ids ----------------------------------------------------
 
 group 'backlog_assign_ids'
@@ -5410,6 +5441,39 @@ PATH=${BG_BIN}:${PATH} hzl_db budget >"${DB_OUT}" 2>&1
 t_eq "an engine that cannot be read makes budget exit 1" 1 "$?"
 t_has "and says why, on the engine's line" "${DB_OUT}" "could not be read - something else entirely"
 unset BG_BIN BG_USAGE
+
+group 'hzl todo'
+
+DB_OUT=${TMPROOT}/todo.out
+hzl_db todo >"${DB_OUT}" 2>&1
+t_ok "hzl todo exits 0" "$?"
+t_has "the P1 todo task is listed" "${DB_OUT}" "待っている仕事"
+t_has "and the task added through the form" "${DB_OUT}" "フォームから積んだ仕事"
+t_has "and the task added with roles" "${DB_OUT}" "レビュー付き"
+t_lacks "the roles directive is stripped from the text" "${DB_OUT}" "(roles:"
+t_lacks "the blocked task is not listed" "${DB_OUT}" "人を待っている"
+TODO_L1=$(line_of "${DB_OUT}" "待っている仕事")
+TODO_L2=$(line_of "${DB_OUT}" "フォームから積んだ仕事")
+t_ok "P1 comes before P2, the order runs take them" \
+  "$([ "${TODO_L1}" -gt 0 ] && [ "${TODO_L2}" -gt 0 ] && [ "${TODO_L1}" -lt "${TODO_L2}" ]; echo $?)"
+
+hzl_db todo extra >"${DB_OUT}" 2>&1
+t_fails "an argument is refused" "$?"
+t_has "and says so" "${DB_OUT}" "todo: unknown option"
+
+# Nothing after this group reads the backlog, so it can be overwritten here.
+cat >"${DB_BACKLOG}" <<'FIXTURE'
+# Backlog
+
+## P1
+- [~] (id:h-0001) claimed by a run <!-- run:20260903-012502 -->
+- [!] (id:h-0002) blocked <!-- blocked:2026-09-08T01:00:00+09:00 reason:needs a person -->
+FIXTURE
+hzl_db todo >"${DB_OUT}" 2>&1
+t_has "an empty queue with something in progress says there is nothing to do" \
+  "${DB_OUT}" "no todo items"
+t_has "and still says what is in progress" "${DB_OUT}" "in progress"
+unset TODO_L1 TODO_L2
 
 unset DB_ROOT DB_HOME DB_WORK DB_BACKLOG DB_OUT db_k
 

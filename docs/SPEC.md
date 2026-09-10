@@ -109,6 +109,7 @@ Privileged subcommands escalate internally.
 | `set` | `[max-total\|max-tasks\|timeout] N` | 0 / 1 |
 | `add` | `--priority N`, `--dir NAME`, `--roles LIST`, `<text>` | 0 / 1 / **4** already in the ledger |
 | `next` | — | 0 / 1 |
+| `todo` | — | 0 / 1 |
 | `take` | `[id]` | 0 / 1 / **3** no such id |
 | `done` | `<id> [note]` | 0 / 1 / **3** / **4** |
 | `block` | `<id> <reason>` | 0 / 1 / **3** / **5** |

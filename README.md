@@ -17,6 +17,7 @@ hzl status                # what is actually true right now
 hzl schedule              # when the next run is, and whether it will do anything
 hzl budget                # how much of each engine's usage limit is left
 hzl next                  # what it would pick up next, and in which checkout
+hzl todo                  # every task waiting to be picked up, in that order
 hzl add "..."             # put a task in the queue
 hzl web                   # the same, in a browser, on 127.0.0.1 only
 hzl report                # the morning read: what is blocked, what got done

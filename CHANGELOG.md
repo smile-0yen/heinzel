@@ -6,6 +6,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-09-11
+
+`hzl take` with no id lists everything blocked, but nothing on the CLI showed
+what was queued - the count was only in `hzl status`, and only `hzl next`
+showed the first task, not the rest. `hzl todo` lists every `[ ]` task from
+the backlog, in the same order runs take them: priority ascending, then top
+to bottom within a priority. It shares that order, and the row it reads it
+from, with `hzl next` (through the new `backlog_todo_rows`, of which
+`backlog_next_row` is now just the first line) and with the todo count in
+`hzl status`, so the three cannot disagree about what is queued.
+
+### Added
+- `hzl todo`, listing the backlog's queued tasks in the order runs take them.
+- `backlog_todo_rows` in `lib/common.sh`, the ordered list `backlog_next_row`
+  now takes its first row from.
+
 ## [0.6.1] - 2026-09-11
 
 `hzl help` said `hzl install / uninstall      the launchd agent` and no more,

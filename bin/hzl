@@ -982,6 +982,37 @@ cmd_next() {
   printf '\n'
 }
 
+# Every `[ ]` task, in the order runs take them - the queued counterpart to
+# `hzl take` with no id, which lists what is blocked. Read from the backlog
+# only, through `backlog_todo_rows`, so this agrees with what `hzl next` picks
+# up first and what `hzl status` counts as todo.
+cmd_todo() {
+  local b rows n held
+  [ $# -eq 0 ] || die "todo: unknown option $1"
+  b=$(need_backlog) || exit 1
+  rows=$(backlog_todo_rows "${b}")
+  if [ -z "${rows}" ]; then
+    say "nothing to do - no todo items."
+  else
+    n=$(printf '%s\n' "${rows}" | awk 'END {print NR}')
+    printf '\n'
+    say "todo, in the order runs take them (${n}):"
+    printf '\n'
+    printf '%s\n' "${rows}" | awk -F'\t' '{
+      id = ($4 == "" ? "(no id)" : $4)
+      ws = ($6 == "" ? "" : "[" $6 "] ")
+      printf "  P%-3s %-8s %s%s\n", $2, id, ws, $5
+    }'
+    printf '\n'
+    dim "  'hzl next' shows the first of these with its notes and workspace"
+  fi
+  held=$(backlog_count "${b}" "~")
+  if [ "${held}" -gt 0 ]; then
+    dim "  ${held} more in progress, held by a run - 'hzl next' says which"
+  fi
+  return 0
+}
+
 # Blocked tasks are the ones a human has to close. Without an id this lists
 # them; with an id it writes a prompt to paste into an interactive session.
 #
@@ -2540,6 +2571,7 @@ backlog
                                --dir NAME         which checkout it is about
                                --roles LIST       planner,executor,reviewer subset
   hzl next                   what would be picked up next
+  hzl todo                   every todo task, in the order runs take them
   hzl take [id]              list blocked tasks, or print one with its steps
   hzl done <id> [note]       close a task out by hand
   hzl block <id> <reason>    park a task; a reason is required
@@ -2620,6 +2652,7 @@ case ${cmd} in
     exit 1
     ;;
   next) cmd_next "$@" ;;
+  todo) cmd_todo "$@" ;;
   take) cmd_take "$@" ;;
   done) cmd_done "$@" ;;
   block) cmd_block "$@" ;;

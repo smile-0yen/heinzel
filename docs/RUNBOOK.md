@@ -221,6 +221,7 @@ managed for you:
 | Command | Effect |
 |---|---|
 | `hzl next` | What would be picked up next, and why. When nothing is free it lists what is in progress and which run holds it, rather than reading as an empty backlog |
+| `hzl todo` | Every task waiting to be picked up, in the order runs take them |
 | `hzl take` | Everything blocked, with priorities |
 | `hzl take <id>` | The task and its steps, as a prompt to paste into an interactive session |
 | `hzl done <id> "note"` | Close it out by hand |
