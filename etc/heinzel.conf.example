@@ -146,6 +146,25 @@ HEINZEL_REMOTE_IDLE_SLEEP=0            # pmset -c sleep, minutes (0 = never)
 HEINZEL_TRAVEL_IDLE_SLEEP=10
 HEINZEL_CLAUDE_SETTINGS="${HOME}/.claude/settings.json"
 
+# --- safe mode (opt-out) ---------------------------------------------------
+# On unless you turn it off. It denies the commands that reach something which
+# is not this machine and not a file - `gcloud`, `kubectl`, `terraform`,
+# `helm`, `ssh`, `rsync`, `docker push`, `npm publish` and the rest of the list
+# in docs/SPEC.md §13.1 - so a run that would have deployed instead blocks the
+# task and leaves you a request. `git push origin` is not on the list: the
+# release ritual needs it, and the sandbox already admits only `github.com`.
+#
+# The rules live in the generated permission file, so this setting alone does
+# nothing: run `hzl install` after changing it, and check `hzl doctor` section
+# 2, which says whether the installed file agrees with this value. If they
+# disagree with the setting on, a run **aborts** - a control believed to be on
+# and absent is worse than one that was never claimed.
+#
+# It is all of them or none of them. If you want a run that may reach exactly
+# one cluster and nothing else, this is the wrong tool: leave it on, and do
+# that task yourself with `hzl take <id>` in an interactive session.
+HEINZEL_SAFE_MODE=1
+
 # --- housekeeping ----------------------------------------------------------
 HEINZEL_LABEL="local.heinzel"          # launchd label
 HEINZEL_WEB_PORT=3151                  # `hzl web` listens here, on 127.0.0.1 only

@@ -6,6 +6,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-09-11
+
+`etc/heinzel.conf.example` documented every setting a person might change
+except the one that decides whether an unattended run can reach a real
+environment. `HEINZEL_SAFE_MODE` was already normative in `docs/SPEC.md` §13.1,
+explained in `docs/RUNBOOK.md`, and defaulted correctly in `hzl_load_conf` - but
+somebody copying the example to `etc/heinzel.conf` and reading it top to bottom
+would never learn the switch existed, and it is the one switch in that file
+which is opt-*out*, so the reader who most needs to find it is the one meaning
+to turn it off. The example now carries a `safe mode (opt-out)` section between
+posture and housekeeping, saying the three things `docs/RUNBOOK.md` says: what
+is denied and that `git push origin` is not, that `hzl install` is not optional
+afterwards because the rules live in the generated permission file, and that it
+is all of those commands or none of them.
+
+### Added
+- `etc/heinzel.conf.example` documents `HEINZEL_SAFE_MODE`.
+
 ## [0.5.1] - 2026-09-11
 
 `hzl help` said "remote posture" and "travel posture" for `work`, `mobile` and
