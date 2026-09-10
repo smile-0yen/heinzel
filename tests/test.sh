@@ -1564,6 +1564,63 @@ t_ok "opencode defers provider authentication to the selected model" "$?"
 engine_auth_ok nosuchengine
 t_fails "an unknown engine is never authenticated" "$?"
 
+group 'engine_usage'
+
+# The CLI is asked, never a provider's host, and never through a model turn.
+fake_reset
+FAKE_ARGV=${TMPROOT}/usage.argv
+FAKE_OUT_FILE=${TMPROOT}/claude-usage.txt
+cat >"${FAKE_OUT_FILE}" <<'OUT'
+You are currently using your subscription to power your Claude Code usage
+
+Current session: 5% used · resets Sep 11 at 2:19am (Asia/Tokyo)
+Current week (all models): 23% used · resets Sep 12 at 7:59pm (Asia/Tokyo)
+Current week (Fable): 10% used · resets Sep 12 at 7:59pm (Asia/Tokyo)
+
+What's contributing to your limits usage?
+  67% of your usage was at >150k context
+OUT
+EU_OUT=$(engine_usage claude)
+t_ok "claude's /usage is read" "$?"
+t_argv "by running claude -p /usage" "${FAKE_ARGV}" -p /usage
+t_eq "one line per limit, and none for the breakdown below them" 3 "$(printf '%s\n' "${EU_OUT}" | wc -l | tr -d ' ')"
+t_eq "each as label, percent used and when it resets" \
+  "session	5	Sep 11 at 2:19am (Asia/Tokyo)" "$(printf '%s\n' "${EU_OUT}" | head -n1)"
+t_eq "a model with a limit of its own keeps its name" \
+  "week (Fable)	10	Sep 12 at 7:59pm (Asia/Tokyo)" "$(printf '%s\n' "${EU_OUT}" | tail -n1)"
+
+printf 'Usage limits are not available for API key users\n' >"${FAKE_OUT_FILE}"
+EU_ERR=${TMPROOT}/usage.err
+engine_usage claude >/dev/null 2>"${EU_ERR}"
+t_fails "an answer with no limits in it is not a success" "$?"
+t_has "and what the CLI said instead is the reason" "${EU_ERR}" "not available for API key users"
+
+# The account-wide bucket comes second in the answer and first in the output.
+FAKE_OUT_FILE=${TMPROOT}/codex-usage.jsonl
+cat >"${FAKE_OUT_FILE}" <<'OUT'
+{"id":1,"result":{"userAgent":"codex"}}
+{"id":2,"result":{"rateLimits":{"limitId":"codex","limitName":null,"primary":{"usedPercent":29,"windowDurationMins":10080,"resetsAt":1789437932},"secondary":null},"rateLimitsByLimitId":{"codex_spark":{"limitId":"codex_spark","limitName":"Spark","primary":{"usedPercent":0,"windowDurationMins":300,"resetsAt":1789073307},"secondary":{"usedPercent":4,"windowDurationMins":10080,"resetsAt":null}},"codex":{"limitId":"codex","limitName":null,"primary":{"usedPercent":29,"windowDurationMins":10080,"resetsAt":1789437932},"secondary":null}}}}
+OUT
+EU_OUT=$(engine_usage codex)
+t_ok "codex's rate limits are read" "$?"
+t_argv "from its app-server, which is what /status asks" "${FAKE_ARGV}" app-server
+t_eq "the account-wide limit first, named by its window" \
+  "week (all models)	29	$(short_at 1789437932)" "$(printf '%s\n' "${EU_OUT}" | head -n1)"
+t_eq "then each window of a model's own limit" \
+  "5h (Spark)	0	$(short_at 1789073307)" "$(printf '%s\n' "${EU_OUT}" | sed -n 2p)"
+t_eq "and a limit with no reset time says none" \
+  "week (Spark)	4	" "$(printf '%s\n' "${EU_OUT}" | sed -n 3p)"
+
+printf '%s\n' '{"id":1,"result":{}}' '{"id":2,"error":{"code":-32600,"message":"not logged in"}}' >"${FAKE_OUT_FILE}"
+engine_usage codex >/dev/null 2>"${EU_ERR}"
+t_fails "an error from the app-server is not a success" "$?"
+t_has "and its message is the reason" "${EU_ERR}" "not logged in"
+
+engine_usage opencode >/dev/null 2>&1
+t_eq "an engine with no usage question says so, apart from failing" 2 "$?"
+fake_reset
+unset EU_OUT EU_ERR
+
 # --- the runtime backend registry ------------------------------------------
 #
 # A backend is a key, a file and a registration — never an arm in a case
@@ -5320,6 +5377,32 @@ hzl_db add --dir nosuch "行き先なし" >/dev/null 2>&1
 t_fails "a workspace nobody configured is refused before it is queued" "$?"
 hzl_db add "" >/dev/null 2>&1
 t_fails "and so is an empty task" "$?"
+
+group 'hzl budget'
+
+# The fixture's configuration switches on only the executor, on claude. Its own
+# stand-in, written here rather than borrowed from FAKE_BIN: bin/hzl appends
+# the real install directories to PATH, so a stand-in that had gone missing
+# would be answered by the real CLI, over the network. The numbers are ones no
+# real account is likely to show, so that could not pass by coincidence either.
+BG_BIN=${TMPROOT}/budget-bin
+BG_USAGE=${TMPROOT}/budget-usage.txt
+mkdir -p "${BG_BIN}"
+printf '#!/bin/bash\ncat "%s"\n' "${BG_USAGE}" >"${BG_BIN}/claude"
+chmod +x "${BG_BIN}/claude"
+printf 'Current session: 37%% used · resets Jan 2 at 3:04am (Asia/Tokyo)\n' >"${BG_USAGE}"
+DB_OUT=${TMPROOT}/budget.out
+PATH=${BG_BIN}:${PATH} hzl_db budget >"${DB_OUT}" 2>&1
+t_ok "budget succeeds when every engine answers" "$?"
+t_has "it names the role and the model it runs" "${DB_OUT}" "claude ("
+t_has "groups the limits under the engine and who uses it" "${DB_OUT}" "claude - used by executor"
+t_has "and reports what is left, not what is used" "${DB_OUT}" "63% left - resets Jan 2 at 3:04am"
+
+printf 'something else entirely\n' >"${BG_USAGE}"
+PATH=${BG_BIN}:${PATH} hzl_db budget >"${DB_OUT}" 2>&1
+t_eq "an engine that cannot be read makes budget exit 1" 1 "$?"
+t_has "and says why, on the engine's line" "${DB_OUT}" "could not be read - something else entirely"
+unset BG_BIN BG_USAGE
 
 unset DB_ROOT DB_HOME DB_WORK DB_BACKLOG DB_OUT db_k
 

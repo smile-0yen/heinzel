@@ -6,6 +6,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-11
+
+`hzl budget` reports how much of each account's usage limit is left, for every
+engine a switched-on role uses. The night run had parked this as needing a
+network destination or a credential read; neither is needed, because each CLI
+already answers the question for the person at the keyboard. Claude's comes
+from `claude -p /usage`, which prints the same lines as the interactive
+`/usage`. Codex's comes from the app-server's `account/rateLimits/read`, the
+call behind the interactive `/status` - `codex exec /status` would not do,
+since `exec` sends the text to the model as a prompt, spends a turn, and
+returns no numbers. Heinzel never reads a key or names a provider's host.
+
+Limits are the account's, so they are grouped by engine, with the roles and
+models that draw on each; a model with a limit of its own is a line of its own.
+The output is percent left and when it resets. An engine that cannot be read
+is named with the CLI's own reason, and the command then exits 1. OpenCode has
+no such question to ask and says so.
+
+### Added
+- `hzl budget`, and `engine_usage` in `lib/engines.sh` behind it.
+
 ## [0.5.3] - 2026-09-11
 
 0.5.1's plain-language wording for `work`, `mobile` and `off` made two claims

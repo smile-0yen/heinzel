@@ -478,6 +478,26 @@ total always wins.
 A session that has spent its budget skips the rest of its slots in a fraction
 of a second, without calling anything.
 
+## How much of the account's limit is left
+
+```sh
+hzl budget
+```
+
+Not the task budget above: this is the subscription's own usage limit, for
+each engine a switched-on role uses (planner, executor, reviewer), as
+percentage left and when it resets. It asks each CLI the way you would -
+`claude -p /usage` for Claude, and for Codex the app-server call behind the
+interactive `/status` - so Heinzel never reads a key or calls a provider's
+host itself. `codex exec /status` is deliberately not used: `exec` hands the
+text to the model as a prompt, which spends a turn and returns no numbers.
+
+Limits belong to the account, not to a model, so they are grouped by engine; a
+model with a limit of its own (`week (Fable)`, `5h (GPT-5.3-Codex-Spark)`) is a
+line of its own, named the way the CLI names it. OpenCode has no such question
+to ask and says so. `hzl budget` exits 1 if any engine could not be read, with
+the CLI's own reason on that engine's line.
+
 ## When it costs money, and when it does not
 
 Only one thing in the whole system costs money: the engine call. Eight gates

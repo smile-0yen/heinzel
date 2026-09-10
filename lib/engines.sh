@@ -104,6 +104,99 @@ engine_is_auth_error() {
   esac
 }
 
+# --- usage: how much of the account's limit is left ------------------------
+#
+# Asked of each CLI the way a person asks it, so that Heinzel never holds a key
+# or names a provider's host: `claude -p /usage` prints the same lines as the
+# interactive /usage, and the codex app-server's account/rateLimits/read is the
+# call behind the interactive /status. `codex exec /status` is not: exec hands
+# the text to the model as a prompt, and that spends a turn to say nothing.
+#
+#   engine_usage <engine> -> one line per limit: label TAB used-percent TAB resets
+#
+# Exit 0 with at least one line, 1 when the CLI answered with no limits (its
+# first line of output goes to stderr, as the reason), 2 for an engine that
+# has no such question.
+
+ENGINE_USAGE_TIMEOUT=30
+
+engine_usage() {
+  case $1 in
+    claude) _engine_usage_claude ;;
+    codex) _engine_usage_codex ;;
+    *) return 2 ;;
+  esac
+}
+
+# "Current session: 5% used · resets Sep 11 at 2:19am (Asia/Tokyo)"
+# The separator before "resets" is matched loosely: it is a middle dot today
+# and nothing here depends on which character it is.
+_engine_usage_claude() {
+  local out lines
+  out=$(hzl_timeout 5 "${ENGINE_USAGE_TIMEOUT}" claude -p /usage 2>&1)
+  lines=$(printf '%s\n' "${out}" |
+    sed -nE 's/^Current ([^:]+): ([0-9]+)% used(.*resets (.*))?$/\1	\2	\4/p')
+  if [ -z "${lines}" ]; then
+    printf '%s\n' "${out}" | grep -m1 . >&2
+    return 1
+  fi
+  printf '%s\n' "${lines}"
+}
+
+# The app-server exits on end of input without answering what it has already
+# read, so the request side stays open until the answer is in, and no longer.
+# Reading the file the other end of the pipe writes is the point (SC2094).
+# shellcheck disable=SC2094
+_engine_usage_codex_ask() { # outfile
+  local out=$1 i=0
+  {
+    printf '%s\n' \
+      '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"heinzel","version":"'"${HEINZEL_VERSION}"'"}}}' \
+      '{"jsonrpc":"2.0","method":"initialized"}' \
+      '{"jsonrpc":"2.0","id":2,"method":"account/rateLimits/read"}'
+    while [ "${i}" -lt $((ENGINE_USAGE_TIMEOUT * 5)) ] &&
+      ! grep -q '"id":2[,}]' "${out}" 2>/dev/null; do
+      sleep 0.2
+      i=$((i + 1))
+    done
+  } | codex app-server >"${out}" 2>/dev/null
+}
+
+_engine_usage_codex() {
+  local out rows label used at
+  out=$(mktemp "${TMPDIR:-/tmp}/hzl-usage.XXXXXX") || return 1
+  hzl_timeout 5 $((ENGINE_USAGE_TIMEOUT + 5)) _engine_usage_codex_ask "${out}"
+  # One bucket per limit_id; the account-wide `codex` bucket first. A window
+  # is named by its length, which is what the interactive /status does too.
+  rows=$(jq -r '
+    def win: if . == null then "window"
+      elif . == 10080 then "week"
+      elif . % 1440 == 0 then "\(. / 1440)d"
+      elif . % 60 == 0 then "\(. / 60)h"
+      else "\(.)m" end;
+    select(.id == 2) | .result // empty
+    | (.rateLimitsByLimitId // {codex: .rateLimits}) | [.[]]
+    | sort_by(.limitId != "codex") | .[]
+    | (.limitName // "all models") as $n
+    | (.primary, .secondary) | select(. != null)
+    | [(.windowDurationMins | win) + " (" + $n + ")",
+       (.usedPercent | tostring), (.resetsAt // "" | tostring)]
+    | @tsv' "${out}" 2>/dev/null)
+  if [ -z "${rows}" ]; then
+    jq -r 'select(.id == 2) | .error.message // empty' "${out}" 2>/dev/null |
+      grep -m1 . >&2 || printf 'codex app-server did not answer\n' >&2
+    rm -f "${out}"
+    return 1
+  fi
+  rm -f "${out}"
+  while IFS='	' read -r label used at; do
+    [ -n "${at}" ] && at=$(short_at "${at}")
+    printf '%s\t%s\t%s\n' "${label}" "${used}" "${at}"
+  done <<EOF
+${rows}
+EOF
+}
+
 # OpenCode reads permissions from its ordinary config, including project files
 # in the worktree. Heinzel therefore adds a uniquely named agent in the inline
 # config, which is loaded after project config, and launches that agent by

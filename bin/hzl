@@ -67,6 +67,10 @@ export PATH="${PATH}:/usr/local/bin:/opt/homebrew/bin:${HOME}/.local/bin"
 . "${HEINZEL_ROOT}/lib/runstore.sh"
 # shellcheck source=lib/cancel.sh
 . "${HEINZEL_ROOT}/lib/cancel.sh"
+# `hzl budget` asks each engine's CLI what is left of its limit, and the Agent
+# Driver is the one file that knows how to start those CLIs.
+# shellcheck source=lib/engines.sh
+. "${HEINZEL_ROOT}/lib/engines.sh"
 
 RUNNER="${HEINZEL_ROOT}/bin/hzl-run"
 PLIST_DIR="${HOME}/Library/LaunchAgents"
@@ -2426,6 +2430,63 @@ cmd_schedule() {
   return 0
 }
 
+# What is left of each account the configured roles draw on. The limits belong
+# to the account, not to a model, so they are grouped by engine; a model with a
+# limit of its own shows up as a line of its own, named the way the CLI names
+# it. Exits 1 if any engine could not be asked.
+budget_role_lines() { # -> "role engine" for each role that is switched on
+  [ "${HEINZEL_PLANNER}" = 1 ] && printf 'planner %s\n' "${HEINZEL_PLANNER_ENGINE}"
+  [ "${HEINZEL_EXECUTOR}" = 1 ] && printf 'executor %s\n' "${HEINZEL_EXECUTOR_ENGINE}"
+  [ "${HEINZEL_REVIEWER}" = 1 ] && printf 'reviewer %s\n' "${HEINZEL_REVIEWER_ENGINE}"
+  return 0
+}
+
+cmd_budget() {
+  [ $# -eq 0 ] || die "budget: unknown option $1"
+
+  local role engine engines users rc=0 label used at left line err
+  printf '\nroles\n'
+  while read -r role engine; do
+    field "${role}" "${engine} ($(engine_role_model "${engine}" "${role}"))"
+  done <<EOF
+$(budget_role_lines)
+EOF
+  engines=$(budget_role_lines | awk '!seen[$2]++ { print $2 }')
+
+  err=$(mktemp "${TMPDIR:-/tmp}/hzl-budget.XXXXXX") || die "budget: no temporary file"
+  for engine in ${engines}; do
+    users=$(budget_role_lines | awk -v e="${engine}" '$2 == e { print $1 }' | paste -sd, - | sed 's/,/, /g')
+    printf '\n%s - used by %s\n' "${engine}" "${users}"
+    if ! have "${engine}"; then
+      field "limits" "$(bad "not checked") - ${engine} is not on PATH"
+      rc=1
+      continue
+    fi
+    local rows
+    rows=$(engine_usage "${engine}" 2>"${err}")
+    case $? in
+      0) ;;
+      2) field "limits" "$(dim "${engine} has no usage command to ask")"; continue ;;
+      *)
+        field "limits" "$(bad "could not be read") - $(oneline "$(head -n1 "${err}")")"
+        rc=1
+        continue
+        ;;
+    esac
+    while IFS='	' read -r label used at; do
+      left=$((100 - used))
+      line="${left}% left"
+      [ "${left}" -lt 20 ] && line=$(bad "${line}")
+      field "${label}" "${line}${at:+ - resets ${at}}"
+    done <<EOF
+${rows}
+EOF
+  done
+  rm -f "${err}"
+  printf '\n'
+  return ${rc}
+}
+
 # --- dispatch --------------------------------------------------------------
 
 usage() {
@@ -2498,6 +2559,8 @@ everything else
   hzl status [--json|--quiet]  what is actually true right now
   hzl schedule                 when the next run is, and every setting that
                                decides whether it does anything
+  hzl budget                   how much of each account's usage limit is left,
+                               for the engines the configured roles use
   hzl web [--port N]           serve the dashboard on 127.0.0.1 while you
                                watch it. ctrl-c stops it
   hzl dashboard [--days N]     the same thing as one JSON document
@@ -2521,6 +2584,7 @@ cmd=${1:-}
 case ${cmd} in
   status) cmd_status "$@" ;;
   schedule) cmd_schedule "$@" ;;
+  budget) cmd_budget "$@" ;;
   add) cmd_add "$@" ;;
   dashboard) cmd_dashboard "$@" ;;
   web) cmd_web "$@" ;;
