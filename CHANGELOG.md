@@ -6,6 +6,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-09-11
+
+0.5.1's plain-language wording for `work`, `mobile` and `off` made two claims
+the code does not keep. It said the three commands open or shut screen sharing,
+the firewall and wake-on-LAN, but they only do when `HEINZEL_POSTURE=1`, which
+is off unless you set it - with it off they leave the machine's settings alone.
+And "network allowed in" is broader than what remote posture does: it unloads
+Heinzel's travel packet-filter rules, while the macOS application firewall and
+stealth mode stay on. `hzl help` now names the two states once, in a
+`machine settings` section that says they apply only with `HEINZEL_POSTURE=1`,
+says "incoming connections no longer blocked (the macOS firewall itself stays
+on)", and points at `hzl status` for which state the machine is in. The mode
+lines refer to that section instead of repeating the list.
+
+### Fixed
+- `hzl help` no longer claims `work`, `mobile` and `off` change remote-access
+  settings when posture management is off, or that remote posture lets the
+  network in.
+
 ## [0.5.2] - 2026-09-11
 
 `etc/heinzel.conf.example` documented every setting a person might change

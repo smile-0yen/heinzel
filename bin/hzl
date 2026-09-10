@@ -2433,9 +2433,9 @@ usage() {
 hzl ${HEINZEL_VERSION} - unattended backlog work in one of three modes.
 
 modes
-  hzl work [options]         open the machine to remote access (screen
-                             sharing on, network allowed in, wake-on-LAN on)
-                             and start unattended work. Options:
+  hzl work [options]         start unattended work, and open the machine for
+                             remote access (see "machine settings" below).
+                             Options:
                                --duration 10h     TTL, max 24h
                                --max-total N      tasks for the whole session
                                --max-tasks N      tasks per run
@@ -2448,15 +2448,25 @@ modes
                                --no-sudo          do not suppress sleep
                                --no-kick          do not run one immediately
                                --dry-run          say what would happen
-  hzl mobile [options]       unattended work while shut for travel (screen
-                             sharing off, network blocked, wake-on-LAN off).
-                             Accepts the work options above, plus:
+  hzl mobile [options]       start unattended work, and close the machine up
+                             for travel (see below). Accepts the work options
+                             above, plus:
                                --yes              confirm battery use without
                                                   an interactive prompt
-  hzl off [--unload]         stop work, restore sleep, and shut the machine
-                             for travel (screen sharing off, network blocked,
-                             wake-on-LAN off). Exits non-zero if a run could
-                             not be confirmed stopped
+  hzl off [--unload]         stop work, restore sleep, and close the machine
+                             up for travel (see below). Exits non-zero if a
+                             run could not be confirmed stopped
+
+machine settings (what docs/ calls remote and travel posture)
+  Only changed when HEINZEL_POSTURE=1. It is 0 unless you set it, and then
+  work, mobile and off leave these settings exactly as they are.
+  open for remote access     screen sharing on, incoming connections no longer
+                             blocked (the macOS firewall itself stays on),
+                             wake-on-LAN on
+  closed up for travel       screen sharing off, incoming connections blocked,
+                             wake-on-LAN off
+  Both also adjust idle sleep, the screen lock delay and sudo rules; hzl status
+  shows which one the machine is in.
 
 session controls
   hzl resume                 clear a halt
