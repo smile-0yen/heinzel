@@ -2433,7 +2433,9 @@ usage() {
 hzl ${HEINZEL_VERSION} - unattended backlog work in one of three modes.
 
 modes
-  hzl work [options]         remote posture + unattended work. Options:
+  hzl work [options]         open the machine to remote access (screen
+                             sharing on, network allowed in, wake-on-LAN on)
+                             and start unattended work. Options:
                                --duration 10h     TTL, max 24h
                                --max-total N      tasks for the whole session
                                --max-tasks N      tasks per run
@@ -2446,13 +2448,15 @@ modes
                                --no-sudo          do not suppress sleep
                                --no-kick          do not run one immediately
                                --dry-run          say what would happen
-  hzl mobile [options]       travel posture + unattended work. Accepts the
-                             work options above, plus:
+  hzl mobile [options]       unattended work while shut for travel (screen
+                             sharing off, network blocked, wake-on-LAN off).
+                             Accepts the work options above, plus:
                                --yes              confirm battery use without
                                                   an interactive prompt
-  hzl off [--unload]         stop work, restore sleep, and apply travel posture.
-                             Exits non-zero if a run could not be confirmed
-                             stopped
+  hzl off [--unload]         stop work, restore sleep, and shut the machine
+                             for travel (screen sharing off, network blocked,
+                             wake-on-LAN off). Exits non-zero if a run could
+                             not be confirmed stopped
 
 session controls
   hzl resume                 clear a halt

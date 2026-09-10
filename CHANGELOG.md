@@ -6,6 +6,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-11
+
+`hzl help` said "remote posture" and "travel posture" for `work`, `mobile` and
+`off` without ever saying what those postures do, which reads as jargon to
+someone who has not also read `docs/DESIGN.md`. `hzl status` already glosses
+the same two words in its own output (`remote (open)`, `travel (closed up)`);
+`hzl help` now does the same, spelled out a little further: `work` "opens the
+machine to remote access (screen sharing on, network allowed in, wake-on-LAN
+on)", `mobile` and `off` "shut for travel (screen sharing off, network
+blocked, wake-on-LAN off)". Nothing behavioural changed - `docs/RUNBOOK.md`,
+`docs/SPEC.md` and `docs/DESIGN.md` keep the technical term, since those are
+written for the reader who needs it.
+
+### Fixed
+- `hzl help`'s wording for `work`, `mobile` and `off` no longer relies on the
+  unexplained terms "remote posture" / "travel posture".
+
 ## [0.5.0] - 2026-09-10
 
 Planner, executor, and reviewer are now explicit, independently configurable
