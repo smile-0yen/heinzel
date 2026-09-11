@@ -883,6 +883,24 @@ render() {
     }'
 }
 
+# Turn a successful planner result into an executor instruction, without
+# changing a byte of the plan itself. The executor may discover facts the
+# read-only planner could not, so a proved-wrong step can be adjusted; silently
+# discarding the plan and starting over cannot.
+planner_executor_handoff() { # executor-enabled plan
+  local executor_enabled=$1 plan=$2
+  [ -n "${plan}" ] || return 1
+  if [ "${executor_enabled}" != 1 ]; then
+    printf '%s' "${plan}"
+    return 0
+  fi
+  printf '%s\n%s' \
+    "The read-only planner produced the implementation plan below. Follow it while implementing the worksheet: carry out its steps in order and use its verification commands. Do not silently replace it with a new plan. If repository evidence or a failing verification proves a step is wrong, make the smallest necessary adjustment and explain the deviation in the final handover. If following it would be unsafe or requires a human decision, block the affected task instead.
+
+--- planner plan begins ---" \
+    "${plan}"
+}
+
 PROMPT_FILE="${EXEC_DIR}/prompt.md"
 # The agent is told which mode it is in either way. Not because the sentence is
 # what enforces anything - the deny list is - but because an agent that knows a
@@ -939,6 +957,8 @@ if [ "${RUN_PLANNER}" = 1 ]; then
   fi
   if [ "${PLANNER_VERDICT}" = ok ] && [ -s "${PLANNER_DIR}/last.txt" ]; then
     PLANNER_HANDOFF=$(cat "${PLANNER_DIR}/last.txt")
+    PLANNER_HANDOFF=$(planner_executor_handoff "${RUN_EXECUTOR}" "${PLANNER_HANDOFF}") ||
+      abort "could not prepare the planner handoff for the executor"
   else
     PLANNER_HANDOFF="The requested planner did not produce a usable plan (verdict: ${PLANNER_VERDICT}). Inspect and plan the work yourself before editing."
     log_event skip "planner ended with '${PLANNER_VERDICT}'; the executor will plan for itself"

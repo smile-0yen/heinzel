@@ -235,7 +235,9 @@ reviewer are both off on a fresh install; enable their role defaults with `HEINZ
 Planner, executor, and reviewer each have their own engine, model, and effort setting. For example,
 `HEINZEL_PLANNER_MODEL="claude-opus-5"` can plan for an executor using
 `HEINZEL_EXECUTOR_MODEL="claude-sonnet-5"`. The planner runs first without write or shell tools,
-and its final answer is inserted verbatim into the executor prompt.
+and its final answer is inserted verbatim into the executor prompt. The executor is instructed
+to carry out that plan in order and use its verification commands; it may deviate only when
+repository or test evidence proves a step wrong, and must explain the deviation in its handover.
 
 The one switch that is on already is safe mode, and it is on because nobody would think to look
 for it: an unattended run may not call `gcloud`, `kubectl`, `terraform`, `ssh`, `docker push`,
@@ -253,6 +255,36 @@ without review, while `(roles:executor,reviewer)` skips planning and keeps the r
 directive names the complete enabled set. Tasks with different effective role sets are put in
 different runs. At least planner or executor must be enabled, and reviewer requires executor
 because it reviews the executor's workspace changes rather than the planner's prose.
+
+## Updating Heinzel
+
+Update from a clean `main` checkout. Stop and unload Heinzel first so a run cannot be using files
+while Git replaces them:
+
+```sh
+hzl off --unload
+cd /path/to/heinzel
+git status --short
+git switch main
+git pull --ff-only origin main
+./install.sh
+hzl install
+hzl doctor
+hzl version
+```
+
+`git status --short` should print nothing. If it lists local changes, commit or stash them before
+continuing; the update procedure never discards them. If `hzl off --unload` reports that a run
+could not be stopped, resolve that before pulling new files. `./install.sh` refreshes the `hzl`
+symlink but leaves an existing `etc/heinzel.conf` untouched. `hzl install` must still run after every
+update because a release may have changed the generated launch agent or permission-file template.
+
+The update deliberately leaves unattended work off. After `hzl doctor` reports no `XX`, start a
+new session when you are ready:
+
+```sh
+hzl work --duration 10h
+```
 
 ## Tutorial: one night, end to end
 

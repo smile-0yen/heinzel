@@ -1056,7 +1056,10 @@ engine.
 Planning is enabled by `HEINZEL_PLANNER=1` or a task's roles directive. It runs
 before the executor with `plan-read-only-v1`: Claude has `Write`, `Edit`,
 `NotebookEdit`, and `Bash` removed; Codex uses its read-only sandbox. The plan
-is stored under `exec-*/planner/` and handed verbatim to the executor. A failed
+is stored under `exec-*/planner/` and handed verbatim to the executor with an
+explicit instruction to follow its ordered steps and verification commands.
+The executor may make the smallest necessary adjustment when repository or
+test evidence proves a step wrong, but must disclose that deviation. A failed
 planner degrades to an explicit "plan for yourself" handoff rather than losing
 the task. With planner on and executor off, a non-empty plan is the task's
 artifact and the runner closes the worksheet rows mechanically; a dry run

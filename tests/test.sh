@@ -5232,6 +5232,25 @@ unset GS_SRC GS_ROOT GS_OUT GS_WORK GS_BACKLOG gs_f gs_tool gs_ph GS_MISSING
 
 group 'the run prompt'
 
+PEH_SRC=${TMPROOT}/planner-executor-handoff.sh
+sed -n '/^planner_executor_handoff() {/,/^}/p' "${TEST_ROOT}/bin/hzl-run" >"${PEH_SRC}"
+# shellcheck source=/dev/null
+. "${PEH_SRC}"
+PEH_PLAN='1. Change lib/example.sh.
+2. Run tests/example.sh.'
+PEH_OUT=${TMPROOT}/planner-executor-handoff.txt
+planner_executor_handoff 1 "${PEH_PLAN}" >"${PEH_OUT}"
+t_has "a successful planner handoff tells the executor to follow the plan" \
+  "${PEH_OUT}" "Follow it while implementing the worksheet"
+t_has "the executor may not silently substitute its own plan" \
+  "${PEH_OUT}" "Do not silently replace it with a new plan"
+t_eq "the planner's plan reaches the executor unchanged" "${PEH_PLAN}" \
+  "$(awk '/^--- planner plan begins ---$/{copy=1; next} copy {print}' "${PEH_OUT}")"
+planner_executor_handoff 1 "" >/dev/null 2>&1
+t_fails "an empty plan cannot be presented as planner guidance" "$?"
+t_eq "a planner-only run keeps the plan as its artifact without executor instructions" \
+  "${PEH_PLAN}" "$(planner_executor_handoff 0 "${PEH_PLAN}")"
+
 PR_MISSING=""
 for pr_ph in $(grep -o '{{[A-Z_]*}}' "${TEST_ROOT}/prompts/backlog-run.md" | sort -u); do
   grep -q -- "render '${pr_ph}'" "${TEST_ROOT}/bin/hzl-run" || PR_MISSING="${PR_MISSING} ${pr_ph}"
@@ -5242,7 +5261,7 @@ for pr_ph in $(grep -o '{{[A-Z_]*}}' "${TEST_ROOT}/prompts/plan.md" | sort -u); 
   grep -q -- "render '${pr_ph}'" "${TEST_ROOT}/bin/hzl-run" || PR_MISSING="${PR_MISSING} ${pr_ph}"
 done
 t_eq "every placeholder in the planner prompt is rendered by bin/hzl-run" "" "${PR_MISSING}"
-unset PR_MISSING pr_ph
+unset PEH_SRC PEH_PLAN PEH_OUT PR_MISSING pr_ph
 
 # --- what the web UI is served ---------------------------------------------
 #

@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- When planner and executor are both enabled, the executor is now explicitly
+  required to follow the planner's ordered steps and verification commands.
+  Evidence-backed adjustments remain possible but must be disclosed.
+
 ## [0.6.2] - 2026-09-11
 
 `hzl take` with no id lists everything blocked, but nothing on the CLI showed
@@ -112,7 +118,6 @@ written for the reader who needs it.
 ### Fixed
 - `hzl help`'s wording for `work`, `mobile` and `off` no longer relies on the
   unexplained terms "remote posture" / "travel posture".
-
 ## [0.5.0] - 2026-09-10
 
 Planner, executor, and reviewer are now explicit, independently configurable
