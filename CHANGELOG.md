@@ -6,6 +6,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-09-14
+
+`tests/test.sh` set its cleanup of `TMPROOT` (and the `FAKE_BIN` stand-ins for
+`claude`/`codex`/`opencode` under it) as a plain EXIT trap. In a non-interactive
+bash, an EXIT trap also becomes the handler for fatal signals like TERM. Every
+`cmd &` in the suite forks a copy of the whole script, and that fork keeps the
+inherited trap until just before it execs `cmd`. The stop-barrier group signals
+children it has just spawned right away (`sleep 30 &` followed at once by
+`cancel_stop`), so on about half of runs TERM landed in that window: the fork
+ran the suite's own EXIT trap and deleted TMPROOT (and FAKE_BIN with it) while
+the real suite was still running. Every later engine test that then shelled out
+reached the real `claude`/`codex` over the network instead of the stand-ins,
+because `bin/hzl` puts `~/.local/bin` ahead of the (now missing) fake ones on
+PATH.
+
+### Fixed
+- `tests/test.sh` now guards its EXIT cleanup with an owner-pid check
+  (`suite_cleanup`/`TMPROOT_OWNER`), so only the process that created TMPROOT
+  ever removes it; a fork that inherits the trap and dies early leaves it
+  alone.
+- Added a `suite_cleanup guards its own trap` group exercising the guard
+  directly, including an isolated 200-round repeat of the stop-barrier's
+  spawn-and-TERM race in a throwaway child process.
+- Added a `the suite kept its own ground` group at the end of the run,
+  checking that TMPROOT and all three FAKE_BIN stand-ins are still present.
+
 ## [0.6.2] - 2026-09-11
 
 `hzl take` with no id lists everything blocked, but nothing on the CLI showed

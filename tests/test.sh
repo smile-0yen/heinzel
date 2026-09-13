@@ -39,7 +39,19 @@ HEINZEL_ROOT=${TEST_ROOT}
 export HEINZEL_ROOT
 
 TMPROOT=$(mktemp -d "${TMPDIR:-/tmp}/hzl-test.XXXXXX") || exit 1
-trap 'rm -rf "${TMPROOT}"' EXIT
+# `cmd &` forks a copy of this suite that keeps our EXIT trap - and so bash's
+# handler for TERM, which an EXIT trap also installs - until just before it
+# execs `cmd`. If TERM lands in that window (as it does in the stop-barrier
+# group below, which signals children it just spawned), the fork runs this
+# trap and deletes TMPROOT out from under the real suite. Guarding on the pid
+# means only the owning process's own exit ever removes it.
+TMPROOT_OWNER=$$
+suite_cleanup() { # [dir]
+  local dir=${1:-${TMPROOT}} me
+  me=${BASHPID:-$(exec /bin/sh -c 'printf %s "${PPID}"')}
+  if [ -n "${dir}" ] && [ "${me}" = "${TMPROOT_OWNER}" ]; then rm -rf "${dir}"; fi
+}
+trap suite_cleanup EXIT
 
 # Set before sourcing, not after: every state path in common.sh is derived from
 # HEINZEL_HOME at source time, so a suite that redirected it afterwards would
@@ -4071,6 +4083,56 @@ t_fails "and the observation the suite borrowed is given back" "$?"
 t_eq "the window off gives a runner outlasts the one the runner gives its engine" \
   1 "$([ "${CANCEL_RUNNER_GRACE_SEC}" -gt "$((CANCEL_GRACE_SEC + CANCEL_KILL_SEC))" ] && printf 1 || printf 0)"
 
+# --- suite_cleanup guards its own trap ---------------------------------------
+#
+# The EXIT trap set up top guards on TMPROOT_OWNER precisely because the group
+# just above forks children and signals them right away. A trap installed with
+# no such guard runs in the fork too, in the fork's own inherited copy, and a
+# fork from `cmd &` keeps that copy until just before it execs `cmd` - so a
+# signal that lands in that window deletes the real TMPROOT out from under the
+# suite that is still running.
+
+group 'suite_cleanup guards its own trap'
+
+CU_PROBE=${TMPROOT}/cleanup-probe
+mkdir -p "${CU_PROBE}"
+( suite_cleanup "${CU_PROBE}" )
+t_true "a fork's own exit leaves the suite's directory alone" [ -d "${CU_PROBE}" ]
+
+suite_cleanup "${CU_PROBE}"
+t_false "but the owning process's own cleanup removes it" [ -d "${CU_PROBE}" ]
+
+# The race itself, isolated: an owner process with its own root and its own
+# copy of suite_cleanup, spawning and TERM-ing 200 children the same way the
+# stop barrier above does. `declare -f` carries the function into the child
+# bash across `-c`, since a function is not inherited the way an exported
+# variable is.
+CU_RACE_DIR=${TMPROOT}/trap-race
+mkdir -p "${CU_RACE_DIR}"
+CU_RACE_ROOT_FILE=${CU_RACE_DIR}/root-path
+CU_RACE_FN=$(declare -f suite_cleanup)
+"${BASH}" -c '
+  eval "$1"
+  root=$(mktemp -d "$2/race.XXXXXX") || exit 2
+  printf "%s" "${root}" >"$3"
+  TMPROOT=${root}
+  TMPROOT_OWNER=$$
+  trap suite_cleanup EXIT
+  i=0
+  while [ "$i" -lt 200 ]; do
+    sleep 30 & kill -TERM $! 2>/dev/null; wait $! 2>/dev/null
+    [ -d "${root}" ] || exit 1
+    i=$((i + 1))
+  done
+  exit 0
+' _ "${CU_RACE_FN}" "${CU_RACE_DIR}" "${CU_RACE_ROOT_FILE}" 2>/dev/null
+CU_RACE_STATUS=$?
+CU_RACE_ROOT=$(cat "${CU_RACE_ROOT_FILE}" 2>/dev/null)
+t_eq "the owner-only cleanup survives 200 rounds of the stop-barrier race" \
+  0 "${CU_RACE_STATUS}"
+t_false "and its own root is gone once the owning process exits" \
+  [ -d "${CU_RACE_ROOT}" ]
+
 # --- the workspace freeze ---------------------------------------------------
 #
 # A confirmed stop is the moment the working directory stops moving, so that is
@@ -5454,8 +5516,10 @@ t_lacks "the roles directive is stripped from the text" "${DB_OUT}" "(roles:"
 t_lacks "the blocked task is not listed" "${DB_OUT}" "人を待っている"
 TODO_L1=$(line_of "${DB_OUT}" "待っている仕事")
 TODO_L2=$(line_of "${DB_OUT}" "フォームから積んだ仕事")
-t_ok "P1 comes before P2, the order runs take them" \
-  "$([ "${TODO_L1}" -gt 0 ] && [ "${TODO_L2}" -gt 0 ] && [ "${TODO_L1}" -lt "${TODO_L2}" ]; echo $?)"
+TODO_ORDER_OK=1
+[ "${TODO_L1}" -gt 0 ] && [ "${TODO_L2}" -gt 0 ] && [ "${TODO_L1}" -lt "${TODO_L2}" ] && TODO_ORDER_OK=0
+t_ok "P1 comes before P2, the order runs take them" "${TODO_ORDER_OK}"
+unset TODO_ORDER_OK
 
 hzl_db todo extra >"${DB_OUT}" 2>&1
 t_fails "an argument is refused" "$?"
@@ -5476,6 +5540,15 @@ t_has "and still says what is in progress" "${DB_OUT}" "in progress"
 unset TODO_L1 TODO_L2
 
 unset DB_ROOT DB_HOME DB_WORK DB_BACKLOG DB_OUT db_k
+
+group 'the suite kept its own ground'
+
+t_true "TMPROOT is still a directory this whole run wrote under" [ -d "${TMPROOT}" ]
+t_true "the fake claude is still executable" [ -x "${FAKE_BIN}/claude" ]
+t_true "the fake codex is still executable" [ -x "${FAKE_BIN}/codex" ]
+t_true "the fake opencode is still executable" [ -x "${FAKE_BIN}/opencode" ]
+t_eq "and claude on PATH is still the fake one, not a real network call" \
+  "${FAKE_BIN}/claude" "$(command -v claude)"
 
 # --- verdict ---------------------------------------------------------------
 
