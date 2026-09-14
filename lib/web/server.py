@@ -18,6 +18,7 @@ carries the headers that keep the page from being framed, sniffed or cached.
 import ipaddress
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -33,6 +34,11 @@ DAYS = os.environ.get("HZL_WEB_DAYS", "3")
 # A command that hangs would hang the page with it, and a dashboard that never
 # answers is worse than one that says it could not.
 TIMEOUT = 30
+
+# The shape the ledger allocates, and the only one `backlog_scan` reads as an
+# id (lib/common.sh, `^\(id:[a-zA-Z0-9_-]+\)`). A request asking for anything
+# else is refused here rather than handed to a subprocess.
+TASK_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
        "connect-src 'self'; img-src 'self' data:; object-src 'none'; "
@@ -176,6 +182,28 @@ class Handler(BaseHTTPRequestHandler):
                 return
             data["collected_ms"] = int((time.time() - started) * 1000)
             self._send(200, data)
+        elif path == "/api/task":
+            # One task: where it stands, and what each run that worked on it
+            # did. A read, so it is gated like the dashboard and not like the
+            # write route. The id is the only value here that comes from the
+            # request, so it is constrained to the shape the ledger allocates
+            # before it is ever passed as an argument.
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            task_id = (qs.get("id") or [""])[0]
+            if not TASK_ID_RE.match(task_id):
+                self._send(400, {"error": "id must look like h-0049"})
+                return
+            rc, out, err = run_hzl(["task", "--json", task_id])
+            if rc == 3:
+                self._send(404, {"error": f"no such id: {task_id}"})
+                return
+            if rc != 0 or not out.strip():
+                self._send(503, {"error": err.strip() or f"hzl task exited {rc}"})
+                return
+            try:
+                self._send(200, json.loads(out))
+            except json.JSONDecodeError as exc:
+                self._send(503, {"error": f"hzl task did not return JSON: {exc}"})
         else:
             self._send(404, {"error": "not found"})
 

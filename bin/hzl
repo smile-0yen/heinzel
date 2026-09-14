@@ -986,6 +986,189 @@ cmd_next() {
 # `hzl take` with no id, which lists what is blocked. Read from the backlog
 # only, through `backlog_todo_rows`, so this agrees with what `hzl next` picks
 # up first and what `hzl status` counts as todo.
+# --- one task, and what became of it ---------------------------------------
+
+# The marker as a word. The ledger's four states are one character each, which
+# is right for a list and wrong for the one line that answers "where is this".
+task_state_word() {
+  case $1 in
+    " "|"") printf 'todo' ;;
+    "~") printf 'in progress' ;;
+    x|X) printf 'done' ;;
+    "!") printf 'blocked' ;;
+    *) printf 'unknown (%s)' "$1" ;;
+  esac
+}
+
+# Which ledger file holds an id, the archive included. `ledger_file_of_id` looks
+# in the live files only, which is the right answer for anything that writes;
+# this is a read, and a task closed last week is exactly what someone asks about.
+task_ledger_file() { # backlog id
+  local f
+  f=$(ledger_file_of_id "$1" "$2" 2>/dev/null) && { printf '%s' "${f}"; return 0; }
+  f=$(ledger_archive "$1") || return 3
+  [ -n "$(backlog_line_of_id "${f}" "$2" 2>/dev/null)" ] || return 3
+  printf '%s' "${f}"
+}
+
+# "20260911-000000" -> "2026-09-11 00:00". The run id is the stamp every other
+# record is keyed by, so it is shown as well as read.
+task_run_at() { # run-id
+  local d=${1%%-*} t=${1##*-}
+  printf '%s-%s-%s %s:%s' \
+    "${d:0:4}" "${d:4:2}" "${d:6:2}" "${t:0:2}" "${t:2:2}"
+}
+
+# One run's line in the JSON document, assembled from the three records a run
+# leaves: what it did with this task (the worksheet marker), what it said about
+# it (the day's notes), and how the run itself went (runs.jsonl).
+task_run_json() { # id run-id day exec-dir marker
+  local record note findings log
+  record=$(task_run_record "$2")
+  [ -n "${record}" ] || record='{}'
+  note=$(task_run_note "$1" "$2" "$3")
+  findings=$(task_run_notes_block "$2" "$3" |
+    sed -n 's/^  - //p' | jq -R -s -c 'split("\n") | map(select(length > 0))')
+  log=$(printf '%s' "${record}" | jq -r '.log // empty' 2>/dev/null)
+  [ -n "${log}" ] || log="${LOG_DIR}/$3/run-${4##*/exec-}.log"
+  jq -n \
+    --arg run "$2" --arg at "$(task_run_at "$2")" --arg marker "$5" \
+    --arg outcome "$(task_state_word "$5")" --arg note "${note}" \
+    --arg log "${log}" --arg exec_dir "$4" \
+    --argjson findings "${findings:-[]}" --argjson record "${record}" \
+    '{run_id: $run, at: $at, marker: $marker, outcome: $outcome,
+      note: (if $note == "" then null else $note end),
+      result: ($record.result // null),
+      review: ($record.review.verdict // null),
+      review_action: ($record.review.action // null),
+      findings: $findings, duration_sec: ($record.duration_sec // null),
+      cost_usd: ($record.cost_usd // null),
+      log: $log, exec_dir: $exec_dir,
+      output: ($exec_dir + "/last.txt")}'
+}
+
+cmd_task() {
+  local b id="" json=0 full=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --json) json=1 ;;
+      --full) full=1 ;;
+      -*) die "task: unknown option $1" ;;
+      *) [ -z "${id}" ] || die "task: one id at a time"; id=$1 ;;
+    esac
+    shift
+  done
+  [ -n "${id}" ] || die "task: which task? 'hzl task <id>'"
+  b=$(need_backlog) || exit 1
+
+  local f text marker lineno notes steps="" ws rows
+  f=$(task_ledger_file "${b}" "${id}") || { err "no such id: ${id}"; exit 3; }
+  text=$(backlog_text_of_id "${f}" "${id}")
+  marker=$(backlog_marker_of_id "${f}" "${id}")
+  lineno=$(backlog_line_of_id "${f}" "${id}")
+  notes=$(backlog_notes_for_line "${f}" "${lineno}")
+  ws=$(task_workspace_name "$(backlog_scan "${f}" 2>/dev/null |
+    awk -F'\t' -v want="${id}" '$4 == want {print $6; exit}')")
+  if [ "${marker}" = "!" ]; then
+    steps=$(ledger_steps_file "${b}" "${id}" 2>/dev/null)
+    [ -n "${steps}" ] && [ -r "${steps}" ] || steps=""
+  fi
+  rows=$(task_run_rows "${id}")
+
+  if [ "${json}" = 1 ]; then
+    local runs="[]" row
+    if [ -n "${rows}" ]; then
+      runs=$(while IFS='	' read -r run_id day exec_dir mk; do
+        [ -n "${run_id}" ] || continue
+        task_run_json "${id}" "${run_id}" "${day}" "${exec_dir}" "${mk}"
+      done <<EOF
+${rows}
+EOF
+      )
+      runs=$(printf '%s' "${runs}" | jq -s -c '.')
+    fi
+    jq -n \
+      --arg id "${id}" --arg marker "${marker}" \
+      --arg state "$(task_state_word "${marker}")" \
+      --arg text "${text}" --arg workspace "${ws}" --arg file "${f}" \
+      --arg steps "${steps}" \
+      --arg notes "${notes}" \
+      --argjson runs "${runs}" \
+      '{id: $id, marker: $marker, state: $state, text: $text,
+        workspace: $workspace, file: $file,
+        steps: (if $steps == "" then null else $steps end),
+        notes: ($notes | split("\n") | map(sub("^[ \t]+"; "")) | map(select(length > 0))),
+        runs: $runs}'
+    return 0
+  fi
+
+  printf '\ntask %s\n' "${id}"
+  field "state" "$(task_state_word "${marker}")"
+  field "workspace" "${ws}"
+  field "in" "${f}"
+  [ -n "${steps}" ] && field "steps for you" "${steps}"
+  printf '\n  %s\n' "${text}"
+  [ -n "${notes}" ] && printf '%s\n' "${notes}"
+
+  if [ -z "${rows}" ]; then
+    printf '\n'
+    dim "  no run has worked on this yet"
+    printf '\n'
+    return 0
+  fi
+
+  printf '\nruns that worked on it\n'
+  local run_id day exec_dir mk record note review out
+  while IFS='	' read -r run_id day exec_dir mk; do
+    [ -n "${run_id}" ] || continue
+    record=$(task_run_record "${run_id}")
+    review=$(printf '%s' "${record:-{\}}" | jq -r '.review.verdict // empty' 2>/dev/null)
+    note=$(task_run_note "${id}" "${run_id}" "${day}")
+    printf '  %s  %-11s %s%s\n' \
+      "$(task_run_at "${run_id}")" "$(task_state_word "${mk}")" \
+      "run ${run_id}" "${review:+, review ${review}}"
+    # The marker is what the run left the task as. A review that rejected the
+    # run moved it back afterwards, and that is worth a line of its own: the
+    # `done` above is then what was attempted, not where the task ended up.
+    case ${review} in
+      ""|approve|no-change) ;;
+      *) printf '      review %s\n' \
+        "$(oneline "$(printf '%s' "${record:-{\}}" | jq -r '.review.action // empty' 2>/dev/null)")" ;;
+    esac
+    if [ -n "${note}" ]; then
+      note=$(oneline "${note}")
+      if [ "${full}" = 1 ]; then
+        printf '      said   %s\n' "${note}"
+      else
+        printf '      said   %s\n' "$(trunc "${note}" 96)"
+      fi
+    fi
+    out=$(printf '%s' "${record:-{\}}" | jq -r '.log // empty' 2>/dev/null)
+    [ -n "${out}" ] || out="${LOG_DIR}/${day}/run-${exec_dir##*/exec-}.log"
+    printf '      log    %s\n' "${out}"
+    printf '      output %s\n' "${exec_dir}/last.txt"
+    if [ "${full}" = 1 ]; then
+      # The findings, then what the run itself wrote. Not the notes block whole:
+      # its summary is the last few lines of last.txt, so printing both prints
+      # the same paragraph twice.
+      task_run_notes_block "${run_id}" "${day}" |
+        sed -n 's/^  - /      finding /p'
+      if [ -r "${exec_dir}/last.txt" ]; then
+        printf '\n'
+        sed 's/^/      /' "${exec_dir}/last.txt"
+        printf '\n'
+      fi
+    fi
+  done <<EOF
+${rows}
+EOF
+
+  printf '\n'
+  [ "${full}" = 1 ] || dim "  'hzl task ${id} --full' adds what each run wrote, and 'hzl logs ${id}' the whole log"
+  printf '\n'
+  return 0
+}
+
 cmd_todo() {
   local b rows n held
   [ $# -eq 0 ] || die "todo: unknown option $1"
@@ -1378,15 +1561,38 @@ cmd_runnow() {
 }
 
 cmd_logs() {
-  local follow=0 n=1
+  local follow=0 n=1 id=""
   while [ $# -gt 0 ]; do
     case $1 in
       -f) follow=1 ;;
       -n) n=${2:-1}; shift ;;
-      *) die "logs: unknown option $1" ;;
+      -*) die "logs: unknown option $1" ;;
+      # A task id, not an option: "which runs worked on this, and what do their
+      # logs say" is the question a blocked task raises, and answering it by
+      # hand means reading the ledger for a run id and then globbing for a file.
+      *[a-zA-Z]-[0-9]*) [ -z "${id}" ] || die "logs: one id at a time"; id=$1 ;;
+      *) die "logs: unknown argument $1" ;;
     esac
     shift
   done
+
+  if [ -n "${id}" ]; then
+    local rows day exec_dir run_id logf found=0
+    rows=$(task_run_rows "${id}")
+    [ -n "${rows}" ] || die "no run has worked on ${id} - 'hzl task ${id}' says where it stands"
+    while IFS='	' read -r run_id day exec_dir _; do
+      [ -n "${run_id}" ] || continue
+      logf="${LOG_DIR}/${day}/run-${exec_dir##*/exec-}.log"
+      [ -r "${logf}" ] || continue
+      found=1
+      printf '\n=== %s (run %s)\n' "${logf}" "${run_id}"
+      cat "${logf}"
+    done <<EOF
+${rows}
+EOF
+    [ "${found}" = 1 ] || die "the runs that worked on ${id} have no logs left"
+    return 0
+  fi
   # Plain glob, sorted by mtime. Piping through xargs would let it split the
   # list and destroy the ordering.
   local latest
@@ -2573,6 +2779,9 @@ backlog
   hzl next                   what would be picked up next
   hzl todo                   every todo task, in the order runs take them
   hzl take [id]              list blocked tasks, or print one with its steps
+  hzl task <id> [--full]     where one task stands, and what each run that
+                             worked on it did and said. --full adds what they
+                             wrote; --json is what 'hzl web' reads
   hzl done <id> [note]       close a task out by hand
   hzl block <id> <reason>    park a task; a reason is required
   hzl unblock <id>           put it back in the queue
@@ -2598,6 +2807,7 @@ everything else
   hzl dashboard [--days N]     the same thing as one JSON document
   hzl doctor                   check the whole setup
   hzl logs [-f] [-n N]         recent run logs
+  hzl logs <id>                the logs of every run that worked on one task
   hzl install                  write the schedule and the agent's permission
                                file from etc/heinzel.conf, and load the
                                schedule into launchd ('hzl work' and 'hzl
@@ -2653,6 +2863,7 @@ case ${cmd} in
     ;;
   next) cmd_next "$@" ;;
   todo) cmd_todo "$@" ;;
+  task) cmd_task "$@" ;;
   take) cmd_take "$@" ;;
   done) cmd_done "$@" ;;
   block) cmd_block "$@" ;;

@@ -6,6 +6,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-15
+
+Every read so far has been organised by run: `hzl report` is a morning, `hzl
+logs` is a run, `notes.md` is a day. The question that actually arrives is
+about a task - *why is this still blocked, and what has already been tried?* -
+and answering it meant reading a ledger line for a run id, then globbing the
+log tree by hand.
+
+`hzl task <id>` answers it directly: where the task stands now, and one line
+per run that worked on it - when it ran, what that run left the task as, its
+review verdict, the sentence that run wrote about this task in the day's notes,
+and the paths to the run log and the run's own final message. `--full` adds the
+review findings and what each run wrote; `--json` is the same document for the
+page. `hzl logs <id>` takes a task id too, and prints the whole log of every
+run that worked on it.
+
+The join is the worksheet each run is handed - `exec-*/worksheet-ids.txt` and
+the markers in `worksheet.md` - rather than the run store, which is swept by
+`runstore_prune`, or `runs.jsonl`, which counts tasks without naming them. The
+marker shown against a run is what that run left, which is not always where the
+task ended up: a run whose review came back `revise` shows `done` with the
+review line saying it was moved back, and the state at the top is the one that
+is true now.
+
+`hzl web` shows the same thing. Any task row opens in place - queued, blocked,
+or in the new "recently done" list - fed by a new read-only `GET /api/task`
+that shells out to `hzl task --json`, so the parse still lives in bash and the
+page still writes through `hzl add` only. The open task is in the URL as
+`#task=h-0049`, so a link can point at one task.
+
+### Added
+- `hzl task <id>`, with `--full` and `--json`.
+- `hzl logs <id>`: the logs of every run that worked on one task.
+- `hzl web`: per-task detail on any row, a "recently done" section, and
+  `GET /api/task?id=...` behind them.
+- `task_run_rows`, `task_run_note`, `task_run_notes_block` and
+  `task_run_record` in `lib/common.sh`.
+
 ## [0.6.4] - 2026-09-14
 
 The 0.6.3 race test isolated the stop-barrier's spawn-and-TERM race with a

@@ -5315,6 +5315,97 @@ done
 t_eq "every placeholder in the planner prompt is rendered by bin/hzl-run" "" "${PR_MISSING}"
 unset PR_MISSING pr_ph
 
+# --- what happened to one task ---------------------------------------------
+#
+# The join from a task to the runs that worked on it is the worksheet the run
+# was handed, and the sentence a run left about a task is in the day's notes.
+# Both are files a run writes for other reasons, so these assertions are what
+# stops a change to either from quietly emptying `hzl task`.
+
+group 'what happened to one task'
+
+TH_D1=${HEINZEL_HOME}/logs/2026-09-01
+TH_D2=${HEINZEL_HOME}/logs/2026-09-02
+mkdir -p "${TH_D1}/exec-010000" "${TH_D2}/exec-020000" "${TH_D2}/exec-030000"
+printf 'h-0001\nh-0002\n' >"${TH_D1}/exec-010000/worksheet-ids.txt"
+printf 'h-0001\n' >"${TH_D2}/exec-020000/worksheet-ids.txt"
+printf 'h-0009\n' >"${TH_D2}/exec-030000/worksheet-ids.txt"
+cat >"${TH_D1}/exec-010000/worksheet.md" <<'WS'
+# Worksheet
+
+## P2
+- [!] (id:h-0001) 直せなかった仕事
+- [x] (id:h-0002) 直した仕事
+WS
+cat >"${TH_D2}/exec-020000/worksheet.md" <<'WS'
+# Worksheet
+
+## P2
+- [x] (id:h-0001) 直せなかった仕事
+WS
+cat >"${TH_D1}/notes.md" <<'NOTES'
+
+## run 20260901-010000 (2026-09-01T01:00:00+09:00)
+
+- result: ok in 100s, 1 task(s) done, 1 blocked
+  === HEINZEL SUMMARY ===
+  done: h-0002 (test.sh を直した。h-0001 の緑があってこそ閉じられた)
+  blocked: h-0001 実機が要る, h-0003 の判断待ち
+- review: revise - revise, moved 1 task(s) back to blocked
+  - major bin/hzl:10 かくかくしかじか
+NOTES
+cat >"${TH_D2}/notes.md" <<'NOTES'
+
+## run 20260902-020000 (2026-09-02T02:00:00+09:00)
+
+- result: ok in 200s, 1 task(s) done, 0 blocked
+  === HEINZEL SUMMARY ===
+  done: h-0001 (実機を借りて直した)
+- review: approve - approved
+NOTES
+
+TH_ROWS=$(task_run_rows h-0001)
+t_eq "every run that had the task on its worksheet is found" 2 "$(printf '%s\n' "${TH_ROWS}" | grep -c .)"
+t_eq "oldest first, so the list reads as a history" \
+  "20260901-010000" "$(printf '%s\n' "${TH_ROWS}" | head -n1 | cut -f1)"
+t_eq "the run id is the day and the time of its exec directory" \
+  "20260902-020000" "$(printf '%s\n' "${TH_ROWS}" | tail -n1 | cut -f1)"
+t_eq "with the marker that run left beside the task, not the ledger's" \
+  "!" "$(printf '%s\n' "${TH_ROWS}" | head -n1 | cut -f4)"
+t_eq "and the same task can end two runs differently" \
+  "x" "$(printf '%s\n' "${TH_ROWS}" | tail -n1 | cut -f4)"
+t_eq "a task no run has touched has no runs" "" "$(task_run_rows h-0404)"
+t_eq "and neither has no task at all" "" "$(task_run_rows "")"
+
+t_eq "the sentence in brackets is what the run said about the task" \
+  "実機を借りて直した" "$(task_run_note h-0001 20260902-020000 2026-09-02)"
+# The regression this was written for: a run that names another task's id
+# inside its own sentence must not hand that sentence over.
+t_eq "an id named inside another task's sentence is not that task's note" \
+  "実機が要る" "$(task_run_note h-0001 20260901-010000 2026-09-01)"
+t_eq "a list line gives up only its own entry" \
+  "test.sh を直した。h-0001 の緑があってこそ閉じられた" \
+  "$(task_run_note h-0002 20260901-010000 2026-09-01)"
+t_eq "a run that said nothing about the task says nothing" \
+  "" "$(task_run_note h-0009 20260902-020000 2026-09-02)"
+
+t_has "the run's own block of the notes is available whole" \
+  <(task_run_notes_block 20260901-010000 2026-09-01) "major bin/hzl:10"
+t_eq "and it stops at the next run" 0 \
+  "$(task_run_notes_block 20260901-010000 2026-09-01 | grep -c '20260902-020000')"
+
+TH_RUNS_SAVED=${RUNS_JSONL}
+RUNS_JSONL=${TMPROOT}/task-runs.jsonl
+printf '%s\n' \
+  '{"run_id":"20260901-010000","result":"ok","review":{"verdict":"revise"}}' \
+  '{"run_id":"20260902-020000","result":"ok","review":{"verdict":"approve"}}' \
+  >"${RUNS_JSONL}"
+t_eq "a run's own record is found by its id" \
+  "revise" "$(task_run_record 20260901-010000 | jq -r '.review.verdict')"
+t_eq "a run with no record is not invented" "" "$(task_run_record 20260909-090000)"
+RUNS_JSONL=${TH_RUNS_SAVED}
+unset TH_D1 TH_D2 TH_ROWS TH_RUNS_SAVED
+
 # --- what the web UI is served ---------------------------------------------
 #
 # `hzl dashboard` is the page's only source, and `hzl add` its only writer.
@@ -5512,6 +5603,49 @@ PATH=${BG_BIN}:${PATH} hzl_db budget >"${DB_OUT}" 2>&1
 t_eq "an engine that cannot be read makes budget exit 1" 1 "$?"
 t_has "and says why, on the engine's line" "${DB_OUT}" "could not be read - something else entirely"
 unset BG_BIN BG_USAGE
+
+group 'hzl task'
+
+# One run in this fixture's own log tree, so the command is asked the question
+# it exists for: what became of this task, and where is what the run wrote.
+TK_EXEC=${DB_HOME}/logs/2026-09-03/exec-040000
+mkdir -p "${TK_EXEC}"
+printf 'h-0002\n' >"${TK_EXEC}/worksheet-ids.txt"
+printf '# Worksheet\n\n## P1\n- [!] (id:h-0002) 人を待っている\n' >"${TK_EXEC}/worksheet.md"
+printf '=== HEINZEL SUMMARY ===\ndone: none\n' >"${TK_EXEC}/last.txt"
+printf '\n## run 20260903-040000 (2026-09-03T04:00:00+09:00)\n\n  blocked: h-0002 (実機が要る)\n' \
+  >"${DB_HOME}/logs/2026-09-03/notes.md"
+printf 'run log 20260903-040000\n' >"${DB_HOME}/logs/2026-09-03/run-040000.log"
+
+DB_OUT=${TMPROOT}/task.out
+hzl_db task h-0002 >"${DB_OUT}" 2>&1
+t_ok "a task that exists is reported" "$?"
+t_has "with where it stands now" "${DB_OUT}" "blocked"
+t_has "the run that worked on it, by date and time" "${DB_OUT}" "2026-09-03 04:00"
+t_has "what that run said about it" "${DB_OUT}" "実機が要る"
+t_has "and where the whole of it can be read" "${DB_OUT}" "run-040000.log"
+
+hzl_db task h-0002 --json >"${DB_OUT}" 2>/dev/null
+t_eq "the JSON says the state in a word" blocked "$(jq -r .state "${DB_OUT}")"
+t_eq "and carries one entry per run that worked on it" 1 "$(jq '.runs | length' "${DB_OUT}")"
+t_eq "each naming what that run left the task as" blocked "$(jq -r '.runs[0].outcome' "${DB_OUT}")"
+t_eq "and what it said" "実機が要る" "$(jq -r '.runs[0].note' "${DB_OUT}")"
+
+hzl_db task h-0001 >"${DB_OUT}" 2>&1
+t_ok "a task no run has reached is still a task" "$?"
+t_has "and says so rather than showing an empty list" "${DB_OUT}" "no run has worked on this yet"
+
+hzl_db task h-9999 >"${DB_OUT}" 2>&1
+t_eq "an id nobody has is refused the way hzl take refuses it" 3 "$?"
+hzl_db task >"${DB_OUT}" 2>&1
+t_fails "and the command needs an id at all" "$?"
+
+hzl_db logs h-0002 >"${DB_OUT}" 2>&1
+t_ok "hzl logs takes a task id" "$?"
+t_has "and prints the log of the run that worked on it" "${DB_OUT}" "run log 20260903-040000"
+hzl_db logs h-0404 >"${DB_OUT}" 2>&1
+t_fails "an id no run has worked on has no logs" "$?"
+unset TK_EXEC
 
 group 'hzl todo'
 

@@ -11,7 +11,7 @@
 # Multibyte truncation is locale-dependent (DESIGN 6.3). Fix it once, here.
 export LC_CTYPE=UTF-8
 
-HEINZEL_VERSION="0.6.4"
+HEINZEL_VERSION="0.7.0"
 
 # The TTL ceiling is deliberately not configurable. A session that can be
 # created with an unbounded lifetime is not a session, it is a mode.
@@ -2365,6 +2365,104 @@ ledger_blocked_rows() { # backlog
   done <<EOF
 $(ledger_blocked "$1")
 EOF
+}
+
+# --- what happened to one task ---------------------------------------------
+#
+# The ledger says where a task stands now. These say how it got there: which
+# runs worked on it, what each one left it as, and the sentence that run wrote
+# about it.
+#
+# The join is the worksheet, not the run store and not `runs.jsonl`. Every run
+# writes the ids it was allowed to work on to `exec-<HHMMSS>/worksheet-ids.txt`
+# and the marker it left beside each one to `worksheet.md`, both under the day's
+# log directory. Those two files last as long as the logs do - the run store is
+# swept by `runstore_prune`, and `runs.jsonl` counts tasks without naming them,
+# so neither can answer "which runs touched h-0049" a month later.
+
+# The runs that had this task on their worksheet, oldest first. The glob is
+# already in run order: the day directories sort as dates and `exec-<HHMMSS>`
+# sorts within a day, so nothing here has to sort it again.
+task_run_rows() { # id -> run-id TAB day TAB exec-dir TAB marker
+  local id=$1 w exec_dir day marker
+  [ -n "${id}" ] || return 0
+  for w in "${LOG_DIR}"/*/exec-*/worksheet-ids.txt; do
+    [ -r "${w}" ] || continue
+    grep -qxF -- "${id}" "${w}" 2>/dev/null || continue
+    exec_dir=$(dirname "${w}")
+    day=$(basename "$(dirname "${exec_dir}")")
+    # The marker the run left beside this id, read with the ledger's own parser
+    # so that a worksheet and a backlog are read the same way.
+    marker=$(backlog_marker_of_id "${exec_dir}/worksheet.md" "${id}" 2>/dev/null)
+    printf '%s-%s\t%s\t%s\t%s\n' \
+      "${day//-/}" "${exec_dir##*/exec-}" "${day}" "${exec_dir}" "${marker}"
+  done
+}
+
+# What a run said about this one task, out of the day's handover notes. The
+# notes are written for a person, so the sentence is lifted whole rather than
+# rebuilt: `done: h-0054 (fixed the race ...)` gives up what is in the brackets,
+# and a `blocked:` line that names the id gives up the rest of its line.
+task_run_note() { # id run-id day
+  local id=$1 run=$2 day=$3 notes=${LOG_DIR}/$3/notes.md
+  [ -r "${notes}" ] || return 0
+  awk -v id="${id}" -v run="${run}" '
+    BEGIN { prefix = (index(id, "-") > 0) ? substr(id, 1, index(id, "-")) : id }
+    index($0, "## run " run) == 1 { inrun = 1; next }
+    inrun && index($0, "## run ") == 1 { exit }
+    # Only the lines that list what became of each task, and only where the id
+    # opens one of those entries. A sentence about a different task can name
+    # this id in passing - "closed on the strength of h-0054 green suite runs"
+    # - and that sentence belongs to the task it was written under, not here.
+    inrun && index($0, id) > 0 {
+      line = $0
+      sub(/^[ \t]*/, "", line)
+      if (line !~ /^(done|blocked):/) next
+      pos = 0
+      while ((p = index(substr(line, pos + 1), id)) > 0) {
+        start = pos + p
+        pos = start + length(id) - 1
+        before = (start == 1) ? " " : substr(line, start - 1, 1)
+        after = substr(line, start + length(id), 1)
+        if (before != " ") continue
+        if (after != " " && after != "") continue
+        rest = substr(line, start + length(id))
+        sub(/^[ \t]*/, "", rest)
+        if (substr(rest, 1, 1) == "(") {
+          rest = substr(rest, 2)
+          if (index(rest, ")") > 0) rest = substr(rest, 1, index(rest, ")") - 1)
+        } else if (match(rest, ",[ ]*" prefix "[0-9]+")) {
+          # A list line: cut at the next id, so one task keeps its own
+          # sentence. Only an id wearing the same prefix as this one counts,
+          # or a sentence mentioning something like AT-15 would be cut at it.
+          rest = substr(rest, 1, RSTART - 1)
+        }
+        if (rest != "") { print rest; exit }
+      }
+    }
+  ' "${notes}"
+}
+
+# The run's own block of the day's notes, verbatim: its summary and the review
+# findings under it. Run-level, not task-level, which is why it is only shown
+# when it is asked for by name.
+task_run_notes_block() { # run-id day
+  local notes=${LOG_DIR}/$2/notes.md
+  [ -r "${notes}" ] || return 0
+  awk -v run="$1" '
+    index($0, "## run " run) == 1 { inrun = 1 }
+    inrun && index($0, "## run ") == 1 && !first { first = 1; next }
+    inrun && index($0, "## run ") == 1 { exit }
+    inrun { print }
+  ' "${notes}"
+}
+
+# One run's record out of runs.jsonl, or nothing. The file is one JSON object
+# per line and a run id appears once, but the last line wins if a record was
+# ever written twice.
+task_run_record() { # run-id
+  [ -r "${RUNS_JSONL}" ] || return 0
+  jq -c --arg r "$1" 'select(.run_id == $r)' "${RUNS_JSONL}" 2>/dev/null | tail -1
 }
 
 # --- the worksheet ---------------------------------------------------------

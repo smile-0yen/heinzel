@@ -181,6 +181,34 @@ Three things this is not:
   long unattended executor pass that is worth following. `docs/SPEC.md` §9
   says which role writes which.
 
+## What happened to one task
+
+```sh
+hzl task h-0049           # where it stands, and what each run did with it
+hzl task h-0049 --full    # plus the findings, and what each run wrote
+hzl logs h-0049           # the whole log of every run that worked on it
+```
+
+The other reads are organised by run: `hzl report` is a morning, `hzl logs` is
+a run, `notes.md` is a day. This one is organised by task, which is how a
+question about a task usually arrives — *why is this still blocked, and what
+has already been tried?*
+
+Each run that worked on the task gets a line: when it ran, **what that run left
+the task as**, its review verdict, and the sentence that run wrote about this
+task in the day's notes. Under it are the paths, so the whole of it is one
+`cat` away — the run log, and the run's own final message in `exec-*/last.txt`.
+
+The marker on a run's line is what *that run* left, not where the task ended
+up. A run whose review came back `revise` shows `done` with `review revise`
+beside it and a line saying the review moved it back: the ledger state at the
+top of the output is the one that is true now.
+
+The join is the worksheet each run is handed (`exec-*/worksheet-ids.txt`, and
+the markers in `worksheet.md`), so it answers for as long as the logs are kept
+— longer than the run store, which `runstore_prune` sweeps, and more precisely
+than `runs.jsonl`, which counts tasks without naming them.
+
 ## The backlog
 
 The ledger lives wherever `DEFAULT_BACKLOG` points, and it is the only place
@@ -355,9 +383,16 @@ hzl web
 **更新** を押したときだけ取り直す。止めるのは ctrl-c。
 
 出るもの: いまの判定（開いているか、次はいつか、走っても何もしないのか）、
-セッションの設定、あなた待ちの一覧とその理由、待ち行列、チェックアウト、
-そして運行図表 — 破線が launchd の予定の枠、実線が実際に走った run で、
-枠だけあって線が無いところが gate で止まった回。理由は `runner.log` の skip 行。
+セッションの設定、あなた待ちの一覧とその理由、待ち行列、最近終わった仕事、
+チェックアウト、そして運行図表 — 破線が launchd の予定の枠、実線が実際に走った
+run で、枠だけあって線が無いところが gate で止まった回。理由は `runner.log` の
+skip 行。
+
+タスクの行をクリックすると、その下に `hzl task` と同じものが開く: いまの状態、
+手を付けた run の一覧、その run が残した一文とレビューの指摘、そしてログの場所。
+読むのは `GET /api/task?id=...`（中身は `hzl task --json`）で、書き込みはしない。
+開いているタスクは `#task=h-0049` として URL に出るので、その行を開いた状態の
+リンクを人に渡せる。
 
 `backlog に積む` フォームがこのページで唯一書き込む場所で、書き込みは `hzl add`
 を通る。だから run が merge している最中でも backlog のロックの内側に入るし、
