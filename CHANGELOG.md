@@ -6,6 +6,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-09-14
+
+The 0.6.3 race test isolated the stop-barrier's spawn-and-TERM race with a
+`sleep 30 &` child, on the assumption that the cost of a round was bounded by
+the guard alone. It is not: a TERM that lands just *before* the fork execs is
+absorbed by the fork's inherited handler rather than run as a trap, so the
+fork carries on into `sleep 30` and `wait` blocks for the child's full
+lifetime. Repeated across 200 rounds this could stall the suite for minutes on
+end (worst case 100) on a bash where the handler wins that race often, as it
+does on the shell's own bash 3.2.
+
+### Fixed
+- The isolated stop-barrier race in `suite_cleanup guards its own trap` now
+  spawns a `sleep 0.2` child instead of `sleep 30`, so an absorbed TERM costs
+  a fraction of a second instead of the child's former full lifetime.
+- Added a wall-clock assertion on that race (`t_true ... -lt 60`) so a
+  regression back to a long-lived child fails loudly instead of just running
+  slow.
+
 ## [0.6.3] - 2026-09-14
 
 `tests/test.sh` set its cleanup of `TMPROOT` (and the `FAKE_BIN` stand-ins for

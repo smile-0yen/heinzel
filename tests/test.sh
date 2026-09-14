@@ -4090,7 +4090,12 @@ t_eq "the window off gives a runner outlasts the one the runner gives its engine
 # no such guard runs in the fork too, in the fork's own inherited copy, and a
 # fork from `cmd &` keeps that copy until just before it execs `cmd` - so a
 # signal that lands in that window deletes the real TMPROOT out from under the
-# suite that is still running.
+# suite that is still running. A signal that instead lands just *before* that
+# window can also be absorbed: the fork's inherited handler records it and
+# nothing else, so the fork execs anyway and the child runs to the end of its
+# own lifetime before `wait` returns. Either way the window is the same size;
+# only the price of landing in it differs, and that price is however long the
+# child would otherwise have lived - so the child here is kept short.
 
 group 'suite_cleanup guards its own trap'
 
@@ -4111,6 +4116,7 @@ CU_RACE_DIR=${TMPROOT}/trap-race
 mkdir -p "${CU_RACE_DIR}"
 CU_RACE_ROOT_FILE=${CU_RACE_DIR}/root-path
 CU_RACE_FN=$(declare -f suite_cleanup)
+CU_RACE_START=${SECONDS}
 "${BASH}" -c '
   eval "$1"
   root=$(mktemp -d "$2/race.XXXXXX") || exit 2
@@ -4120,18 +4126,21 @@ CU_RACE_FN=$(declare -f suite_cleanup)
   trap suite_cleanup EXIT
   i=0
   while [ "$i" -lt 200 ]; do
-    sleep 30 & kill -TERM $! 2>/dev/null; wait $! 2>/dev/null
+    sleep 0.2 & kill -TERM $! 2>/dev/null; wait $! 2>/dev/null
     [ -d "${root}" ] || exit 1
     i=$((i + 1))
   done
   exit 0
 ' _ "${CU_RACE_FN}" "${CU_RACE_DIR}" "${CU_RACE_ROOT_FILE}" 2>/dev/null
 CU_RACE_STATUS=$?
+CU_RACE_SECS=$((SECONDS - CU_RACE_START))
 CU_RACE_ROOT=$(cat "${CU_RACE_ROOT_FILE}" 2>/dev/null)
 t_eq "the owner-only cleanup survives 200 rounds of the stop-barrier race" \
   0 "${CU_RACE_STATUS}"
 t_false "and its own root is gone once the owning process exits" \
   [ -d "${CU_RACE_ROOT}" ]
+t_true "and it does so without stalling on a TERM the fork absorbed" \
+  [ "${CU_RACE_SECS}" -lt 60 ]
 
 # --- the workspace freeze ---------------------------------------------------
 #
