@@ -11,7 +11,7 @@
 # Multibyte truncation is locale-dependent (DESIGN 6.3). Fix it once, here.
 export LC_CTYPE=UTF-8
 
-HEINZEL_VERSION="0.7.0"
+HEINZEL_VERSION="0.7.1"
 
 # The TTL ceiling is deliberately not configurable. A session that can be
 # created with an unbounded lifetime is not a session, it is a mode.
@@ -2380,23 +2380,64 @@ EOF
 # swept by `runstore_prune`, and `runs.jsonl` counts tasks without naming them,
 # so neither can answer "which runs touched h-0049" a month later.
 
-# The runs that had this task on their worksheet, oldest first. The glob is
-# already in run order: the day directories sort as dates and `exec-<HHMMSS>`
-# sorts within a day, so nothing here has to sort it again.
-task_run_rows() { # id -> run-id TAB day TAB exec-dir TAB marker
-  local id=$1 w exec_dir day marker
-  [ -n "${id}" ] || return 0
+# One line per (id, run) pair, for every task any run's worksheet ever named:
+# `id TAB run-id TAB day TAB exec-dir`, in a single awk pass over every
+# exec-*/worksheet-ids.txt rather than a `grep` per id - `hzl history` looks
+# this up for every closed task, and a grep per id per file costs N x (number
+# of runs) forks. The glob is already in run order: the day directories sort
+# as dates and `exec-<HHMMSS>` sorts within a day, so nothing here has to sort
+# it again. A line repeated within one file is kept once, the way the old
+# per-id `grep -q` counted it.
+task_run_index() {
+  local w
+  set --
   for w in "${LOG_DIR}"/*/exec-*/worksheet-ids.txt; do
     [ -r "${w}" ] || continue
-    grep -qxF -- "${id}" "${w}" 2>/dev/null || continue
-    exec_dir=$(dirname "${w}")
-    day=$(basename "$(dirname "${exec_dir}")")
+    set -- "$@" "${w}"
+  done
+  [ $# -gt 0 ] || return 0
+  awk '
+    {
+      if ($0 == "") next
+      if (seen[FILENAME SUBSEP $0]++) next
+      dir = FILENAME
+      sub(/\/[^\/]*$/, "", dir)
+      day = dir
+      sub(/\/[^\/]*$/, "", day)
+      n = split(day, p, "/")
+      day = p[n]
+      n2 = split(dir, p2, "/")
+      hhmmss = p2[n2]
+      sub(/^exec-/, "", hhmmss)
+      run = day
+      gsub(/-/, "", run)
+      printf "%s\t%s-%s\t%s\t%s\n", $0, run, hhmmss, day, dir
+    }
+  ' "$@"
+}
+
+# The runs that had this task on their worksheet, oldest first, with the
+# marker each one left beside it. Reads a `task_run_index` built once by a
+# caller that asks this for many ids - `hzl history` does - when given one, or
+# builds its own for a single lookup.
+task_run_rows() { # id [index] -> run-id TAB day TAB exec-dir TAB marker
+  local id=$1 idx rid run_id day exec_dir marker
+  [ -n "${id}" ] || return 0
+  if [ $# -ge 2 ]; then
+    idx=$2
+  else
+    idx=$(task_run_index)
+  fi
+  [ -n "${idx}" ] || return 0
+  while IFS='	' read -r rid run_id day exec_dir; do
+    [ "${rid}" = "${id}" ] || continue
     # The marker the run left beside this id, read with the ledger's own parser
     # so that a worksheet and a backlog are read the same way.
     marker=$(backlog_marker_of_id "${exec_dir}/worksheet.md" "${id}" 2>/dev/null)
-    printf '%s-%s\t%s\t%s\t%s\n' \
-      "${day//-/}" "${exec_dir##*/exec-}" "${day}" "${exec_dir}" "${marker}"
-  done
+    printf '%s\t%s\t%s\t%s\n' "${run_id}" "${day}" "${exec_dir}" "${marker}"
+  done <<EOF
+${idx}
+EOF
 }
 
 # What a run said about this one task, out of the day's handover notes. The

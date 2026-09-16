@@ -5377,6 +5377,21 @@ t_eq "and the same task can end two runs differently" \
 t_eq "a task no run has touched has no runs" "" "$(task_run_rows h-0404)"
 t_eq "and neither has no task at all" "" "$(task_run_rows "")"
 
+TH_IDX=$(task_run_index)
+t_eq "an index passed in gives the same rows as no index" \
+  "$(task_run_rows h-0001)" "$(task_run_rows h-0001 "${TH_IDX}")"
+
+printf 'h-00011\n' >>"${TH_D2}/exec-020000/worksheet-ids.txt"
+t_eq "a worksheet listing h-00011 does not also match h-0001" \
+  2 "$(task_run_rows h-0001 | grep -c .)"
+t_eq "and h-00011 is its own task, not folded into h-0001" \
+  1 "$(task_run_rows h-00011 | grep -c .)"
+
+printf 'h-0002\n' >>"${TH_D1}/exec-010000/worksheet-ids.txt"
+t_eq "a duplicated id line in one file gives one row, not two" \
+  1 "$(task_run_rows h-0002 | grep -c .)"
+unset TH_IDX
+
 t_eq "the sentence in brackets is what the run said about the task" \
   "実機を借りて直した" "$(task_run_note h-0001 20260902-020000 2026-09-02)"
 # The regression this was written for: a run that names another task's id
@@ -5668,7 +5683,8 @@ hzl_db todo extra >"${DB_OUT}" 2>&1
 t_fails "an argument is refused" "$?"
 t_has "and says so" "${DB_OUT}" "todo: unknown option"
 
-# Nothing after this group reads the backlog, so it can be overwritten here.
+# Nothing after this reads what is here now - each group below writes its own
+# backlog fixture before it asks anything of it.
 cat >"${DB_BACKLOG}" <<'FIXTURE'
 # Backlog
 
@@ -5681,6 +5697,96 @@ t_has "an empty queue with something in progress says there is nothing to do" \
   "${DB_OUT}" "no todo items"
 t_has "and still says what is in progress" "${DB_OUT}" "in progress"
 unset TODO_L1 TODO_L2
+
+group 'hzl history'
+
+rm -f "${DB_HOME}/backlog.completed.md" "${DB_HOME}/backlog.blocked.md"
+cat >"${DB_BACKLOG}" <<'FIXTURE'
+# Backlog
+
+## P1
+- [~] (id:h-0001) claimed by a run <!-- run:20260903-012502 -->
+- [!] (id:h-0002) blocked <!-- blocked:2026-09-08T01:00:00+09:00 reason:needs a person -->
+FIXTURE
+DB_OUT=${TMPROOT}/history-empty.out
+hzl_db history --no-pager >"${DB_OUT}" 2>&1
+t_ok "with nothing closed, hzl history still exits 0" "$?"
+t_has "and says so" "${DB_OUT}" "nothing has been closed yet"
+
+HIST_ARCHIVE=${DB_HOME}/backlog.completed.md
+cat >"${HIST_ARCHIVE}" <<'FIXTURE'
+# Completed
+
+## P2
+- [x] (id:h-0003) 古い仕事 <!-- done:2026-08-01T10:00:00+09:00 by:human -->
+      note: 手で閉じた
+FIXTURE
+cat >"${DB_BACKLOG}" <<'FIXTURE'
+# Backlog
+
+## P1
+- [ ] (id:h-0001) 待っている仕事
+- [!] (id:h-0002) 人を待っている <!-- blocked:2026-09-08T01:00:00+09:00 reason:実機が要る -->
+- [x] (id:h-0004) 新しい仕事 <!-- done:2026-09-04T05:00:00+09:00 run:20260904-050000 -->
+FIXTURE
+
+HIST_EXEC=${DB_HOME}/logs/2026-09-04/exec-050000
+mkdir -p "${HIST_EXEC}"
+printf 'h-0004\n' >"${HIST_EXEC}/worksheet-ids.txt"
+printf '# Worksheet\n\n## P1\n- [x] (id:h-0004) 新しい仕事\n' >"${HIST_EXEC}/worksheet.md"
+printf 'last.txt の目印の行\n' >"${HIST_EXEC}/last.txt"
+printf '\n## run 20260904-050000 (2026-09-04T05:00:00+09:00)\n\n  done: h-0004 (実機を借りて直した)\n' \
+  >"${DB_HOME}/logs/2026-09-04/notes.md"
+printf 'run log 20260904-050000\n' >"${DB_HOME}/logs/2026-09-04/run-050000.log"
+
+DB_OUT=${TMPROOT}/history.out
+hzl_db history --no-pager >"${DB_OUT}" 2>&1
+t_ok "hzl history exits 0" "$?"
+t_has "the newer closed task appears" "${DB_OUT}" "h-0004"
+t_has "the older, archived closed task appears too" "${DB_OUT}" "h-0003"
+t_lacks "the todo task does not appear" "${DB_OUT}" "待っている仕事"
+t_lacks "the blocked task does not appear" "${DB_OUT}" "人を待っている"
+HIST_L1=$(line_of "${DB_OUT}" "h-0004")
+HIST_L2=$(line_of "${DB_OUT}" "h-0003")
+HIST_ORDER_OK=1
+[ "${HIST_L1}" -gt 0 ] && [ "${HIST_L2}" -gt 0 ] && [ "${HIST_L1}" -lt "${HIST_L2}" ] && HIST_ORDER_OK=0
+t_ok "the newer task comes before the older one" "${HIST_ORDER_OK}"
+t_has "the newer task shows when it closed" "${DB_OUT}" "2026-09-04 05:00"
+t_has "and what the run said about it" "${DB_OUT}" "実機を借りて直した"
+t_has "and the run's log" "${DB_OUT}" "run-050000.log"
+t_has "and the run's last.txt" "${DB_OUT}" "last.txt の目印の行"
+t_has "the hand-closed task shows who closed it" "${DB_OUT}" "hand"
+t_has "and its note" "${DB_OUT}" "手で閉じた"
+t_has "and that no run worked on it" "${DB_OUT}" "no run worked on it"
+
+DB_OUT=${TMPROOT}/history-oneline.out
+hzl_db history --oneline --no-pager >"${DB_OUT}" 2>&1
+t_eq "--oneline prints one line per closed task" 2 "$(grep -c . "${DB_OUT}")"
+t_lacks "and none of the run detail lines" "${DB_OUT}" "log "
+
+DB_OUT=${TMPROOT}/history-n1.out
+hzl_db history -n 1 --no-pager >"${DB_OUT}" 2>&1
+t_has "-n 1 shows the newer task" "${DB_OUT}" "h-0004"
+t_lacks "and not the older one" "${DB_OUT}" "h-0003"
+
+hzl_db history -n 0 --no-pager >"${DB_OUT}" 2>&1
+t_fails "-n 0 is refused" "$?"
+hzl_db history -n x --no-pager >"${DB_OUT}" 2>&1
+t_fails "-n x is refused" "$?"
+hzl_db history --bogus >"${DB_OUT}" 2>&1
+t_fails "an unknown option is refused" "$?"
+t_has "and the last of these says so" "${DB_OUT}" "history: unknown option"
+
+DB_OUT=${TMPROOT}/history-pager.out
+PAGER=false hzl_db history >"${DB_OUT}" 2>&1
+t_has "the pager is skipped when output isn't a terminal, entries still write" \
+  "${DB_OUT}" "h-0004"
+
+DB_OUT=${TMPROOT}/history-help.out
+hzl_db help >"${DB_OUT}" 2>&1
+t_has "hzl help mentions hzl history" "${DB_OUT}" "hzl history"
+
+unset HIST_ARCHIVE HIST_EXEC HIST_L1 HIST_L2 HIST_ORDER_OK
 
 unset DB_ROOT DB_HOME DB_WORK DB_BACKLOG DB_OUT db_k
 

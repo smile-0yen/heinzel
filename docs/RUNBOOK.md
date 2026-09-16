@@ -187,6 +187,8 @@ Three things this is not:
 hzl task h-0049           # where it stands, and what each run did with it
 hzl task h-0049 --full    # plus the findings, and what each run wrote
 hzl logs h-0049           # the whole log of every run that worked on it
+hzl history               # every closed task, newest first - git log -p for the ledger
+hzl history --oneline     # the same, one line per task
 ```
 
 The other reads are organised by run: `hzl report` is a morning, `hzl logs` is
@@ -250,6 +252,7 @@ managed for you:
 |---|---|
 | `hzl next` | What would be picked up next, and why. When nothing is free it lists what is in progress and which run holds it, rather than reading as an empty backlog |
 | `hzl todo` | Every task waiting to be picked up, in the order runs take them |
+| `hzl history` | Every closed task, newest first, with what each run did and wrote |
 | `hzl take` | Everything blocked, with priorities |
 | `hzl take <id>` | The task and its steps, as a prompt to paste into an interactive session |
 | `hzl done <id> "note"` | Close it out by hand |

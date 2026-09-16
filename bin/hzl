@@ -1047,6 +1047,59 @@ task_run_json() { # id run-id day exec-dir marker
       output: ($exec_dir + "/last.txt")}'
 }
 
+# One line per run that worked on a task - when it ran, what it left the task
+# as, its review verdict, the sentence it wrote, and where to read the rest -
+# under a header the caller already printed. `hzl task` and `hzl history` both
+# show this; the header differs with what else is on the page, so it stays
+# with each caller rather than moving in here.
+task_print_runs() { # id rows full
+  local id=$1 rows=$2 full=$3
+  local run_id day exec_dir mk record note review out
+  while IFS='	' read -r run_id day exec_dir mk; do
+    [ -n "${run_id}" ] || continue
+    record=$(task_run_record "${run_id}")
+    review=$(printf '%s' "${record:-{\}}" | jq -r '.review.verdict // empty' 2>/dev/null)
+    note=$(task_run_note "${id}" "${run_id}" "${day}")
+    printf '  %s  %-11s %s%s\n' \
+      "$(task_run_at "${run_id}")" "$(task_state_word "${mk}")" \
+      "run ${run_id}" "${review:+, review ${review}}"
+    # The marker is what the run left the task as. A review that rejected the
+    # run moved it back afterwards, and that is worth a line of its own: the
+    # `done` above is then what was attempted, not where the task ended up.
+    case ${review} in
+      ""|approve|no-change) ;;
+      *) printf '      review %s\n' \
+        "$(oneline "$(printf '%s' "${record:-{\}}" | jq -r '.review.action // empty' 2>/dev/null)")" ;;
+    esac
+    if [ -n "${note}" ]; then
+      note=$(oneline "${note}")
+      if [ "${full}" = 1 ]; then
+        printf '      said   %s\n' "${note}"
+      else
+        printf '      said   %s\n' "$(trunc "${note}" 96)"
+      fi
+    fi
+    out=$(printf '%s' "${record:-{\}}" | jq -r '.log // empty' 2>/dev/null)
+    [ -n "${out}" ] || out="${LOG_DIR}/${day}/run-${exec_dir##*/exec-}.log"
+    printf '      log    %s\n' "${out}"
+    printf '      output %s\n' "${exec_dir}/last.txt"
+    if [ "${full}" = 1 ]; then
+      # The findings, then what the run itself wrote. Not the notes block whole:
+      # its summary is the last few lines of last.txt, so printing both prints
+      # the same paragraph twice.
+      task_run_notes_block "${run_id}" "${day}" |
+        sed -n 's/^  - /      finding /p'
+      if [ -r "${exec_dir}/last.txt" ]; then
+        printf '\n'
+        sed 's/^/      /' "${exec_dir}/last.txt"
+        printf '\n'
+      fi
+    fi
+  done <<EOF
+${rows}
+EOF
+}
+
 cmd_task() {
   local b id="" json=0 full=0
   while [ $# -gt 0 ]; do
@@ -1058,7 +1111,7 @@ cmd_task() {
     esac
     shift
   done
-  [ -n "${id}" ] || die "task: which task? 'hzl task <id>'"
+  [ -n "${id}" ] || die "task: which task? 'hzl task <id>', or 'hzl history --oneline' to list them"
   b=$(need_backlog) || exit 1
 
   local f text marker lineno notes steps="" ws rows
@@ -1118,54 +1171,171 @@ EOF
   fi
 
   printf '\nruns that worked on it\n'
-  local run_id day exec_dir mk record note review out
-  while IFS='	' read -r run_id day exec_dir mk; do
-    [ -n "${run_id}" ] || continue
-    record=$(task_run_record "${run_id}")
-    review=$(printf '%s' "${record:-{\}}" | jq -r '.review.verdict // empty' 2>/dev/null)
-    note=$(task_run_note "${id}" "${run_id}" "${day}")
-    printf '  %s  %-11s %s%s\n' \
-      "$(task_run_at "${run_id}")" "$(task_state_word "${mk}")" \
-      "run ${run_id}" "${review:+, review ${review}}"
-    # The marker is what the run left the task as. A review that rejected the
-    # run moved it back afterwards, and that is worth a line of its own: the
-    # `done` above is then what was attempted, not where the task ended up.
-    case ${review} in
-      ""|approve|no-change) ;;
-      *) printf '      review %s\n' \
-        "$(oneline "$(printf '%s' "${record:-{\}}" | jq -r '.review.action // empty' 2>/dev/null)")" ;;
-    esac
-    if [ -n "${note}" ]; then
-      note=$(oneline "${note}")
-      if [ "${full}" = 1 ]; then
-        printf '      said   %s\n' "${note}"
-      else
-        printf '      said   %s\n' "$(trunc "${note}" 96)"
-      fi
-    fi
-    out=$(printf '%s' "${record:-{\}}" | jq -r '.log // empty' 2>/dev/null)
-    [ -n "${out}" ] || out="${LOG_DIR}/${day}/run-${exec_dir##*/exec-}.log"
-    printf '      log    %s\n' "${out}"
-    printf '      output %s\n' "${exec_dir}/last.txt"
-    if [ "${full}" = 1 ]; then
-      # The findings, then what the run itself wrote. Not the notes block whole:
-      # its summary is the last few lines of last.txt, so printing both prints
-      # the same paragraph twice.
-      task_run_notes_block "${run_id}" "${day}" |
-        sed -n 's/^  - /      finding /p'
-      if [ -r "${exec_dir}/last.txt" ]; then
-        printf '\n'
-        sed 's/^/      /' "${exec_dir}/last.txt"
-        printf '\n'
-      fi
-    fi
-  done <<EOF
-${rows}
-EOF
+  task_print_runs "${id}" "${rows}" "${full}"
 
   printf '\n'
   [ "${full}" = 1 ] || dim "  'hzl task ${id} --full' adds what each run wrote, and 'hzl logs ${id}' the whole log"
   printf '\n'
+  return 0
+}
+
+# --- every closed task, newest first ----------------------------------------
+#
+# `hzl task` needs an id, and until now nothing listed what had been closed to
+# get one from. This is that list: every `[x]`/`[X]` task across the whole
+# ledger - backlog, blocked file, and the archive `hzl archive` swept it into -
+# newest first, laid out like `git log -p` so each entry carries what closed it
+# and what each run that worked on it did and wrote.
+#
+# Decision: "finished" means `[x]` only. A blocked task is already listed by
+# `hzl take`, and belongs there, not here.
+#
+# Decision: the "-p" part is what `hzl task --full` already shows - the
+# findings and `exec-*/last.txt` - not a diff. `review-HHMMSS/changeset.patch`
+# covers a whole run rather than one task, and nothing reliably links it to an
+# exec dir; guessing the link by matching timestamps would be a coin flip
+# dressed up as a feature.
+
+# Closed rows across the whole ledger: `closed-iso TAB id TAB lineno TAB file
+# TAB by TAB dirfield TAB text`. An empty field is written as `-`, not left
+# blank - an `IFS=<tab> read` on a row with an empty field in the middle
+# collapses it into the field after (the warning above `line_meta`), and this
+# is read that way by both the entry and `--oneline` layouts below. `text` is
+# last and never substituted, so a `-` in it is never ambiguous with "empty".
+history_rows() { # backlog
+  local f row lineno marker id text dir meta iso by
+  while IFS= read -r f; do
+    [ -n "${f}" ] || continue
+    while IFS= read -r row; do
+      [ -n "${row}" ] || continue
+      lineno=$(printf '%s' "${row}" | cut -f1)
+      id=$(printf '%s' "${row}" | cut -f4)
+      text=$(printf '%s' "${row}" | cut -f5)
+      dir=$(printf '%s' "${row}" | cut -f6)
+      meta=$(printf '%s' "${row}" | cut -f7)
+      iso=$(printf '%s' "${meta}" | sed -n 's/.*done:\([^ ]*\).*/\1/p')
+      by=""
+      case ${meta} in
+        *run:*) by="run $(printf '%s' "${meta}" | sed -n 's/.*run:\([^ ]*\).*/\1/p')" ;;
+        *by:human*) by="hand" ;;
+      esac
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "${iso:--}" "${id:--}" "${lineno}" "${f}" "${by:--}" "${dir:--}" "${text}"
+    done <<EOF
+$(backlog_scan "${f}" 2>/dev/null | awk -F'\t' '$3 == "x" || $3 == "X"')
+EOF
+  done <<EOF
+$(ledger_files "$1")
+EOF
+}
+
+# `id date text`, one line per closed task - what `git log --oneline` is to
+# `git log -p`.
+history_print_oneline() { # rows
+  local iso id lineno file by dir text date
+  while IFS='	' read -r iso id lineno file by dir text; do
+    [ -n "${lineno}" ] || continue
+    if [ "${iso}" = "-" ]; then date="-"; else date=${iso:0:10}; fi
+    printf '  %-8s %-10s %s\n' "${id}" "${date}" "${text}"
+  done <<EOF
+$1
+EOF
+}
+
+# The full entry for every closed task in `rows`: when it closed, who closed
+# it, which workspace it belonged to, its text and notes, and every run that
+# worked on it via `task_print_runs`. The run index is built once here rather
+# than once per task, for the same reason `task_run_index` exists at all.
+history_print_entries() { # rows
+  local iso id lineno file by dir text ws closed_disp by_disp idx rows2 first=1
+  idx=$(task_run_index)
+  while IFS='	' read -r iso id lineno file by dir text; do
+    [ -n "${lineno}" ] || continue
+    if [ "${first}" = 1 ]; then first=0; else printf '\n'; fi
+    if [ "${iso}" = "-" ]; then closed_disp="unknown"; else closed_disp=${iso//T/ }; fi
+    case ${by} in
+      -) by_disp="not recorded" ;;
+      hand) by_disp="hand (hzl done)" ;;
+      *) by_disp=${by} ;;
+    esac
+    if [ "${id}" = "-" ]; then
+      printf '%stask (no id)%s\n' "${_C_YELLOW}" "${_C_OFF}"
+    else
+      printf '%stask %s%s\n' "${_C_YELLOW}" "${id}" "${_C_OFF}"
+    fi
+    field "Closed:" "${closed_disp}"
+    field "By:" "${by_disp}"
+    ws=$(task_workspace_name "$([ "${dir}" = "-" ] && printf '' || printf '%s' "${dir}")")
+    field "Workspace:" "${ws}"
+    printf '\n'
+    printf '    %s\n' "${text}"
+    backlog_notes_for_line "${file}" "${lineno}" | sed 's/^[ 	]*/    /'
+    if [ "${id}" != "-" ]; then
+      rows2=$(task_run_rows "${id}" "${idx}")
+      if [ -n "${rows2}" ]; then
+        printf '\nruns that worked on it\n'
+        task_print_runs "${id}" "${rows2}" 1
+      else
+        printf '\n'
+        dim "  no run worked on it"
+      fi
+    fi
+  done <<EOF
+$1
+EOF
+  printf '\n'
+  dim "  'hzl task <id>' shows one of these on its own"
+}
+
+# Which of the two layouts a closed-task listing gets.
+history_print() { # rows oneline
+  if [ "$2" = 1 ]; then
+    history_print_oneline "$1"
+  else
+    history_print_entries "$1"
+  fi
+}
+
+cmd_history() {
+  local b n=0 oneline=0 nopager=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -n)
+        case ${2-} in
+          ''|*[!0-9]*|0) die "history: -n takes a positive number" ;;
+        esac
+        n=$2
+        shift
+        ;;
+      --oneline) oneline=1 ;;
+      --no-pager) nopager=1 ;;
+      *) die "history: unknown option $1" ;;
+    esac
+    shift
+  done
+  b=$(need_backlog) || exit 1
+
+  local rows
+  rows=$(history_rows "${b}" | sort -t"$(printf '\t')" -k1,1r -k2,2r)
+  if [ -z "${rows}" ]; then
+    say "nothing has been closed yet."
+    return 0
+  fi
+  [ "${n}" -gt 0 ] && rows=$(printf '%s\n' "${rows}" | head -n "${n}")
+
+  local pager=${PAGER-less} use_pager=0
+  if [ -t 1 ] && [ "${nopager}" != 1 ]; then
+    case ${pager} in
+      ''|cat) ;;
+      *) have "${pager%% *}" && use_pager=1 ;;
+    esac
+  fi
+
+  if [ "${use_pager}" = 1 ]; then
+    history_print "${rows}" "${oneline}" | LESS=${LESS-FRX} sh -c "${pager}"
+    return 0
+  fi
+  history_print "${rows}" "${oneline}"
   return 0
 }
 
@@ -2782,6 +2952,9 @@ backlog
   hzl task <id> [--full]     where one task stands, and what each run that
                              worked on it did and said. --full adds what they
                              wrote; --json is what 'hzl web' reads
+  hzl history [options]      every closed task, newest first, with what each run
+                             did and wrote - git log -p for the ledger. Paged on
+                             a terminal. Options: -n N, --oneline, --no-pager
   hzl done <id> [note]       close a task out by hand
   hzl block <id> <reason>    park a task; a reason is required
   hzl unblock <id>           put it back in the queue
@@ -2864,6 +3037,7 @@ case ${cmd} in
   next) cmd_next "$@" ;;
   todo) cmd_todo "$@" ;;
   task) cmd_task "$@" ;;
+  history) cmd_history "$@" ;;
   take) cmd_take "$@" ;;
   done) cmd_done "$@" ;;
   block) cmd_block "$@" ;;

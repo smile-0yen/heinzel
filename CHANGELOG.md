@@ -6,6 +6,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-09-17
+
+`hzl task <id>` needs an id, and there was no command that listed the ones it
+would take - a closed task could only be found by remembering its id or reading
+the ledger by hand.
+
+`hzl history` is that list: every `[x]`/`[X]` task across the backlog, the
+blocked file and the archive, newest first, laid out like `git log -p` - what
+closed it, who closed it, its workspace, its text and notes, and every run
+that worked on it (`hzl task`'s own run listing, factored out as
+`task_print_runs` so both commands show it the same way). `--oneline` gives one
+line per task; `-n N` caps the count; it pages through `less` on a terminal
+unless `--no-pager` is given.
+
+Two decisions, made rather than left for the code to answer by accident:
+"finished" means `[x]` only - a blocked task is already listed by `hzl take`,
+and belongs there. And the "-p" part is what `hzl task --full` already shows -
+the findings and `exec-*/last.txt` - not a diff: a run's `changeset.patch`
+covers the whole run rather than one task, and nothing reliably links it to an
+exec dir, so `hzl history` does not guess at one.
+
+The lookup this needed - which runs had a given task on their worksheet - used
+to cost one `grep` per id per log file, which is fine for one id and too slow
+for every closed task in the ledger. `task_run_index` builds the same table in
+one pass over every `exec-*/worksheet-ids.txt`; `task_run_rows` now takes it as
+an optional second argument, so `hzl history` builds it once and every task's
+lookup is a filter over that instead of a fresh walk of the log tree.
+
+### Added
+- `hzl history`, with `--oneline`, `-n N`, and `--no-pager`.
+- `task_run_index`, and `task_print_runs` factored out of `hzl task`.
+
 ## [0.7.0] - 2026-09-15
 
 Every read so far has been organised by run: `hzl report` is a morning, `hzl
