@@ -6,6 +6,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-18
+
+`hzl task list` showed what was blocked and nothing else, so the two lists a
+person reads before deciding what to do next - what is waiting on them, and
+what is waiting on a run - were two commands. It shows both now, blocked first
+and the queue under it in the order runs take it, with how many a run is
+holding. `--blocked` and `--todo` each show one half, and `--json` gives what
+was asked for: `{blocked, todo, in_progress}` by default, `{todo, in_progress}`
+under `--todo` - the shape `hzl todo --json` had, so a script written against
+it keeps working once it says `task list --todo`. `hzl todo` itself is gone,
+refusing with the pointer: it was exactly the lower half of this view, printed
+through the same formatter, and one place is enough.
+
+### Added
+- `hzl task list --blocked`, `--todo`, `--json`.
+
+### Removed
+- `hzl todo`. A minor bump, because a command was removed.
+
 ## [0.8.0] - 2026-09-18
 
 Three changes, one thread: the parts of this program that shell is worst at

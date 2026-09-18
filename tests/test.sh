@@ -5792,11 +5792,35 @@ group 'hzl task, the verbs'
 # `hzl take` and `hzl steps` used to be two listings of the same tasks.
 DB_OUT=${TMPROOT}/take.out
 hzl_db task list >"${DB_OUT}" 2>&1
-t_ok "hzl task list lists what is blocked" "$?"
-t_has "with the task" "${DB_OUT}" "h-0002"
+t_ok "hzl task list lists what is blocked and what is queued" "$?"
+t_has "the blocked task" "${DB_OUT}" "h-0002"
 t_has "and says it has no steps yet" "${DB_OUT}" "hzl task take h-0002 --steps"
+t_has "the queued task, under it" "${DB_OUT}" "h-0001"
+# The count is not asserted: the `hzl add` group above has already queued more
+# than the fixture's one, and what matters here is the heading, not the number.
+t_has "with the queue's own heading" "${DB_OUT}" "todo, in the order runs take them ("
+t_eq "the blocked half comes first" 1 \
+  "$([ "$(line_of "${DB_OUT}" "h-0002")" -lt "$(line_of "${DB_OUT}" "h-0001")" ] && echo 1 || echo 0)"
+# One half on its own is the same lines, through the same formatter, so the
+# two views cannot say different things about the same row.
+t_eq "and --todo prints that queue line byte for byte" \
+  "$(hzl_db task list --todo 2>/dev/null | grep 'h-0001')" "$(grep 'h-0001' "${DB_OUT}")"
+hzl_db task list --blocked >"${TMPROOT}/blocked-only.out" 2>&1
+t_has "--blocked shows the blocked task" "${TMPROOT}/blocked-only.out" "h-0002"
+t_lacks "and not the queue" "${TMPROOT}/blocked-only.out" "h-0001"
+hzl_db task list --blocked --json >"${TMPROOT}/blocked-only.json" 2>/dev/null
+t_eq "--blocked --json carries only the blocked half" blocked \
+  "$(jq -r 'keys | join(" ")' "${TMPROOT}/blocked-only.json")"
+hzl_db task list --blocked --todo >"${TMPROOT}/both.out" 2>&1
+t_has "naming both halves is the default again" "${TMPROOT}/both.out" "h-0001"
+hzl_db task list --json >"${DB_OUT}" 2>/dev/null
+t_ok "task list --json" "$?"
+t_eq "carries the blocked task with its steps slot" 'h-0002 null' \
+  "$(jq -r '.blocked[0] | "\(.id) \(.steps)"' "${DB_OUT}")"
+t_eq "and the queued one" h-0001 "$(jq -r '.todo[0].id' "${DB_OUT}")"
+t_eq "and the count a run holds" 0 "$(jq -r '.in_progress' "${DB_OUT}")"
 hzl_db task list extra >"${DB_OUT}" 2>&1
-t_fails "task list takes no argument" "$?"
+t_fails "task list takes no argument but --json" "$?"
 
 # The verbs that moved. Each old spelling refuses and says where it went, in
 # both languages: the old one is written into steps files the agent left for
@@ -5842,8 +5866,9 @@ group 'every read has --json'
 # carry the one field a caller would reach for first; the text forms above are
 # where the content is asserted.
 DB_OUT=${TMPROOT}/json.out
-hzl_db todo --json >"${DB_OUT}" 2>/dev/null
-t_ok "todo --json" "$?"
+hzl_db task list --todo --json >"${DB_OUT}" 2>/dev/null
+t_ok "task list --todo --json" "$?"
+t_eq "is the shape hzl todo --json had" "in_progress todo" "$(jq -r 'keys | join(" ")' "${DB_OUT}")"
 t_eq "lists the todo task" h-0001 "$(jq -r '.todo[0].id' "${DB_OUT}")"
 t_eq "and counts what a run holds" 0 "$(jq -r '.in_progress' "${DB_OUT}")"
 hzl_db next --json >"${DB_OUT}" 2>/dev/null
@@ -5865,11 +5890,14 @@ t_eq "budget --json is JSON whatever the engines answered" 0 \
 t_eq "and says per engine whether it could be read" string \
   "$(jq -r '.engines[0].status | type' "${DB_OUT}")"
 
-group 'hzl todo'
+group 'hzl task list --todo'
 
 DB_OUT=${TMPROOT}/todo.out
 hzl_db todo >"${DB_OUT}" 2>&1
-t_ok "hzl todo exits 0" "$?"
+t_fails "'hzl todo' is refused" "$?"
+t_has "and says it is a half of hzl task list now" "${DB_OUT}" "hzl task list --todo"
+hzl_db task list --todo >"${DB_OUT}" 2>&1
+t_ok "hzl task list --todo exits 0" "$?"
 t_has "the P1 todo task is listed" "${DB_OUT}" "待っている仕事"
 t_has "and the task added through the form" "${DB_OUT}" "フォームから積んだ仕事"
 t_has "and the task added with roles" "${DB_OUT}" "レビュー付き"
@@ -5882,9 +5910,9 @@ TODO_ORDER_OK=1
 t_ok "P1 comes before P2, the order runs take them" "${TODO_ORDER_OK}"
 unset TODO_ORDER_OK
 
-hzl_db todo extra >"${DB_OUT}" 2>&1
+hzl_db task list --todo extra >"${DB_OUT}" 2>&1
 t_fails "an argument is refused" "$?"
-t_has "and says so" "${DB_OUT}" "todo: unknown option"
+t_has "and says so" "${DB_OUT}" "task list: unknown option"
 
 # Nothing after this reads what is here now - each group below writes its own
 # backlog fixture before it asks anything of it.
@@ -5895,9 +5923,10 @@ cat >"${DB_BACKLOG}" <<'FIXTURE'
 - [~] (id:h-0001) claimed by a run <!-- run:20260903-012502 -->
 - [!] (id:h-0002) blocked <!-- blocked:2026-09-08T01:00:00+09:00 reason:needs a person -->
 FIXTURE
-hzl_db todo >"${DB_OUT}" 2>&1
-t_has "an empty queue with something in progress says there is nothing to do" \
-  "${DB_OUT}" "no todo items"
+hzl_db task list --todo >"${DB_OUT}" 2>&1
+t_has "an empty queue with something in progress says nothing is queued" \
+  "${DB_OUT}" "nothing is queued"
+t_has "and how many a run is holding" "${DB_OUT}" "1 in progress, held by a run"
 t_has "and still says what is in progress" "${DB_OUT}" "in progress"
 unset TODO_L1 TODO_L2
 

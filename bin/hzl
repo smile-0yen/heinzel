@@ -1145,16 +1145,31 @@ EOF
 # is either one of the verbs below or an id; the two cannot collide, because an
 # id is `h-NNNN` and the verbs are words. Everything about one task lives here:
 # where it stands, what runs did with it, the prompt that hands it to a person,
-# the three ways a person moves it by hand, and - `history` - every task that
-# was closed, which is the same question asked of the whole ledger.
+# the three ways a person moves it by hand, and the two lists - `list` for
+# what is blocked and what is queued, `history` for what was closed - which are
+# the same questions asked of the whole ledger.
 cmd_task() {
-  local b
+  local b json=0
   case ${1:-} in
     list)
       shift
-      [ $# -eq 0 ] || die "task list: unknown option $1"
+      # Two halves, both by default. Naming one shows that one; naming both is
+      # the default again, spelled out.
+      local show_blocked=0 show_todo=0
+      while [ $# -gt 0 ]; do
+        case $1 in
+          --blocked) show_blocked=1 ;;
+          --todo) show_todo=1 ;;
+          --json) json=1 ;;
+          *) die "task list: unknown option $1 (--blocked, --todo, --json)" ;;
+        esac
+        shift
+      done
+      if [ "${show_blocked}" = 0 ] && [ "${show_todo}" = 0 ]; then
+        show_blocked=1; show_todo=1
+      fi
       b=$(need_backlog) || exit 1
-      task_list "${b}"
+      task_list "${b}" "${show_blocked}" "${show_todo}" "${json}"
       ;;
     take) shift; task_take "$@" ;;
     done) shift; cmd_done "$@" ;;
@@ -1177,7 +1192,7 @@ task_show() { # id [--full|--logs|--json]
     esac
     shift
   done
-  [ -n "${id}" ] || die "task: which task? 'hzl task list' shows what is blocked, 'hzl todo' the queue, 'hzl task history --oneline' what is closed"
+  [ -n "${id}" ] || die "task: which task? 'hzl task list' shows what is blocked and what is queued, 'hzl task history --oneline' what is closed"
   b=$(need_backlog) || exit 1
 
   local f text marker lineno notes steps="" ws rows
@@ -1452,9 +1467,9 @@ EOF
 }
 
 
-# A todo row, as JSON: the same fields `hzl todo` prints, under names a script
-# can read. Shared with `hzl next`, whose in-progress list is the same rows
-# with a different marker.
+# A todo row, as JSON: the same fields the queue half of `hzl task list`
+# prints, under names a script can read. Shared with `hzl next`, whose
+# in-progress list is the same rows with a different marker.
 todo_rows_json() { # rows
   printf '%s\n' "$1" | jq -R -s -c '
     split("\n") | map(select(length > 0)) | map(split("\t"))
@@ -1464,43 +1479,16 @@ todo_rows_json() { # rows
            text: .[4]})'
 }
 
-cmd_todo() {
-  local b rows n held json=0
-  while [ $# -gt 0 ]; do
-    case $1 in
-      --json) json=1 ;;
-      *) die "todo: unknown option $1" ;;
-    esac
-    shift
-  done
-  b=$(need_backlog) || exit 1
-  rows=$(backlog_todo_rows "${b}")
-  held=$(backlog_count "${b}" "~")
-  if [ "${json}" = 1 ]; then
-    jq -n --argjson todo "$(todo_rows_json "${rows}")" --argjson in_progress "${held}" \
-      '{todo: $todo, in_progress: $in_progress}'
-    return 0
-  fi
-  if [ -z "${rows}" ]; then
-    say "nothing to do - no todo items."
-  else
-    n=$(printf '%s\n' "${rows}" | awk 'END {print NR}')
-    printf '\n'
-    say "todo, in the order runs take them (${n}):"
-    printf '\n'
-    printf '%s\n' "${rows}" | awk -F'\t' '{
-      id = ($4 == "" ? "(no id)" : $4)
-      ws = ($6 == "" ? "" : "[" $6 "] ")
-      printf "  P%-3s %-8s %s%s\n", $2, id, ws, $5
-    }'
-    printf '\n'
-    dim "  'hzl next' shows the first of these with its notes and workspace"
-  fi
-  if [ "${held}" -gt 0 ]; then
-    dim "  ${held} more in progress, held by a run - 'hzl next' says which"
-  fi
-  return 0
+# One queued task per line - the queue half of `hzl task list`, which is what
+# `hzl todo` used to print on its own.
+todo_rows_print() { # rows
+  printf '%s\n' "$1" | awk -F'\t' '{
+    id = ($4 == "" ? "(no id)" : $4)
+    ws = ($6 == "" ? "" : "[" $6 "] ")
+    printf "  P%-3s %-8s %s%s\n", $2, id, ws, $5
+  }'
 }
+
 
 # Blocked tasks are the ones a human has to close. Without an id this lists
 # them; with an id it writes a prompt to paste into an interactive session.
@@ -1577,22 +1565,88 @@ task_take() { # id [--steps]
   printf '\n--- end ---\n\n'
 }
 
-# `hzl task list`: everything blocked, one line each, and under each whether it
-# has steps yet. The workspace is shown only when a task names one: with a
-# single checkout configured every line would carry the same word, and the
-# column would be noise in the one place a person is trying to read a list
-# quickly. (Blocked only, on purpose: the queue is `hzl todo`, the closed are
-# `hzl task history`, and this is the third set - the one waiting on a person.)
-task_list() { # backlog
-  local b=$1 n lineno prio marker id text ws comment roles sf
-  n=$(ledger_count "${b}" "!")
-  if [ "${n}" -eq 0 ]; then
-    say "nothing is blocked."
+# `hzl task list`: what is waiting on a person and what is waiting on a run, in
+# one view - the two lists a person reads before deciding what to do next.
+# Blocked first, because those are the ones only a person can move, with
+# whether each has steps yet; then the queue in the order runs take it, and how
+# many a run is holding. `--blocked` and `--todo` show one half; `hzl report`
+# is the morning's reading of the blocked half with its reasons. The queue
+# was `hzl todo` once, a command of its own printing exactly this lower half;
+# it is one place now, through one formatter.
+#
+# The workspace is shown only when a task names one: with a single checkout
+# configured every line would carry the same word, and the column would be
+# noise in the one place a person is trying to read a list quickly.
+task_list() { # backlog show-blocked show-todo json
+  local b=$1 show_blocked=$2 show_todo=$3 json=$4
+  local blocked_rows="" todo_rows="" held=0 n_blocked=0 n_todo=0 doc='{}'
+  if [ "${show_blocked}" = 1 ]; then
+    blocked_rows=$(ledger_scan_live "${b}" | awk -F'\t' '$3 == "!"')
+    n_blocked=$(printf '%s' "${blocked_rows}" | grep -c .)
+  fi
+  if [ "${show_todo}" = 1 ]; then
+    todo_rows=$(backlog_todo_rows "${b}")
+    n_todo=$(printf '%s' "${todo_rows}" | grep -c .)
+    held=$(backlog_count "${b}" "~")
+  fi
+
+  # The document carries the halves that were asked for and nothing else, so
+  # `--todo --json` is the shape `hzl todo --json` had and a script written
+  # against it keeps working; the in-progress count belongs to the queue.
+  if [ "${json}" = 1 ]; then
+    [ "${show_blocked}" = 1 ] && doc=$(printf '%s' "${doc}" | jq -c \
+      --argjson blocked "$(blocked_rows_json "${b}" "${blocked_rows}" | jq -s -c '.')" \
+      '. + {blocked: $blocked}')
+    [ "${show_todo}" = 1 ] && doc=$(printf '%s' "${doc}" | jq -c \
+      --argjson todo "$(todo_rows_json "${todo_rows}")" --argjson in_progress "${held}" \
+      '. + {todo: $todo, in_progress: $in_progress}')
+    printf '%s' "${doc}" | jq .
     return 0
   fi
+
   printf '\n'
-  say "blocked, waiting for you:"
+  if [ "${show_blocked}" = 1 ]; then
+    if [ "${n_blocked}" -eq 0 ]; then
+      say "blocked: nothing is waiting for you."
+    else
+      say "blocked, waiting for you (${n_blocked}):"
+      printf '\n'
+      blocked_rows_print "${b}" "${blocked_rows}"
+    fi
+    [ "${show_todo}" = 1 ] && printf '\n'
+  fi
+
+  if [ "${show_todo}" = 1 ]; then
+    if [ "${n_todo}" -eq 0 ]; then
+      say "todo: nothing is queued."
+    else
+      say "todo, in the order runs take them (${n_todo}):"
+      printf '\n'
+      todo_rows_print "${todo_rows}"
+    fi
+    if [ "${held}" -gt 0 ]; then
+      printf '\n'
+      if [ "${n_todo}" -eq 0 ]; then
+        dim "  ${held} in progress, held by a run - 'hzl next' says which"
+      else
+        dim "  ${held} more in progress, held by a run - 'hzl next' says which"
+      fi
+    fi
+  fi
+
+  # The hints only when there is something to act on, so an empty view is
+  # one line and one blank rather than one line and three.
+  if [ "${n_blocked}" -gt 0 ] || [ "${n_todo}" -gt 0 ]; then
+    printf '\n'
+    [ "${n_blocked}" -eq 0 ] || dim "  'hzl task take <id>' hands a blocked one to an interactive session"
+    [ "${n_todo}" -eq 0 ] || dim "  'hzl next' shows the first of the queue with its notes and workspace"
+  fi
   printf '\n'
+}
+
+# One blocked task per line, and under each whether it has steps yet.
+blocked_rows_print() { # backlog rows
+  local b=$1 rows=$2 lineno prio marker id text ws comment roles sf
   while IFS='	' read -r lineno prio marker id text ws comment roles; do
     [ -n "${lineno}" ] || continue
     printf '  P%-3s %-8s %s%s\n' "${prio}" "${id}" "${ws:+[${ws}] }" "${text}"
@@ -1603,11 +1657,28 @@ task_list() { # backlog
       dim "           no steps yet - 'hzl task take ${id} --steps' starts a form"
     fi
   done <<EOF
-$(ledger_scan_live "${b}" | awk -F'\t' '$3 == "!"')
+${rows}
 EOF
-  printf '\n'
-  dim "  'hzl task take <id>' prints a prompt for an interactive session"
-  printf '\n'
+}
+
+# The same rows as JSON: what `todo_rows_json` gives, plus the steps file when
+# there is one to read.
+blocked_rows_json() { # backlog rows
+  local b=$1 rows=$2 lineno prio marker id text ws comment roles sf
+  while IFS='	' read -r lineno prio marker id text ws comment roles; do
+    [ -n "${lineno}" ] || continue
+    sf=$(ledger_steps_file "${b}" "${id}" 2>/dev/null) || sf=""
+    [ -n "${sf}" ] && [ -r "${sf}" ] || sf=""
+    jq -n -c --arg prio "${prio}" --arg id "${id}" --arg ws "${ws}" \
+      --arg text "${text}" --arg steps "${sf}" \
+      '{priority: ($prio | tonumber? // $prio),
+        id: (if $id == "" then null else $id end),
+        workspace: (if $ws == "" then null else $ws end),
+        text: $text,
+        steps: (if $steps == "" then null else $steps end)}'
+  done <<EOF
+${rows}
+EOF
 }
 
 # Write the form a person fills in for a blocked task that has no instructions
@@ -3291,7 +3362,9 @@ every day
                                up. Exits non-zero if a run could not be
                                confirmed stopped
   hzl status [--json|--quiet]  what is actually true right now
-  hzl task list                everything blocked and waiting for you
+  hzl task list [--blocked|--todo] [--json]
+                               what is blocked and waiting for you, and what
+                               is queued for the runs; one flag shows one half
   hzl task take <id> [--steps] one of them, as a prompt to paste into an
                                interactive session. --steps starts its
                                instructions from a form first
@@ -3310,7 +3383,6 @@ backlog
                                --dir NAME (a configured checkout),
                                --roles LIST (a subset of planner,executor,reviewer)
   hzl next [--json]            what a run would pick up next, with its notes
-  hzl todo [--json]            every todo task, in the order runs take them
   hzl task <id> [--full|--logs|--json]
                                where one task stands and what each run did
                                with it. --full adds what they wrote; --logs is
@@ -3428,7 +3500,10 @@ case ${cmd} in
     exit 1
     ;;
   next) cmd_next "$@" ;;
-  todo) cmd_todo "$@" ;;
+  todo)
+    err "'hzl todo' is now 'hzl task list --todo'; both halves are 'hzl task list'. / 'hzl todo' は 'hzl task list --todo' になりました。blocked と合わせて見るなら 'hzl task list' です。"
+    exit 1
+    ;;
   task) cmd_task "$@" ;;
   history)
     err "'hzl history' is now 'hzl task history'. / 'hzl history' は 'hzl task history' になりました。"

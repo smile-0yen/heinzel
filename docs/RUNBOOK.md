@@ -9,7 +9,7 @@ for what is normatively guaranteed see [SPEC.md](SPEC.md).
 hzl work --duration 10h     # remote posture + work; expires by itself
                             # ... go to bed ...
 hzl status                  # in the morning: what happened
-hzl task list                    # what it could not finish, and why
+hzl task list                    # what it could not finish, and what is still queued
 hzl off                     # stop, restore sleep, and close remote access
 ```
 
@@ -251,9 +251,9 @@ managed for you:
 | Command | Effect |
 |---|---|
 | `hzl next` | What would be picked up next, and why. When nothing is free it lists what is in progress and which run holds it, rather than reading as an empty backlog |
-| `hzl todo` | Every task waiting to be picked up, in the order runs take them |
+| `hzl task list --todo` | Every task waiting to be picked up, in the order runs take them; `--blocked` is the other half, and neither flag is both |
 | `hzl task history` | Every closed task, newest first, with what each run did and wrote |
-| `hzl task list` | Everything blocked, with priorities, and whether each has steps yet |
+| `hzl task list` | Everything blocked, with whether each has steps yet, and then everything queued in the order runs take it |
 | `hzl task take <id>` | The task and its steps, as a prompt to paste into an interactive session |
 | `hzl task done <id> "note"` | Close it out by hand |
 | `hzl task block <id> "reason"` | Park it. The reason is required |
@@ -290,7 +290,7 @@ you should see when each one works, and how to hand the task back.
 
 ```
 hzl report              every blocked task, its one-line ask, and where its steps are
-hzl task list                which of them have steps yet, and which do not
+hzl task list                which of them have steps yet, and the queue under them
 hzl task take <id>           the task and the whole steps file, ready to paste into a session
 hzl task take <id> --steps   start the steps for one, from a form, and fill it in yourself
 ```
