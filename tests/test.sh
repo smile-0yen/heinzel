@@ -1432,7 +1432,7 @@ RAWJSONL
 printf '%s' '{"type":"text","sessionID":"oc-cut","part":' >>"${OPENCODE_CUT}"
 t_eq "a partial final opencode event does not discard completed telemetry" \
   '{"session_id":"oc-cut","cost_usd":0.02,"tokens_in":4,"tokens_out":2,"turns":1,"text":""}' \
-  "$(_engine_result_opencode "${OPENCODE_CUT}" |
+  "$("${HZL_EXEC}" parse opencode "${OPENCODE_CUT}" |
      jq -c '{session_id, cost_usd, tokens_in, tokens_out, turns, text}')"
 
 # --- the claude executor's stream -------------------------------------------
@@ -1532,7 +1532,7 @@ t_eq "and last.txt is empty, because there was no final message" \
 # record written before this release has, so it is not only the reviewer's.
 t_eq "the single-object form is still read, however many lines it is on" \
   '{"session_id":"sess-1","cost_usd":0.25,"turns":4,"tokens_in":11,"tokens_out":22,"text":"first line\nsecond line"}' \
-  "$(_engine_result_claude "${CLAUDE_OK_RAW}" |
+  "$("${HZL_EXEC}" parse claude "${CLAUDE_OK_RAW}" |
      jq -c '{session_id, cost_usd, turns, tokens_in, tokens_out, text}')"
 
 # And the fixer, which is neither of the two roles the change was about, comes
@@ -1846,6 +1846,107 @@ t_eq "a session from before the field existed answers local" \
 
 rm -f "${STATE_FILE}"
 fake_reset
+
+# --- the jq version gate ---------------------------------------------------
+#
+# jq is the only dependency that is not the operating system's, so it is the
+# only one whose version can differ between two machines running the same
+# macOS. The parse is asserted against the strings jq has actually printed
+# rather than against a jq of each version, which is the only way to check the
+# old ones at all. Three of these are the whole point of the function:
+#
+#   * `1.10` must not lose to `1.6`, which is what a string comparison does;
+#   * a version that cannot be read must come back *unknown* and not *old*, or
+#     the next format jq invents condemns every machine that installs it;
+#   * `jq` alone, with no version at all, must not parse as something.
+
+t_eq "a plain release parses" "1.6" "$(jq_version_of 'jq-1.6')"
+t_eq "Apple's build parses, and drops the patch and the vendor suffix" \
+  "1.7" "$(jq_version_of 'jq-1.7.1-apple')"
+t_eq "a git build parses, and the commit count is not read as the version" \
+  "1.6" "$(jq_version_of 'jq-1.6-159-gcff5336-dirty')"
+t_eq "1.8 parses" "1.8" "$(jq_version_of 'jq-1.8.1')"
+t_eq "a space instead of a hyphen parses" "1.5" "$(jq_version_of 'jq 1.5')"
+t_eq "a release candidate parses as its release" "1.5" "$(jq_version_of 'jq-1.5rc1')"
+t_eq "a version-less string parses as nothing" "" "$(jq_version_of 'jq')"
+t_eq "an empty string parses as nothing" "" "$(jq_version_of '')"
+t_eq "something that is not jq at all parses as nothing" \
+  "" "$(jq_version_of 'garbage 1.6')"
+
+t_ok "newer than the floor passes" "$(jq_version_at_least 1.7 1.6; echo $?)"
+t_ok "the floor itself passes" "$(jq_version_at_least 1.6 1.6; echo $?)"
+t_eq "older than the floor is 1, which is the only status doctor faults" \
+  1 "$(jq_version_at_least 1.5 1.6; echo $?)"
+t_eq "a major behind is old, not unknown" 1 "$(jq_version_at_least 0.9 1.6; echo $?)"
+t_ok "a major ahead passes" "$(jq_version_at_least 2.0 1.6; echo $?)"
+t_ok "1.10 is newer than 1.6, which a string comparison would get backwards" \
+  "$(jq_version_at_least 1.10 1.6; echo $?)"
+t_eq "an unreadable version is 2 (unknown), never 1 (old)" \
+  2 "$(jq_version_at_least '' 1.6; echo $?)"
+t_eq "a version that is not numbers is unknown" \
+  2 "$(jq_version_at_least abc 1.6; echo $?)"
+t_eq "a version with no minor is unknown, not a bare major" \
+  2 "$(jq_version_at_least 1 1.6; echo $?)"
+t_eq "an unreadable floor is unknown too, rather than passing everything" \
+  2 "$(jq_version_at_least 1.7 ''; echo $?)"
+# A leading zero is decimal here. Without `10#` bash reads `08` as octal and
+# errors out of the arithmetic, which would skip the comparison rather than
+# fail it — the assertion is that a verdict is reached at all.
+t_ok "a minor with a leading zero compares instead of erroring" \
+  "$(jq_version_at_least 1.08 1.6; echo $?)"
+
+# The suite itself runs jq for the engine tests, so this is a real prerequisite
+# and not a self-check: a machine below the floor is running assertions about
+# behaviour nobody here has looked at.
+t_ok "the jq this suite is running under meets HEINZEL_JQ_MIN" \
+  "$(jq_version_at_least "$(jq_version)" "${HEINZEL_JQ_MIN}"; echo $?)"
+
+# --- the compiled half ------------------------------------------------------
+#
+# Process control and agent-output parsing are a Go binary (go/, built to
+# bin/hzl-exec by `hzl build`). Its own behaviour is asserted by `go test`;
+# what is asserted here is the seam — the version parse the doctor reads, and
+# the two facts that now live in two languages and must not drift apart.
+
+t_eq "a Go version string parses" "1.27" \
+  "$(go_version_of 'go version go1.27.1 darwin/arm64')"
+t_eq "a two-digit minor parses whole, not as its first digit" "1.9" \
+  "$(go_version_of 'go version go1.9 darwin/amd64')"
+t_eq "a development toolchain parses as its release" "1.28" \
+  "$(go_version_of 'go version go1.28rc1 darwin/arm64')"
+t_eq "something that is not a go version parses as nothing" "" \
+  "$(go_version_of 'go1.27.1')"
+t_eq "and neither does an empty string" "" "$(go_version_of '')"
+
+t_ok "the toolchain floor is compared the same way jq's is" \
+  "$(version_at_least "${HEINZEL_GO_MIN}" "${HEINZEL_GO_MIN}"; echo $?)"
+
+# The binary is what every engine launch goes through, so the suite is not
+# meaningful without it. Saying so here turns a hundred confusing failures into
+# one sentence naming the fix.
+t_true "bin/hzl-exec is built" [ -x "${HZL_EXEC}" ]
+t_eq "and was built from this checkout, not left over from an older one" \
+  "${HEINZEL_VERSION}" "$(hzl_exec_version)"
+hzl_exec_current
+t_ok "which is what hzl_exec_current answers" "$?"
+
+# Two constants now live on both sides of the boundary. A drift in either is
+# silent at runtime — the binary would simply write a record of the wrong
+# schema, or refuse a launch the shell thought it had validated — so each is
+# asserted against the other rather than trusted to be kept in step by hand.
+t_eq "the binary's default result schema is HEINZEL_RESULT_SCHEMA" \
+  "${HEINZEL_RESULT_SCHEMA}" "$("${HZL_EXEC}" schema)"
+
+# The refusal an operator sees when the binary is missing. Checked through a
+# HZL_EXEC that points at nothing, because the real one is right there and the
+# failure this describes happens on a machine where it is not.
+(
+  HZL_EXEC=${TMPROOT}/no-such-hzl-exec
+  hzl_exec_require 2>"${TMPROOT}/exec-require.err"
+)
+t_fails "a missing bin/hzl-exec is refused, not run around" "$?"
+t_has "and the refusal names the command that fixes it" \
+  "${TMPROOT}/exec-require.err" "hzl build"
 
 # --- record schemas --------------------------------------------------------
 #
@@ -5423,7 +5524,7 @@ unset TH_D1 TH_D2 TH_ROWS TH_RUNS_SAVED
 
 # --- what the web UI is served ---------------------------------------------
 #
-# `hzl dashboard` is the page's only source, and `hzl add` its only writer.
+# `hzl web --json` is the page's only source, and `hzl add` its only writer.
 # The server in lib/web/server.py parses no ledger on purpose: one parse, in
 # `backlog_scan`, and a second implementation of "what the queue says" written
 # in JavaScript would be the copy that falls behind — the way `ledger_blocked`'s
@@ -5444,6 +5545,10 @@ DB_WORK=${TMPROOT}/db-work
 DB_BACKLOG=${DB_HOME}/backlog.md
 mkdir -p "${DB_ROOT}/bin" "${DB_ROOT}/etc" "${DB_HOME}" "${DB_WORK}"
 cp "${TEST_ROOT}/bin/hzl" "${DB_ROOT}/bin/hzl"
+# The compiled half goes with it. A root assembled without bin/hzl-exec is a
+# root where every engine launch and every usage probe refuses, which is the
+# one new way this program can be half-installed since the split.
+ln -sf "${TEST_ROOT}/bin/hzl-exec" "${DB_ROOT}/bin/hzl-exec"
 ln -sf "${TEST_ROOT}/lib" "${DB_ROOT}/lib"
 ln -sf "${TEST_ROOT}/prompts" "${DB_ROOT}/prompts"
 cat >"${DB_ROOT}/etc/heinzel.conf" <<CONF
@@ -5468,10 +5573,16 @@ hzl_db help >"${DB_MODE_OUT}" 2>&1
 t_has "help presents work mode" "${DB_MODE_OUT}" "hzl work [options]"
 t_has "help presents mobile mode" "${DB_MODE_OUT}" "hzl mobile [options]"
 
-t_has "install says what it reads" "${DB_MODE_OUT}" "HEINZEL_HOURS"
-t_has "install says what else it reads" "${DB_MODE_OUT}" "DEFAULT_BACKLOG"
-t_has "install says what it writes" "${DB_MODE_OUT}" "etc/heinzel-settings.json"
-t_has "install says where the plist goes" "${DB_MODE_OUT}" "LaunchAgents/local.heinzel.plist"
+# What install reads and writes was the one help entry three times longer than
+# any other; it is a page of its own now, and the main help says where.
+t_has "help points at the install page" "${DB_MODE_OUT}" "hzl help install"
+DB_INSTALL_HELP=${TMPROOT}/help-install.out
+hzl_db help install >"${DB_INSTALL_HELP}" 2>&1
+t_has "install says what it reads" "${DB_INSTALL_HELP}" "HEINZEL_HOURS"
+t_has "install says what else it reads" "${DB_INSTALL_HELP}" "DEFAULT_BACKLOG"
+t_has "install says what it writes" "${DB_INSTALL_HELP}" "etc/heinzel-settings.json"
+t_has "install says where the plist goes" "${DB_INSTALL_HELP}" "LaunchAgents/local.heinzel.plist"
+t_has "and what it refuses" "${DB_INSTALL_HELP}" "hzl build"
 t_has "help still lists uninstall" "${DB_MODE_OUT}" "hzl uninstall"
 t_lacks "the old one-line install/uninstall summary is gone" "${DB_MODE_OUT}" "hzl install / uninstall      the launchd agent"
 
@@ -5529,8 +5640,13 @@ t_has "and says so before it validates anything else" \
 # JSON before anything else is worth asking: the server hands this to the page
 # verbatim, and a page that cannot parse it shows nothing at all.
 DB_OUT=${TMPROOT}/dashboard.json
-hzl_db dashboard --days 1 >"${DB_OUT}" 2>/dev/null
-t_eq "hzl dashboard emits JSON" 0 "$(jq -e . "${DB_OUT}" >/dev/null 2>&1; echo $?)"
+hzl_db web --json --days 1 >"${DB_OUT}" 2>/dev/null
+t_eq "hzl web --json emits JSON" 0 "$(jq -e . "${DB_OUT}" >/dev/null 2>&1; echo $?)"
+# The name it had. A page or a script written against it is told where it
+# went rather than handed a fresh command it has never heard of.
+hzl_db dashboard --days 1 >"${TMPROOT}/dashboard-old.out" 2>&1
+t_fails "'hzl dashboard' is refused" "$?"
+t_has "and says what replaced it" "${TMPROOT}/dashboard-old.out" "hzl web --json"
 for db_k in generated_at host version backlog session schedule workspaces tasks runs log; do
   t_eq "it carries .${db_k}" 1 \
     "$(jq --arg k "${db_k}" 'if has($k) then 1 else 0 end' "${DB_OUT}" 2>/dev/null)"
@@ -5651,16 +5767,103 @@ t_ok "a task no run has reached is still a task" "$?"
 t_has "and says so rather than showing an empty list" "${DB_OUT}" "no run has worked on this yet"
 
 hzl_db task h-9999 >"${DB_OUT}" 2>&1
-t_eq "an id nobody has is refused the way hzl take refuses it" 3 "$?"
+t_eq "an id nobody has is refused the way hzl task take refuses it" 3 "$?"
 hzl_db task >"${DB_OUT}" 2>&1
 t_fails "and the command needs an id at all" "$?"
 
-hzl_db logs h-0002 >"${DB_OUT}" 2>&1
-t_ok "hzl logs takes a task id" "$?"
-t_has "and prints the log of the run that worked on it" "${DB_OUT}" "run log 20260903-040000"
-hzl_db logs h-0404 >"${DB_OUT}" 2>&1
+hzl_db task h-0002 --logs >"${DB_OUT}" 2>&1
+t_ok "hzl task --logs prints the runs' logs" "$?"
+t_has "the log of the run that worked on it" "${DB_OUT}" "run log 20260903-040000"
+hzl_db task h-0404 --logs >"${DB_OUT}" 2>&1
 t_fails "an id no run has worked on has no logs" "$?"
+hzl_db task h-0002 --logs --json >"${DB_OUT}" 2>&1
+t_fails "--logs and --json do not combine" "$?"
+# `hzl logs` used to accept an id, and decided by the argument's shape whether
+# it had been given one. It is organised by run now and says where the task
+# question went.
+hzl_db logs h-0002 >"${DB_OUT}" 2>&1
+t_fails "hzl logs no longer takes a task id" "$?"
+t_has "and points at hzl task --logs" "${DB_OUT}" "hzl task h-0002 --logs"
 unset TK_EXEC
+
+group 'hzl task, the verbs'
+
+# One listing of what is blocked, and under each line whether it has steps.
+# `hzl take` and `hzl steps` used to be two listings of the same tasks.
+DB_OUT=${TMPROOT}/take.out
+hzl_db task list >"${DB_OUT}" 2>&1
+t_ok "hzl task list lists what is blocked" "$?"
+t_has "with the task" "${DB_OUT}" "h-0002"
+t_has "and says it has no steps yet" "${DB_OUT}" "hzl task take h-0002 --steps"
+hzl_db task list extra >"${DB_OUT}" 2>&1
+t_fails "task list takes no argument" "$?"
+
+# The verbs that moved. Each old spelling refuses and says where it went, in
+# both languages: the old one is written into steps files the agent left for
+# people who are not necessarily engineers.
+for tk_old in take steps "done" block unblock; do
+  hzl_db "${tk_old}" h-0002 >"${DB_OUT}" 2>&1
+  t_fails "'hzl ${tk_old}' is refused" "$?"
+  t_has "and says it is under hzl task now" "${DB_OUT}" "hzl task"
+  t_has "in Japanese as well" "${DB_OUT}" "になりました"
+done
+hzl_db task "done" >"${DB_OUT}" 2>&1
+t_fails "task done needs an id" "$?"
+t_has "and says so with the new spelling" "${DB_OUT}" "hzl task done <id>"
+hzl_db task block h-0001 >"${DB_OUT}" 2>&1
+t_fails "task block needs a reason" "$?"
+hzl_db task unblock >"${DB_OUT}" 2>&1
+t_fails "task unblock needs an id" "$?"
+hzl_db task take >"${DB_OUT}" 2>&1
+t_fails "task take needs an id" "$?"
+t_has "and points at the list" "${DB_OUT}" "hzl task list"
+
+hzl_db task take h-0002 --steps >"${DB_OUT}" 2>&1
+t_ok "task take --steps on a blocked task with no steps writes the form" "$?"
+TK_STEPS=$(HEINZEL_HOME=${DB_HOME} "${DB_ROOT}/bin/hzl" report --json 2>/dev/null |
+  jq -r '.blocked[] | select(.id == "h-0002") | .steps // ""')
+t_true "and the form is where report says the steps are" [ -r "${TK_STEPS}" ]
+t_has "the form carries the reason the run gave" "${TK_STEPS}" "実機が要る"
+t_has "and the prompt that follows carries the form" "${DB_OUT}" "left instructions in"
+hzl_db task take h-0002 --steps >"${DB_OUT}" 2>&1
+t_ok "a second --steps is not an error" "$?"
+t_has "and does not write over the form" "${DB_OUT}" "already has steps"
+hzl_db task list >"${DB_OUT}" 2>&1
+t_has "the listing now names the steps file" "${DB_OUT}" "steps: ${TK_STEPS}"
+hzl_db task take h-0001 --steps >"${DB_OUT}" 2>&1
+t_fails "--steps on a task that is not blocked is refused" "$?"
+hzl_db task take --steps >"${DB_OUT}" 2>&1
+t_fails "and --steps with no id is refused" "$?"
+unset TK_STEPS
+
+group 'every read has --json'
+
+# The same question, answered for a script. Each is asserted to be JSON and to
+# carry the one field a caller would reach for first; the text forms above are
+# where the content is asserted.
+DB_OUT=${TMPROOT}/json.out
+hzl_db todo --json >"${DB_OUT}" 2>/dev/null
+t_ok "todo --json" "$?"
+t_eq "lists the todo task" h-0001 "$(jq -r '.todo[0].id' "${DB_OUT}")"
+t_eq "and counts what a run holds" 0 "$(jq -r '.in_progress' "${DB_OUT}")"
+hzl_db next --json >"${DB_OUT}" 2>/dev/null
+t_ok "next --json" "$?"
+t_eq "names the next task" h-0001 "$(jq -r '.next.id' "${DB_OUT}")"
+t_eq "with its priority as a number" 1 "$(jq -r '.next.priority' "${DB_OUT}")"
+hzl_db task history --json >"${DB_OUT}" 2>/dev/null
+t_ok "history --json" "$?"
+t_eq "is an array" array "$(jq -r 'type' "${DB_OUT}")"
+hzl_db schedule --json >"${DB_OUT}" 2>/dev/null
+t_ok "schedule --json" "$?"
+t_eq "says whether a run will happen, as a boolean" boolean "$(jq -r '.will_run | type' "${DB_OUT}")"
+t_eq "and why, in words" string "$(jq -r '.reason | type' "${DB_OUT}")"
+t_eq "and names the three roles" 'planner executor reviewer' \
+  "$(jq -r '.engines | keys_unsorted | join(" ")' "${DB_OUT}")"
+PATH=${BG_BIN:-/nonexistent}:${PATH} hzl_db budget --json >"${DB_OUT}" 2>/dev/null
+t_eq "budget --json is JSON whatever the engines answered" 0 \
+  "$(jq -e . "${DB_OUT}" >/dev/null 2>&1; echo $?)"
+t_eq "and says per engine whether it could be read" string \
+  "$(jq -r '.engines[0].status | type' "${DB_OUT}")"
 
 group 'hzl todo'
 
@@ -5698,7 +5901,7 @@ t_has "an empty queue with something in progress says there is nothing to do" \
 t_has "and still says what is in progress" "${DB_OUT}" "in progress"
 unset TODO_L1 TODO_L2
 
-group 'hzl history'
+group 'hzl task history'
 
 rm -f "${DB_HOME}/backlog.completed.md" "${DB_HOME}/backlog.blocked.md"
 cat >"${DB_BACKLOG}" <<'FIXTURE'
@@ -5709,8 +5912,8 @@ cat >"${DB_BACKLOG}" <<'FIXTURE'
 - [!] (id:h-0002) blocked <!-- blocked:2026-09-08T01:00:00+09:00 reason:needs a person -->
 FIXTURE
 DB_OUT=${TMPROOT}/history-empty.out
-hzl_db history --no-pager >"${DB_OUT}" 2>&1
-t_ok "with nothing closed, hzl history still exits 0" "$?"
+hzl_db task history --no-pager >"${DB_OUT}" 2>&1
+t_ok "with nothing closed, hzl task history still exits 0" "$?"
 t_has "and says so" "${DB_OUT}" "nothing has been closed yet"
 
 HIST_ARCHIVE=${DB_HOME}/backlog.completed.md
@@ -5740,8 +5943,8 @@ printf '\n## run 20260904-050000 (2026-09-04T05:00:00+09:00)\n\n  done: h-0004 (
 printf 'run log 20260904-050000\n' >"${DB_HOME}/logs/2026-09-04/run-050000.log"
 
 DB_OUT=${TMPROOT}/history.out
-hzl_db history --no-pager >"${DB_OUT}" 2>&1
-t_ok "hzl history exits 0" "$?"
+hzl_db task history --no-pager >"${DB_OUT}" 2>&1
+t_ok "hzl task history exits 0" "$?"
 t_has "the newer closed task appears" "${DB_OUT}" "h-0004"
 t_has "the older, archived closed task appears too" "${DB_OUT}" "h-0003"
 t_lacks "the todo task does not appear" "${DB_OUT}" "待っている仕事"
@@ -5760,31 +5963,35 @@ t_has "and its note" "${DB_OUT}" "手で閉じた"
 t_has "and that no run worked on it" "${DB_OUT}" "no run worked on it"
 
 DB_OUT=${TMPROOT}/history-oneline.out
-hzl_db history --oneline --no-pager >"${DB_OUT}" 2>&1
+hzl_db task history --oneline --no-pager >"${DB_OUT}" 2>&1
 t_eq "--oneline prints one line per closed task" 2 "$(grep -c . "${DB_OUT}")"
 t_lacks "and none of the run detail lines" "${DB_OUT}" "log "
 
 DB_OUT=${TMPROOT}/history-n1.out
-hzl_db history -n 1 --no-pager >"${DB_OUT}" 2>&1
+hzl_db task history -n 1 --no-pager >"${DB_OUT}" 2>&1
 t_has "-n 1 shows the newer task" "${DB_OUT}" "h-0004"
 t_lacks "and not the older one" "${DB_OUT}" "h-0003"
 
-hzl_db history -n 0 --no-pager >"${DB_OUT}" 2>&1
+hzl_db task history -n 0 --no-pager >"${DB_OUT}" 2>&1
 t_fails "-n 0 is refused" "$?"
-hzl_db history -n x --no-pager >"${DB_OUT}" 2>&1
+hzl_db task history -n x --no-pager >"${DB_OUT}" 2>&1
 t_fails "-n x is refused" "$?"
-hzl_db history --bogus >"${DB_OUT}" 2>&1
+hzl_db task history --bogus >"${DB_OUT}" 2>&1
 t_fails "an unknown option is refused" "$?"
 t_has "and the last of these says so" "${DB_OUT}" "history: unknown option"
 
 DB_OUT=${TMPROOT}/history-pager.out
-PAGER=false hzl_db history >"${DB_OUT}" 2>&1
+PAGER=false hzl_db task history >"${DB_OUT}" 2>&1
 t_has "the pager is skipped when output isn't a terminal, entries still write" \
   "${DB_OUT}" "h-0004"
 
 DB_OUT=${TMPROOT}/history-help.out
 hzl_db help >"${DB_OUT}" 2>&1
-t_has "hzl help mentions hzl history" "${DB_OUT}" "hzl history"
+t_has "hzl help mentions hzl task history" "${DB_OUT}" "hzl task history"
+# The verb it was, refused with the pointer the others get.
+hzl_db history >"${DB_OUT}" 2>&1
+t_fails "'hzl history' is refused" "$?"
+t_has "and says it is under hzl task now" "${DB_OUT}" "hzl task history"
 
 unset HIST_ARCHIVE HIST_EXEC HIST_L1 HIST_L2 HIST_ORDER_OK
 

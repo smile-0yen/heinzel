@@ -6,6 +6,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-18
+
+Three changes, one thread: the parts of this program that shell is worst at
+have moved out of it, and the surface a person types at has fewer names.
+
+**Process control and agent-output parsing are a Go binary.** `bin/hzl-exec`
+(source in `go/`) is what starts an engine, holds it to its wall clock, and
+reads back what it wrote. `lib/watchdog.sh` was four bash mechanisms for one
+idea - a background job, `set -m` toggled around it so the job led a process
+group, a watchdog subshell, and a marker file carrying the verdict back across
+the subshell boundary - and every one of them carried a comment saying which
+rearrangement would silently orphan a running engine. In Go the process group
+is a field on the exec call and the verdict is a return value. The stream
+readers went with it: `jq` run twice over the same file because the strict
+reading rejects a stream cut off at the deadline is now a decoder that keeps
+what it got. `hzl_timeout`, `engine_verdict`, `engine_normalize_result` and
+the rest keep their names and their contracts; they are shell wrappers over
+the binary now. Two behaviours changed on the way: a stop from outside is
+forwarded down to the engine's own process group by something that then waits
+to see it gone, rather than aimed at a group the engine was assumed to be in;
+and a usage probe (`claude -p /usage`, `codex app-server`) no longer publishes
+its pid as `HEINZEL_ENGINE_PID`, where a stop barrier would have found the
+probe instead of the engine. `hzl build` compiles it; `hzl install` refuses
+without a current one; `hzl doctor` reports Go as a build dependency and not a
+prerequisite, because once the binary exists nothing asks for a compiler
+again.
+
+**jq has a version floor.** It is the one dependency macOS does not ship, so it
+is the one whose version can differ between two machines running the same OS.
+`hzl doctor` now says which one it found, faults one below 1.6, and reports -
+rather than faults - one whose version string it cannot read.
+
+**Fewer commands, the same questions.** `hzl task` is one noun with its views
+and its verbs under it: `hzl task <id>` (with `--full`, `--logs`, `--json`) is
+where a task stands; `hzl task list` is what is blocked and waiting on a
+person, saying under each whether it has steps yet; `hzl task take <id>` is
+that task as a prompt to paste into an interactive session, `--steps` writing
+the instruction form first; `hzl task done`, `block` and `unblock` move it by
+hand. That folds five top-level verbs - `take`, `steps`, `done`, `block`,
+`unblock` - and two listings of the same blocked tasks into one place. Two
+more pairs went the same way: `hzl dashboard` is `hzl web --json`, and `hzl
+logs <id>` is `hzl task <id> --logs`, so `hzl logs` no longer decides by the
+shape of its argument whether it was given an option or an id. Every old name
+refuses with a pointer at the new one, in Japanese as well as English, because
+`hzl take <id>` and `hzl done <id>` are written into the steps files the agent
+left for people who are not necessarily engineers, and those files are still
+on disk. The agent's prompt and the form it fills in say the new names from
+here on. `hzl history` is `hzl task history`, for the same reason: it is every
+task that was closed, which is a question about tasks. `hzl logs` stays apart
+from it on purpose - it is by run and reads the log files, and a run that
+closed nothing has a log and no history. Every read-only view takes `--json`
+now - `next`, `todo`, `history`, `schedule` and `budget` join `status`, `task`
+and `report` - and `hzl schedule --json` answers "will it run" as a boolean and
+a reason from the same branch that prints the sentence. The help is laid out
+by how often a thing is typed rather than by what it is, and `hzl install`'s
+page of what it reads and writes is `hzl help install`. The two exit-10
+answers (`status`: a session is live; `report`: something is blocked) are
+unchanged and now documented side by side.
+
+### Added
+- `bin/hzl-exec` (`go/`): `run`, `timeout`, `render`, `normalize`, `parse`,
+  `verdict`, `authcheck`, `outcome`, `schema`, `version`.
+- `hzl build`; `hzl help install`; `HEINZEL_GO_MIN`, `HEINZEL_JQ_MIN`.
+- `hzl task list`, `hzl task take <id> [--steps]`, `hzl task done`, `hzl task
+  block`, `hzl task unblock`, `hzl task history`; `--logs` on `hzl task <id>`.
+- `--json` on `next`, `todo`, `history`, `schedule`, `budget`.
+- `hzl doctor`: the jq version, the binary's version against this checkout's,
+  and the Go toolchain as a build dependency.
+- `install.sh` builds the binary; CI runs `gofmt`, `go vet`, `go test`, builds
+  the binary and checks its version before the shell suite.
+
+### Changed
+- `lib/watchdog.sh`, `lib/runtimes/local.sh` and the result half of
+  `lib/engines.sh` are wrappers over `bin/hzl-exec`.
+- `hzl install` refuses when `bin/hzl-exec` is missing or built from another
+  version.
+- `hzl_timeout_probe` (no `HEINZEL_ENGINE_PID`) wraps the two usage probes.
+- `lib/web/server.py` runs `hzl web --json`.
+
+### Removed
+- `hzl take`, `hzl steps`, `hzl done`, `hzl block`, `hzl unblock`, `hzl
+  history`, `hzl dashboard` and `hzl logs <id>`, each refusing with the
+  command that replaced it.
+- The shell implementations of the wall clock and the stream readers.
+
+
 ## [0.7.1] - 2026-09-17
 
 `hzl task <id>` needs an id, and there was no command that listed the ones it

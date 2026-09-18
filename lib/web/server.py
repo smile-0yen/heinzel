@@ -2,7 +2,7 @@
 """server.py — the transport behind `hzl web`, and nothing else.
 
 This process parses no ledger, reads no state file and knows no rule. It runs
-`hzl dashboard` for what to show and `hzl add` for what to write, and passes
+`hzl web --json` for what to show and `hzl add` for what to write, and passes
 their output through. That is deliberate and it is the whole design: the rest
 of this program keeps one parse of the backlog, in `backlog_scan`, and a second
 implementation of "what the queue says" written in Python would be the copy
@@ -167,18 +167,18 @@ class Handler(BaseHTTPRequestHandler):
             self._file("app.js", "text/javascript; charset=utf-8")
         elif path == "/api/dashboard":
             started = time.time()
-            rc, out, err = run_hzl(["dashboard", "--days", DAYS])
+            rc, out, err = run_hzl(["web", "--json", "--days", DAYS])
             if rc != 0 or not out.strip():
                 # No stale document wearing a fresh face: when the collector
                 # fails the page is told so and shows nothing rather than
                 # something old. (smile-monitor's rule, and the right one.)
-                self._send(503, {"error": err.strip() or f"hzl dashboard exited {rc}",
+                self._send(503, {"error": err.strip() or f"hzl web --json exited {rc}",
                                  "collected_ms": int((time.time() - started) * 1000)})
                 return
             try:
                 data = json.loads(out)
             except json.JSONDecodeError as exc:
-                self._send(503, {"error": f"hzl dashboard did not return JSON: {exc}"})
+                self._send(503, {"error": f"hzl web --json did not return JSON: {exc}"})
                 return
             data["collected_ms"] = int((time.time() - started) * 1000)
             self._send(200, data)

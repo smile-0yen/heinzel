@@ -480,13 +480,26 @@ on exit codes 124/137 to classify a run as `timeout`. That dependency is simply 
 Mac, and `brew install coreutils` is friction we should not hand to someone installing an OSS tool
 (principle 9).
 
-Heinzel ships `lib/watchdog.sh` with `hzl_timeout <kill_after> <secs> <cmd…>`, contract-compatible
-with coreutils `timeout`, in bash 3.2:
+Heinzel carries that wall clock itself, contract-compatible with coreutils `timeout`. The
+contract is `hzl_timeout <kill_after> <secs> <cmd…>` and it has not changed; the implementation
+has. It was four bash mechanisms for one idea — a background job, `set -m` toggled around it so
+the job led a process group, a watchdog subshell, and a marker file carrying the verdict back
+across the subshell boundary, because a subshell cannot set a variable in its parent. Every one
+of them carried a comment saying which rearrangement would silently orphan a running engine.
 
-1. start the child in the background, record `$!`
-2. start a watchdog that sleeps `secs`, sends `TERM`, sleeps `kill_after`, sends `KILL`
-3. `wait` on the child; map TERM-after-timeout → 124, KILL → 137
-4. kill the watchdog on the normal path so it cannot outlive the run
+It is now `hzl-exec timeout` (`go/proc.go`), where the process group is a field on the exec call
+and the verdict is a return value:
+
+1. start the child with `Setpgid`, so it leads its own group
+2. wait, with the wall clock as a timer; on expiry signal the **group** `TERM`, then `KILL` after
+   `kill_after`
+3. map TERM-after-timeout → 124, KILL → 137, otherwise the child's own status
+4. forward a `TERM` arriving from outside down to that group on the same bounded schedule, which
+   is the path `cancel_stop … tree` now takes
+
+`lib/watchdog.sh` still exists and still exports `hzl_timeout`: what is left in it is the shell's
+half of the contract — backgrounding under job control so the published pid leads a group, and
+setting and clearing `HEINZEL_ENGINE_PID` around the call.
 
 Two traps from kobito §8.3 are the reason this is one tested helper rather than three inline
 copies:
@@ -592,13 +605,15 @@ heinzel/
 ├── lib/posture.sh       travel / remote, with read-back verification
 ├── lib/engines.sh       the only file that knows engine-specific flags
 ├── lib/runtimes.sh      backend registry — a backend is a key, not a case arm
-├── lib/runtimes/local.sh  starts a process on this machine, under the watchdog
+├── lib/runtimes/local.sh  starts a process on this machine, via bin/hzl-exec
 ├── lib/runstore.sh      one durable directory per run, where the agent cannot reach
 ├── lib/claims.sh        run-scoped task claims; the ledger's [~] is their display
 ├── lib/locks.sh         backlog lock, per-run lock, one writer lease per checkout
 ├── lib/finalize.sh      the ledger commit: parse, check, intent, transition, receipt
 ├── lib/cancel.sh        stopping a run, confirming it stopped, freezing what it left
-├── lib/watchdog.sh      hzl_timeout (§6.1)
+├── lib/watchdog.sh      hzl_timeout, hzl_signal_tree — the shell half (§6.1)
+├── go/                  bin/hzl-exec: process control and agent output parsing
+│                        (built by `hzl build`; Go is a build dependency only)
 ├── etc/heinzel.conf              the tuning surface
 ├── etc/heinzel-settings.json     deny/allow for the unattended agent
 ├── etc/review-schema.json        forces the reviewer's output shape

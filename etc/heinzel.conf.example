@@ -162,7 +162,7 @@ HEINZEL_CLAUDE_SETTINGS="${HOME}/.claude/settings.json"
 #
 # It is all of them or none of them. If you want a run that may reach exactly
 # one cluster and nothing else, this is the wrong tool: leave it on, and do
-# that task yourself with `hzl take <id>` in an interactive session.
+# that task yourself with `hzl task take <id>` in an interactive session.
 HEINZEL_SAFE_MODE=1
 
 # --- housekeeping ----------------------------------------------------------

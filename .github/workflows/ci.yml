@@ -54,6 +54,44 @@ jobs:
             echo "no shell sources yet (design phase) — skipping"
           fi
 
+      # The Go half is built before the shell suite runs, because the suite is
+      # not meaningful without it: every engine launch and every usage probe
+      # goes through bin/hzl-exec. A CI that ran the shell tests first would
+      # report a hundred failures whose single cause was a missing build.
+      - name: go version (must satisfy HEINZEL_GO_MIN)
+        run: |
+          go version
+          min=$(sed -n 's/^HEINZEL_GO_MIN="\(.*\)"/\1/p' lib/common.sh)
+          have=$(go version | sed -n 's/^go version go\([0-9][0-9]*\.[0-9][0-9]*\).*$/\1/p')
+          printf 'want %s or newer, have %s\n' "${min}" "${have}"
+          # The same comparison lib/common.sh makes, so CI cannot pass a
+          # toolchain `hzl build` would refuse.
+          [ "$(( 10#${have%%.*} * 1000 + 10#${have#*.} ))" \
+            -ge "$(( 10#${min%%.*} * 1000 + 10#${min#*.} ))" ]
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l go/)
+          if [ -n "${unformatted}" ]; then
+            printf 'not gofmt-clean:\n%s\n' "${unformatted}" >&2
+            exit 1
+          fi
+
+      - name: go vet
+        working-directory: go
+        run: go vet ./...
+
+      - name: go test
+        working-directory: go
+        run: go test ./...
+
+      - name: build bin/hzl-exec
+        run: |
+          version=$(sed -n 's/^HEINZEL_VERSION="\(.*\)"/\1/p' lib/common.sh)
+          ( cd go && go build -o ../bin/hzl-exec \
+              -ldflags "-X main.heinzelVersion=${version}" . )
+          [ "$(bin/hzl-exec version)" = "${version}" ]
+
       - name: tests
         run: |
           if [ -x tests/test.sh ]; then

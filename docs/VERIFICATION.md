@@ -515,7 +515,7 @@ then leave it. In the morning:
 ```sh
 hzl status
 cat ~/.heinzel/logs/$(date +%Y-%m-%d)/notes.md
-hzl take
+hzl task list
 hzl off
 ```
 

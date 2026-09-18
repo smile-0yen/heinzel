@@ -31,9 +31,11 @@ tests/test.sh          # static checks and offline unit tests; makes no API call
 tests/test.sh --live   # reserved: will exercise the reviewer engine (costs money)
 ```
 
-The engine layer is covered offline: `lib/engines.sh` and `lib/watchdog.sh` are
+The engine layer is covered offline: `lib/engines.sh` and `bin/hzl-exec` are
 exercised against fake `claude`, `codex` and `opencode` CLIs on a temporary `PATH`, which record
-the argv it was handed and plays back a fixture. `--live` stays refused with
+the argv it was handed and plays back a fixture. `tests/test.sh` needs `bin/hzl-exec` to be
+built — run `hzl build` first, or `go test ./...` in `go/` for the binary's own suite, which
+covers the wall clock, the process group and the output parsers directly. `--live` stays refused with
 exit 2 until a test calls a real engine. A flag that is accepted and ignored
 reports a green suite for work it never did.
 

@@ -22,6 +22,24 @@ for c in jq caffeinate pmset launchctl lockf; do
   }
 done
 
+# The compiled half. Go is needed here and only here: once bin/hzl-exec exists,
+# running Heinzel never asks for a compiler again, which is why go is not in
+# the prerequisite loop above.
+if ! command -v go >/dev/null 2>&1; then
+  printf 'missing prerequisite: go (brew install go)\n' >&2
+  printf 'Go builds bin/hzl-exec, which is what starts engines and reads what\n' >&2
+  printf 'they wrote. It is not needed to run Heinzel afterwards.\n' >&2
+  exit 1
+fi
+VERSION=$(sed -n 's/^HEINZEL_VERSION="\(.*\)"/\1/p' "${ROOT}/lib/common.sh")
+if ! ( cd "${ROOT}/go" &&
+       go build -o "${ROOT}/bin/hzl-exec" \
+         -ldflags "-X main.heinzelVersion=${VERSION}" . ); then
+  printf 'could not build bin/hzl-exec\n' >&2
+  exit 1
+fi
+printf 'built %s/bin/hzl-exec (%s)\n' "${ROOT}" "${VERSION}"
+
 mkdir -p "${BINDIR}" || exit 1
 ln -sf "${ROOT}/bin/hzl" "${BINDIR}/hzl"
 printf 'linked %s -> %s\n' "${BINDIR}/hzl" "${ROOT}/bin/hzl"

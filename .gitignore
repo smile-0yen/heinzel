@@ -17,3 +17,6 @@ etc/heinzel-settings.json
 
 # Byte-compiled by python3 when `hzl web` serves the dashboard
 __pycache__/
+
+# The compiled half, built by `hzl build` from go/
+bin/hzl-exec

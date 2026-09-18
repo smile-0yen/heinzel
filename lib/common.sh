@@ -11,7 +11,7 @@
 # Multibyte truncation is locale-dependent (DESIGN 6.3). Fix it once, here.
 export LC_CTYPE=UTF-8
 
-HEINZEL_VERSION="0.7.1"
+HEINZEL_VERSION="0.8.0"
 
 # The TTL ceiling is deliberately not configurable. A session that can be
 # created with an unbounded lifetime is not a session, it is a mode.
@@ -98,6 +98,117 @@ trunc() {
 }
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# --- jq, the one dependency that is not the operating system's -------------
+#
+# Every other name `hzl doctor` checks — caffeinate, pmset, launchctl, lockf —
+# is a system binary whose behaviour is pinned by the macOS version, so asking
+# whether it is there is the whole question. jq is not: it arrives from
+# Homebrew or by hand, and two machines running the same OS can be running
+# different jq. Presence alone would report a machine as healthy and leave the
+# difference to show up inside an unattended run.
+#
+# 1.6 is the floor, and it is a tested-against line rather than a feature
+# requirement: nothing here uses a builtin newer than 1.5 (`implode`, `splits`,
+# `fromjson`, `capture`, `to_entries`, `@tsv`, `--argjson` are all 1.5), but
+# 1.6 is the oldest release this program has been reasoned about with. A
+# machine below it is running something nobody here has looked at, which is a
+# different statement from "it will not work" and is reported as its own case.
+HEINZEL_JQ_MIN="1.6"
+
+# The major.minor out of the string jq prints. Kept apart from the call so it
+# can be tested against what jq actually emits without having that jq to hand:
+# `jq-1.6`, `jq-1.7.1-apple`, `jq-1.6-159-gcff5336-dirty`, `jq-1.8.1`, and the
+# `jq 1.5` of some older builds. Anything it cannot read prints nothing, and
+# the caller must treat that as *unknown* — never as old, and never as fine.
+jq_version_of() { # version-string -> major.minor, or empty
+  printf '%s' "$1" | sed -n 's/^jq[- ]*\([0-9][0-9]*\.[0-9][0-9]*\).*$/\1/p'
+}
+
+jq_version() { # -> the installed jq's major.minor, or empty
+  have jq || return 1
+  jq_version_of "$(jq --version 2>/dev/null | head -1)"
+}
+
+# 0 when `have` is at least `want`, 1 when it is older, 2 when either is not a
+# major.minor that can be compared. The unreadable case gets its own status
+# because it is a different fact from "too old" and is reported differently: a
+# version we failed to parse is a gap in this function, not a fault in the
+# machine, and it must not be allowed to condemn a working install.
+# major.minor against major.minor. Shared by the two version gates below
+# rather than written twice: a comparison that disagreed with itself between
+# two dependencies would be worse than having no gate on either.
+version_at_least() { # have want
+  local h=$1 w=$2 hmaj hmin wmaj wmin n
+  case ${h} in *.*) ;; *) return 2 ;; esac
+  case ${w} in *.*) ;; *) return 2 ;; esac
+  hmaj=${h%%.*}; hmin=${h#*.}; hmin=${hmin%%.*}
+  wmaj=${w%%.*}; wmin=${w#*.}; wmin=${wmin%%.*}
+  for n in "${hmaj}" "${hmin}" "${wmaj}" "${wmin}"; do
+    case ${n} in
+      "") return 2 ;;
+      *[!0-9]*) return 2 ;;
+    esac
+  done
+  # `10#` because a minor written with a leading zero is decimal here, not
+  # octal: bash would otherwise error out of the arithmetic on `08` rather
+  # than compare it, and the comparison would be skipped rather than fail.
+  [ $((10#${hmaj} * 1000 + 10#${hmin})) -ge $((10#${wmaj} * 1000 + 10#${wmin})) ]
+}
+
+jq_version_at_least() { version_at_least "$1" "$2"; }
+
+# --- hzl-exec, the compiled half -------------------------------------------
+#
+# Process control and agent-output parsing live in a Go binary (go/, built to
+# bin/hzl-exec). Which means this program now has two halves that can be out of
+# step with each other, and that is a failure mode the shell alone never had:
+# a checkout pulled forward without a rebuild leaves a binary that runs
+# perfectly and answers last month's questions.
+#
+# So the binary carries the HEINZEL_VERSION it was built from, and everything
+# that can check does. There is no auto-rebuild: a build is a thing an operator
+# does, on purpose, and an unattended run at 03:00 is the last place to start
+# discovering a compiler.
+HEINZEL_GO_MIN="1.22"
+HZL_EXEC=${HEINZEL_ROOT}/bin/hzl-exec
+
+# "go version go1.27.1 darwin/arm64" -> 1.27. Kept apart from the call for the
+# same reason jq_version_of is: so the parse can be tested against the strings
+# the tool actually prints without needing that toolchain to hand.
+go_version_of() { # version-string -> major.minor, or empty
+  printf '%s' "$1" | sed -n 's/^go version go\([0-9][0-9]*\.[0-9][0-9]*\).*$/\1/p'
+}
+
+go_version() { # -> the installed toolchain's major.minor, or empty
+  have go || return 1
+  go_version_of "$(go version 2>/dev/null | head -1)"
+}
+
+go_version_at_least() { version_at_least "$1" "$2"; }
+
+hzl_exec_present() { [ -x "${HZL_EXEC}" ]; }
+
+# The version the binary was built from, which is the only way to tell a
+# current build from a stale one.
+hzl_exec_version() {
+  hzl_exec_present || return 1
+  "${HZL_EXEC}" version 2>/dev/null
+}
+
+hzl_exec_current() {
+  local v
+  v=$(hzl_exec_version) || return 1
+  [ "${v}" = "${HEINZEL_VERSION}" ]
+}
+
+# Every caller goes through this, so that a missing binary is one sentence
+# naming the fix rather than 127 and a blank log line at three in the morning.
+hzl_exec_require() {
+  hzl_exec_present && return 0
+  err "bin/hzl-exec is not built. Run 'hzl build' (needs Go ${HEINZEL_GO_MIN} or newer)."
+  return 1
+}
 
 # Flatten to a single line. The ledger is line-oriented and its metadata lives
 # in a trailing comment, so an embedded newline would break the format; it also
@@ -1676,7 +1787,7 @@ backlog_ids_done_by_run() {
 #
 # The blocked file is *live*, and that is its one difference from the archive:
 # `[x]` is terminal, `[!]` is not. So its sweep runs both ways — `[!]` leaves the
-# backlog, and a line in the blocked file that is no longer `[!]` (`hzl unblock`,
+# backlog, and a line in the blocked file that is no longer `[!]` (`hzl task unblock`,
 # or a human with an editor) goes back into it. One-way would strand an unblocked
 # task in a file no worksheet is ever built from, which is losing work quietly.
 # For the same reason every *mutation* addresses the ledger's live files and
@@ -1711,10 +1822,10 @@ BLOCKED_TEMPLATE='# Blocked
 Tasks an unattended run stopped on: each needed a judgement call, a privilege, or
 something irreversible it would not do on its own. The comment at the end of the
 line says what to do in one line; the steps are in `blocked/<id>.md` beside this
-file, and `hzl take <id>` reads them back with the task.
+file, and `hzl task take <id>` reads them back with the task.
 
 This file is live, not a record. Change a `[!]` back to `[ ]` here (or run
-`hzl unblock <id>`) and the task returns to the backlog at the next sweep.
+`hzl task unblock <id>`) and the task returns to the backlog at the next sweep.
 '
 
 # The archive that belongs to a backlog, and the blocked file that belongs to it.
@@ -1750,8 +1861,9 @@ ledger_blocked_file() {
 #
 # and the ledger line stays one line. Nothing points at the file, because the id
 # is the pointer: a name derived from the id cannot drift out of step with the
-# line the way a recorded path can, and `hzl report`, `hzl take` and `hzl steps`
-# all ask the same question - is there a file for this id - and get one answer.
+# line the way a recorded path can, and `hzl report`, `hzl task list` and
+# `hzl task take --steps` all ask the same question - is there a file for this id -
+# and get one answer.
 #
 # The agent writes its copy at `<workdir>/.heinzel/blocked/<id>.md`, the only
 # place it can write, and the merge carries it out here. The worksheet is
@@ -1823,8 +1935,8 @@ STEPS_TEMPLATE='# %s: %s
 
 ## When you are done
 
-Run `hzl unblock %s` to put the task back in the queue, or
-`hzl done %s "<what changed>"` if you finished it yourself.
+Run `hzl task unblock %s` to put the task back in the queue, or
+`hzl task done %s "<what changed>"` if you finished it yourself.
 '
 
 # Created on the first sweep that has something to put there, never before: a
@@ -2127,7 +2239,7 @@ EOF
 }
 
 # Everything closed anywhere in the live ledger moves to the archive. Both live
-# files, because `hzl done` closes a blocked task where it lies, and a `[x]` left
+# files, because `hzl task done` closes a blocked task where it lies, and a `[x]` left
 # in the blocked file is a completion in the file that is supposed to be nothing
 # but open questions. Prints how many tasks moved.
 #
@@ -2187,11 +2299,11 @@ backlog_sweep_blocked() { # backlog
 #
 # A task the runner is not working on is in the backlog or in the blocked file,
 # and which of the two is an implementation detail of the sweep. Every read and
-# every write a human drives goes through these, so that `hzl block h-0007` and
-# `hzl done h-0007` do not have to know where the line currently sits.
+# every write a human drives goes through these, so that `hzl task block h-0007`
+# and `hzl task done h-0007` do not have to know where the line currently sits.
 #
 # Deliberately not extended to the archive. A mutation that reached it would
-# rewrite the record - and `hzl done` on an id that was closed last month should
+# rewrite the record - and `hzl task done` on an id that was closed last month should
 # say "no such id", not silently close it a second time.
 
 # backlog_scan across the live files. Line numbers are per file, so a caller that
@@ -2319,7 +2431,7 @@ ledger_blocked() { # backlog
   # Derived from `backlog_scan` rather than parsed again. This used to carry a
   # second copy of the task-line parser, and the copy fell behind the moment
   # the first one learned something: `(dir:)` routing was taken off the text by
-  # `backlog_scan` and left on it here, so the morning report and `hzl take`
+  # `backlog_scan` and left on it here, so the morning report and `hzl task list`
   # showed a tag the ledger no longer considered part of the task. One parse,
   # and this reads the metadata out of the field that parse now carries.
   local row meta d reason
@@ -2382,7 +2494,7 @@ EOF
 
 # One line per (id, run) pair, for every task any run's worksheet ever named:
 # `id TAB run-id TAB day TAB exec-dir`, in a single awk pass over every
-# exec-*/worksheet-ids.txt rather than a `grep` per id - `hzl history` looks
+# exec-*/worksheet-ids.txt rather than a `grep` per id - `hzl task history` looks
 # this up for every closed task, and a grep per id per file costs N x (number
 # of runs) forks. The glob is already in run order: the day directories sort
 # as dates and `exec-<HHMMSS>` sorts within a day, so nothing here has to sort
@@ -2418,7 +2530,7 @@ task_run_index() {
 
 # The runs that had this task on their worksheet, oldest first, with the
 # marker each one left beside it. Reads a `task_run_index` built once by a
-# caller that asks this for many ids - `hzl history` does - when given one, or
+# caller that asks this for many ids - `hzl task history` does - when given one, or
 # builds its own for a single lookup.
 task_run_rows() { # id [index] -> run-id TAB day TAB exec-dir TAB marker
   local id=$1 idx rid run_id day exec_dir marker
@@ -2608,7 +2720,7 @@ EOF
 # choosing what to propose, not writing anything — and the claim that follows
 # takes the lock and writes `[~]`. Every id on the worksheet is therefore a
 # statement about the ledger as it was some moments ago, and a human at the
-# keyboard runs `hzl done` and `hzl block` under that same lock, so their edit
+# keyboard runs `hzl task done` and `hzl task block` under that same lock, so their edit
 # lands wholly in that window or wholly outside it. Landing inside it, against
 # an unconditional `backlog_set_state ... "~"`, turned a person's `[x]` back
 # into `[~]` and handed the finished task to the agent: not work lost so much

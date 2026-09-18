@@ -83,25 +83,8 @@ engine_auth_ok() {
 # stderr on runs that succeeded; reusing claude's pattern would halt the whole
 # tool the first time codex exited non-zero for any unrelated reason.
 engine_is_auth_error() {
-  local engine=$1 rc=$2 errfile=$3
-  # A successful run is never an auth failure, whatever it printed.
-  [ "${rc}" -eq 0 ] && return 1
-  [ -r "${errfile}" ] || return 1
-  case ${engine} in
-    claude)
-      grep -qiE '401|403|unauthorized|forbidden|expired|invalid_token|authentication failed|credentials' \
-        "${errfile}"
-      ;;
-    codex)
-      grep -vE 'rmcp::|mcp-client|models_manager' "${errfile}" |
-        grep -qiE 'not logged in|codex login|401 unauthorized|refresh token|token expired'
-      ;;
-    opencode)
-      grep -qiE 'unauthorized|forbidden|authentication|not authenticated|invalid api key|api key.*(missing|invalid)|credentials.*(missing|invalid)' \
-        "${errfile}"
-      ;;
-    *) return 1 ;;
-  esac
+  hzl_exec_require || return 1
+  "${HZL_EXEC}" authcheck "$1" "$2" "$3"
 }
 
 # --- usage: how much of the account's limit is left ------------------------
@@ -133,7 +116,7 @@ engine_usage() {
 # and nothing here depends on which character it is.
 _engine_usage_claude() {
   local out lines
-  out=$(hzl_timeout 5 "${ENGINE_USAGE_TIMEOUT}" claude -p /usage 2>&1)
+  out=$(hzl_timeout_probe 5 "${ENGINE_USAGE_TIMEOUT}" claude -p /usage 2>&1)
   lines=$(printf '%s\n' "${out}" |
     sed -nE 's/^Current ([^:]+): ([0-9]+)% used(.*resets (.*))?$/\1	\2	\4/p')
   if [ -z "${lines}" ]; then
@@ -159,13 +142,18 @@ _engine_usage_codex_ask() { # outfile
       sleep 0.2
       i=$((i + 1))
     done
-  } | codex app-server >"${out}" 2>/dev/null
+    # The wall clock is around `codex app-server` itself rather than around
+    # this function, because a shell function is not something a process can be
+    # given to start. The loop above is already bounded; what needed bounding
+    # was the CLI that might not exit when its input ends.
+  } | hzl_timeout_probe 5 "${ENGINE_USAGE_TIMEOUT}" codex app-server \
+        >"${out}" 2>/dev/null
 }
 
 _engine_usage_codex() {
   local out rows label used at
   out=$(mktemp "${TMPDIR:-/tmp}/hzl-usage.XXXXXX") || return 1
-  hzl_timeout 5 $((ENGINE_USAGE_TIMEOUT + 5)) _engine_usage_codex_ask "${out}"
+  _engine_usage_codex_ask "${out}"
   # One bucket per limit_id; the account-wide `codex` bucket first. A window
   # is named by its length, which is what the interactive /status does too.
   rows=$(jq -r '
@@ -476,108 +464,14 @@ engine_build_launch() {
 # HEINZEL_DRY_RUN leaves behind, and the reason it is not a command string is
 # that a multi-line argument would stop being one argument.
 engine_render_launch() {
-  local spec=$1
-  jq -j -r '.executable, ([0] | implode), (.argv[] | ., ([0] | implode))' \
-    "${spec}"
-}
-
-# --- Agent Driver: the result ----------------------------------------------
-
-# claude's `raw` has two shapes, because its two roles are launched with two
-# output formats: the reviewer's `json` is one object, the executor's
-# `stream-json` is one object per line. Both end in the same object — the one
-# the CLI marks `"type": "result"` — and it is the only one anything here
-# reads. So there is one reader for both, and no caller has to know which role
-# wrote the file it is holding.
-#
-# Twice, because the two readings fail on different files and neither alone is
-# enough:
-#
-#   -s   jq's own parser over the whole file. It reads one object however many
-#        lines it is pretty-printed across, and a JSONL file as the sequence of
-#        objects it is. Right for every file that was written to the end.
-#   -Rs  line by line, dropping with `fromjson?` whatever will not parse. This
-#        is for the file that is still being written, or was cut off at the
-#        deadline: one half-written last line makes the first reading reject
-#        the *whole* input, losing the hundred complete events before it.
-#
-# The fallbacks within each are ordered by how much is known: the result object
-# if there is one, else the last object that parsed — which is what reads the
-# reviewer's single object, and what leaves an interrupted stream naming the
-# session it got as far as. Nothing at all reads as nothing, not as an object
-# of defaults: an empty, absent or unreadable file must stay distinguishable
-# from a run that reported zeroes.
-_engine_claude_result_json() {
-  local raw=$1 out
-  out=$(jq -s -c '(map(select(.type? == "result")) | last) // last // empty' \
-        "${raw}" 2>/dev/null)
-  [ -n "${out}" ] || out=$(jq -R -s -c '
-    [splits("\n") | select(length > 0) | fromjson?]
-    | (map(select(.type? == "result")) | last) // last // empty' \
-    "${raw}" 2>/dev/null)
-  printf '%s' "${out}"
-}
-
-# OpenCode emits one JSON object per line. Read it line by line so a watchdog
-# cut in the middle of the final write does not discard all complete events
-# before it.
-_engine_opencode_events() {
-  jq -R -s -c '[splits("\n") | select(length > 0) | fromjson?]' \
-    "$1" 2>/dev/null || printf '[]'
-}
-
-_engine_opencode_has_error() {
-  _engine_opencode_events "$1" |
-    jq -e 'any(.[]; .type == "error")' >/dev/null 2>&1
-}
-
-_engine_opencode_has_auth_error() {
-  _engine_opencode_events "$1" |
-    jq -e '
-      [.[] | select(.type == "error") | (.error // .)]
-      | any(.[]; tostring
-          | test("auth|unauthorized|forbidden|api[ _-]?key|credential|token expired"; "i"))' \
-      >/dev/null 2>&1
+  hzl_exec_require || return 1
+  "${HZL_EXEC}" render "$1"
 }
 
 # rc 124/137 come from the watchdog and mean the wall clock ran out.
 engine_verdict() {
-  local engine=$1 rc=$2 errfile=$3 rawfile=$4
-  case ${rc} in
-    124|137) printf timeout; return ;;
-  esac
-  if engine_is_auth_error "${engine}" "${rc}" "${errfile}"; then
-    printf auth
-    return
-  fi
-  if [ "${engine}" = opencode ] && [ -r "${rawfile}" ]; then
-    if [ "${rc}" -ne 0 ] && _engine_opencode_has_auth_error "${rawfile}"; then
-      printf auth
-      return
-    fi
-    # The current CLI sets a non-zero process status for an error event. Keep
-    # the event check as well: it is the engine's structured statement, and a
-    # future CLI must not turn one into a collected success by changing only
-    # its process-exit convention.
-    if _engine_opencode_has_error "${rawfile}"; then
-      printf error
-      return
-    fi
-  fi
-  [ "${rc}" -ne 0 ] && { printf error; return; }
-  # claude reports a failed run inside a successful process exit, in the same
-  # result object the telemetry is read from. Reading the file rather than its
-  # last line matters now that the executor streams: the run's own `is_error`
-  # is the one on that object, and a stream is a hundred events that are not
-  # it.
-  if [ "${engine}" = claude ] && [ -r "${rawfile}" ]; then
-    if _engine_claude_result_json "${rawfile}" |
-       jq -e '.is_error == true' >/dev/null 2>&1; then
-      printf error
-      return
-    fi
-  fi
-  printf ok
+  hzl_exec_require || return 1
+  "${HZL_EXEC}" verdict "$1" "$2" "$3" "$4"
 }
 
 # The attempt-level outcome, derived from the same evidence as the verdict and
@@ -595,13 +489,8 @@ engine_verdict() {
 # NOT_STARTED for a dry run — which this mapping never produces, because a dry
 # run has no verdict to map from and engine_run writes that one itself.
 engine_attempt_outcome() {
-  case $1 in
-    ok) printf COLLECTED ;;
-    timeout) printf TIMED_OUT ;;
-    auth) printf AUTH_FAILED ;;
-    error) printf FAILED ;;
-    *) printf UNKNOWN ;;
-  esac
+  hzl_exec_require || return 1
+  "${HZL_EXEC}" outcome "$1"
 }
 
 # --- reading a result, of either schema ------------------------------------
@@ -637,65 +526,6 @@ engine_result_attempt_outcome() {
   engine_attempt_outcome "$(jq -r '.verdict // ""' "$1" 2>/dev/null)"
 }
 
-_engine_result_claude() {
-  local raw=$1 final
-  # Every figure below comes from the one result object, whichever shape the
-  # file has. A stream that ended without one — killed at the deadline, or
-  # still being written — falls back to the last event that parsed, and the
-  # defaults then say plainly what that event did not carry: no cost, no
-  # turns, no text.
-  final=$(_engine_claude_result_json "${raw}")
-  # Nothing parsed at all: an empty, absent or unreadable file. Report nothing
-  # rather than a shape full of defaults, so the caller's own default applies
-  # and `last.txt` is left empty instead of holding the newline an empty
-  # message still renders as.
-  [ -n "${final}" ] || return 0
-  # `model` and `effort` are what we asked for; models_used is what actually
-  # ran. They differ when an inherited setting overrides the request, and
-  # without recording both there is no way to find that out afterwards.
-  printf '%s' "${final}" | jq -c '{
-    session_id: (.session_id // null),
-    cost_usd: (.total_cost_usd // null),
-    turns: (.num_turns // 0),
-    tokens_in: (.usage.input_tokens // 0),
-    tokens_out: (.usage.output_tokens // 0),
-    models_used: ((.modelUsage // {}) | keys),
-    text: (.result // "")
-  }' 2>/dev/null || printf '{}'
-}
-
-_engine_result_codex() {
-  local raw=$1
-  # codex emits JSONL events; there is no USD figure in its telemetry.
-  jq -s -c '{
-    session_id: (map(.session_id // empty) | last // null),
-    cost_usd: null,
-    turns: 0,
-    tokens_in: (map(.usage.input_tokens // empty) | last // 0),
-    tokens_out: (map(.usage.output_tokens // empty) | last // 0),
-    models_used: [],
-    text: ""
-  }' "${raw}" 2>/dev/null || printf '{}'
-}
-
-_engine_result_opencode() {
-  local raw=$1
-  _engine_opencode_events "${raw}" | jq -c '
-    . as $events
-    | [$events[] | select(.type == "step_finish") | .part] as $steps
-    | {
-        session_id: ([$events[] | .sessionID // empty] | last // null),
-        cost_usd: (if ($steps | length) == 0 then null
-                   else ([$steps[] | .cost // 0] | add) end),
-        turns: ($steps | length),
-        tokens_in: ([$steps[] | .tokens.input // 0] | add // 0),
-        tokens_out: ([$steps[] | .tokens.output // 0] | add // 0),
-        models_used: [],
-        text: ([$events[] | select(.type == "text") | .part.text // empty]
-               | last // "")
-      }' 2>/dev/null || printf '{}'
-}
-
 # Turn what the runtime collected into the engine-independent result. The
 # engine is read from the launch spec rather than passed again, so the two
 # cannot disagree about which engine produced the output being read. The
@@ -703,96 +533,9 @@ _engine_result_opencode() {
 # is the caller's choice of where this ran, and it defaults to `local` for the
 # three-argument callers that predate the field.
 engine_normalize_result() {
-  local spec=$1 collected=$2 result=$3 backend=${4:-local}
-  local engine role model effort rc duration rawfile errfile lastfile
-  local parsed="" verdict outcome native
-
-  engine=$(jq -r '.engine' "${spec}" 2>/dev/null) || return 1
-  role=$(jq -r '.role' "${spec}")
-  model=$(jq -r '.model // ""' "${spec}")
-  effort=$(jq -r '.effort // ""' "${spec}")
-  rc=$(jq -r '.exit_code' "${collected}" 2>/dev/null) || return 1
-  duration=$(jq -r '.duration_sec' "${collected}")
-  rawfile=$(jq -r '.stdout_path' "${collected}")
-  errfile=$(jq -r '.stderr_path' "${collected}")
-  lastfile=$(jq -r '.output_path' "${collected}")
-
-  case ${engine} in
-    claude)
-      parsed=$(_engine_result_claude "${rawfile}")
-      # claude reports its final message inside its own JSON; codex was told to
-      # write it out itself. Both end up in the same file.
-      #
-      # A message that exists is written with the trailing newline a text file
-      # ends in; no message writes no file. Not `jq -r`, which would end an
-      # absent message with a newline too, and leave `text` as "\n" — a run
-      # cut off before it said anything would then be recorded as having said
-      # one blank line, which is not the same thing as having said nothing.
-      printf '%s' "${parsed}" |
-        jq -j '(.text // "") | if . == "" then . else . + "\n" end' \
-        >"${lastfile}" 2>/dev/null
-      ;;
-    codex)
-      parsed=$(_engine_result_codex "${rawfile}")
-      ;;
-    opencode)
-      parsed=$(_engine_result_opencode "${rawfile}")
-      # Unlike codex, OpenCode has no output-file flag. Put its final completed
-      # text part in the common location before the engine-independent record
-      # is assembled.
-      printf '%s' "${parsed}" |
-        jq -j '(.text // "") | if . == "" then . else . + "\n" end' \
-        >"${lastfile}" 2>/dev/null
-      ;;
-  esac
-  [ -n "${parsed}" ] || parsed='{}'
-
-  verdict=$(engine_verdict "${engine}" "${rc}" "${errfile}" "${rawfile}")
-  outcome=$(engine_attempt_outcome "${verdict}")
-
-  # 124, 137 and 125 are Heinzel's own codes, not the command's (SPEC §9.3):
-  # the watchdog ended it, or refused to start it. `exit_code` keeps carrying
-  # them because a decade of readers expect a number there, and
-  # `native_exit_code` says plainly that the process's own status is not known.
-  # The same field is null for a backend whose agent settles without a process
-  # exit at all, which is the case it exists for (§13.7).
-  case ${rc} in
-    124|137|125) native=null ;;
-    *) native=${rc} ;;
-  esac
-
-  # v2. Every v1 field is still here, in the same place, with the same meaning:
-  # the four additions are additions, and a reader that knows only v1 cannot
-  # tell the difference (§13.7).
-  #
-  # `runtime_state` is `EXITED` for every batch run, whatever the backend: the
-  # batch contract is run-to-completion, so a collected record existing at all
-  # is the observation that the process terminated. The states that are not
-  # `EXITED` — `SETTLED`, `LOST`, `UNREACHABLE` (§9.1) — belong to an agent that
-  # outlives the call that started it, and arrive with the backend that has one.
-  jq -n \
-    --argjson schema_version "${HEINZEL_RESULT_SCHEMA}" \
-    --arg backend "${backend}" \
-    --arg engine "${engine}" --arg role "${role}" \
-    --arg model "${model}" --arg effort "${effort}" \
-    --argjson exit_code "${rc}" --arg verdict "${verdict}" \
-    --argjson native_exit_code "${native}" \
-    --arg attempt_outcome "${outcome}" \
-    --argjson duration_sec "${duration}" \
-    --argjson parsed "${parsed}" \
-    --rawfile text "${lastfile}" \
-    '{schema_version: $schema_version,
-      engine: $engine, role: $role, model: $model, effort: $effort,
-      models_used: ($parsed.models_used // []),
-      exit_code: $exit_code, verdict: $verdict, duration_sec: $duration_sec,
-      session_id: ($parsed.session_id // null),
-      cost_usd: ($parsed.cost_usd // null),
-      tokens_in: ($parsed.tokens_in // 0), tokens_out: ($parsed.tokens_out // 0),
-      turns: ($parsed.turns // 0), text: $text,
-      backend: $backend, runtime_state: "EXITED",
-      native_exit_code: $native_exit_code,
-      attempt_outcome: $attempt_outcome}' >"${result}.tmp" || return 1
-  mv "${result}.tmp" "${result}"
+  hzl_exec_require || return 1
+  HEINZEL_RESULT_SCHEMA="${HEINZEL_RESULT_SCHEMA}" \
+    "${HZL_EXEC}" normalize "$1" "$2" "$3" "${4:-local}"
 }
 
 # --- the facade ------------------------------------------------------------

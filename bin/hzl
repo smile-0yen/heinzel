@@ -51,7 +51,7 @@ export PATH="${PATH}:/usr/local/bin:/opt/homebrew/bin:${HOME}/.local/bin"
 # shellcheck source=lib/runtimes.sh
 . "${HEINZEL_ROOT}/lib/runtimes.sh"
 # The workspace identity, which the lock file names need, and the short backlog
-# lock. A human typing `hzl done` and a run merging its worksheet are two
+# lock. A human typing `hzl task done` and a run merging its worksheet are two
 # writers of one ledger, and this is the side of that pair that used to write
 # with nothing held at all.
 # shellcheck source=lib/claims.sh
@@ -949,9 +949,20 @@ next_in_progress() {
 }
 
 cmd_next() {
-  local b row
+  local b row json=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --json) json=1 ;;
+      *) die "next: unknown option $1" ;;
+    esac
+    shift
+  done
   b=$(need_backlog) || exit 1
   row=$(backlog_next_row "${b}")
+  if [ "${json}" = 1 ]; then
+    next_json "${b}" "${row}"
+    return 0
+  fi
   # `backlog_next_row` only ever returns a `[ ]`, so "empty" here is both "the
   # ledger is finished" and "a run has claimed everything that was left".
   # Reporting the first when the second is true is how a `hzl work` that says
@@ -982,8 +993,38 @@ cmd_next() {
   printf '\n'
 }
 
+# `hzl next --json`: the next row with its notes and the checkout it resolves
+# to, or `next: null` and the rows a run is holding - the same two answers the
+# text form gives, so a script is not told "nothing to do" about a ledger a run
+# is in the middle of.
+next_json() { # backlog row
+  local b=$1 row=$2 held nid nws nwd
+  held=$(todo_rows_json "$(backlog_scan "${b}" 2>/dev/null | awk -F'\t' '$3 == "~"')")
+  if [ -z "${row}" ]; then
+    jq -n --argjson in_progress "${held}" '{next: null, in_progress: $in_progress}'
+    return 0
+  fi
+  nid=$(printf '%s' "${row}" | cut -f4)
+  nws=$(task_workspace_name "$(printf '%s' "${row}" | cut -f6)")
+  nwd=$(workdir_path_in "${nws}" "$(cur_workdirs)") || nwd=""
+  jq -n \
+    --arg id "${nid}" \
+    --arg priority "$(printf '%s' "${row}" | cut -f2)" \
+    --arg workspace "${nws}" --arg workdir "${nwd}" \
+    --arg text "$(printf '%s' "${row}" | cut -f5)" \
+    --arg notes "$(backlog_notes_for_line "${b}" "$(printf '%s' "${row}" | cut -f1)")" \
+    --argjson in_progress "${held}" \
+    '{next: {id: (if $id == "" then null else $id end),
+             priority: ($priority | tonumber? // $priority),
+             workspace: $workspace,
+             workdir: (if $workdir == "" then null else $workdir end),
+             text: $text,
+             notes: ($notes | split("\n") | map(sub("^[ \t]+"; "")) | map(select(length > 0)))},
+      in_progress: $in_progress}'
+}
+
 # Every `[ ]` task, in the order runs take them - the queued counterpart to
-# `hzl take` with no id, which lists what is blocked. Read from the backlog
+# `hzl task list`, which lists what is blocked. Read from the backlog
 # only, through `backlog_todo_rows`, so this agrees with what `hzl next` picks
 # up first and what `hzl status` counts as todo.
 # --- one task, and what became of it ---------------------------------------
@@ -1049,7 +1090,7 @@ task_run_json() { # id run-id day exec-dir marker
 
 # One line per run that worked on a task - when it ran, what it left the task
 # as, its review verdict, the sentence it wrote, and where to read the rest -
-# under a header the caller already printed. `hzl task` and `hzl history` both
+# under a header the caller already printed. `hzl task <id>` and `hzl task history` both
 # show this; the header differs with what else is on the page, so it stays
 # with each caller rather than moving in here.
 task_print_runs() { # id rows full
@@ -1100,18 +1141,43 @@ ${rows}
 EOF
 }
 
+# `hzl task` is one noun with its views and its verbs under it. The first word
+# is either one of the verbs below or an id; the two cannot collide, because an
+# id is `h-NNNN` and the verbs are words. Everything about one task lives here:
+# where it stands, what runs did with it, the prompt that hands it to a person,
+# the three ways a person moves it by hand, and - `history` - every task that
+# was closed, which is the same question asked of the whole ledger.
 cmd_task() {
-  local b id="" json=0 full=0
+  local b
+  case ${1:-} in
+    list)
+      shift
+      [ $# -eq 0 ] || die "task list: unknown option $1"
+      b=$(need_backlog) || exit 1
+      task_list "${b}"
+      ;;
+    take) shift; task_take "$@" ;;
+    done) shift; cmd_done "$@" ;;
+    block) shift; cmd_block "$@" ;;
+    unblock) shift; cmd_unblock "$@" ;;
+    history) shift; cmd_history "$@" ;;
+    *) task_show "$@" ;;
+  esac
+}
+
+task_show() { # id [--full|--logs|--json]
+  local b id="" json=0 full=0 logs=0
   while [ $# -gt 0 ]; do
     case $1 in
       --json) json=1 ;;
       --full) full=1 ;;
+      --logs) logs=1 ;;
       -*) die "task: unknown option $1" ;;
       *) [ -z "${id}" ] || die "task: one id at a time"; id=$1 ;;
     esac
     shift
   done
-  [ -n "${id}" ] || die "task: which task? 'hzl task <id>', or 'hzl history --oneline' to list them"
+  [ -n "${id}" ] || die "task: which task? 'hzl task list' shows what is blocked, 'hzl todo' the queue, 'hzl task history --oneline' what is closed"
   b=$(need_backlog) || exit 1
 
   local f text marker lineno notes steps="" ws rows
@@ -1127,6 +1193,13 @@ cmd_task() {
     [ -n "${steps}" ] && [ -r "${steps}" ] || steps=""
   fi
   rows=$(task_run_rows "${id}")
+
+  if [ "${logs}" = 1 ]; then
+    [ "${json}" = 0 ] ||
+      die "task: --logs prints the logs themselves; --json carries their paths under .runs[].log"
+    task_print_logs "${id}" "${rows}"
+    return 0
+  fi
 
   if [ "${json}" = 1 ]; then
     local runs="[]" row
@@ -1174,7 +1247,7 @@ EOF
   task_print_runs "${id}" "${rows}" "${full}"
 
   printf '\n'
-  [ "${full}" = 1 ] || dim "  'hzl task ${id} --full' adds what each run wrote, and 'hzl logs ${id}' the whole log"
+  [ "${full}" = 1 ] || dim "  'hzl task ${id} --full' adds what each run wrote, and 'hzl task ${id} --logs' the whole log"
   printf '\n'
   return 0
 }
@@ -1188,7 +1261,7 @@ EOF
 # and what each run that worked on it did and wrote.
 #
 # Decision: "finished" means `[x]` only. A blocked task is already listed by
-# `hzl take`, and belongs there, not here.
+# `hzl task list`, and belongs there, not here.
 #
 # Decision: the "-p" part is what `hzl task --full` already shows - the
 # findings and `exec-*/last.txt` - not a diff. `review-HHMMSS/changeset.patch`
@@ -1255,7 +1328,7 @@ history_print_entries() { # rows
     if [ "${iso}" = "-" ]; then closed_disp="unknown"; else closed_disp=${iso//T/ }; fi
     case ${by} in
       -) by_disp="not recorded" ;;
-      hand) by_disp="hand (hzl done)" ;;
+      hand) by_disp="hand (hzl task done)" ;;
       *) by_disp=${by} ;;
     esac
     if [ "${id}" = "-" ]; then
@@ -1297,19 +1370,20 @@ history_print() { # rows oneline
 }
 
 cmd_history() {
-  local b n=0 oneline=0 nopager=0
+  local b n=0 oneline=0 nopager=0 json=0
   while [ $# -gt 0 ]; do
     case $1 in
+      --json) json=1 ;;
       -n)
         case ${2-} in
-          ''|*[!0-9]*|0) die "history: -n takes a positive number" ;;
+          ''|*[!0-9]*|0) die "task history: -n takes a positive number" ;;
         esac
         n=$2
         shift
         ;;
       --oneline) oneline=1 ;;
       --no-pager) nopager=1 ;;
-      *) die "history: unknown option $1" ;;
+      *) die "task history: unknown option $1" ;;
     esac
     shift
   done
@@ -1318,10 +1392,14 @@ cmd_history() {
   local rows
   rows=$(history_rows "${b}" | sort -t"$(printf '\t')" -k1,1r -k2,2r)
   if [ -z "${rows}" ]; then
-    say "nothing has been closed yet."
+    if [ "${json}" = 1 ]; then printf '[]\n'; else say "nothing has been closed yet."; fi
     return 0
   fi
   [ "${n}" -gt 0 ] && rows=$(printf '%s\n' "${rows}" | head -n "${n}")
+  if [ "${json}" = 1 ]; then
+    history_json "${rows}"
+    return 0
+  fi
 
   local pager=${PAGER-less} use_pager=0
   if [ -t 1 ] && [ "${nopager}" != 1 ]; then
@@ -1339,11 +1417,70 @@ cmd_history() {
   return 0
 }
 
+# `hzl task history --json`: one object per closed task, in the same order and with
+# the same run entries `hzl task --json` gives, so a script reading the ledger
+# and a script reading one task see one shape. The run index is built once
+# here for the same reason it is in `history_print_entries`.
+history_json() { # rows
+  local iso id lineno file by dir text ws idx runs notes
+  idx=$(task_run_index)
+  while IFS='	' read -r iso id lineno file by dir text; do
+    [ -n "${lineno}" ] || continue
+    ws=$(task_workspace_name "$([ "${dir}" = "-" ] && printf '' || printf '%s' "${dir}")")
+    notes=$(backlog_notes_for_line "${file}" "${lineno}")
+    runs="[]"
+    if [ "${id}" != "-" ]; then
+      runs=$(task_run_rows "${id}" "${idx}" |
+        while IFS='	' read -r run_id day exec_dir mk; do
+          [ -n "${run_id}" ] || continue
+          task_run_json "${id}" "${run_id}" "${day}" "${exec_dir}" "${mk}"
+        done | jq -s -c '.')
+    fi
+    jq -n -c \
+      --arg closed "${iso}" --arg id "${id}" --arg by "${by}" \
+      --arg workspace "${ws}" --arg file "${file}" --arg text "${text}" \
+      --arg notes "${notes}" --argjson runs "${runs}" \
+      '{closed_at: (if $closed == "-" then null else $closed end),
+        id: (if $id == "-" then null else $id end),
+        by: (if $by == "-" then null else $by end),
+        workspace: $workspace, file: $file, text: $text,
+        notes: ($notes | split("\n") | map(sub("^[ \t]+"; "")) | map(select(length > 0))),
+        runs: $runs}'
+  done <<EOF
+$1
+EOF
+}
+
+
+# A todo row, as JSON: the same fields `hzl todo` prints, under names a script
+# can read. Shared with `hzl next`, whose in-progress list is the same rows
+# with a different marker.
+todo_rows_json() { # rows
+  printf '%s\n' "$1" | jq -R -s -c '
+    split("\n") | map(select(length > 0)) | map(split("\t"))
+    | map({priority: (.[1] | tonumber? // .[1]),
+           id: (if .[3] == "" then null else .[3] end),
+           workspace: (if .[5] == "" then null else .[5] end),
+           text: .[4]})'
+}
+
 cmd_todo() {
-  local b rows n held
-  [ $# -eq 0 ] || die "todo: unknown option $1"
+  local b rows n held json=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --json) json=1 ;;
+      *) die "todo: unknown option $1" ;;
+    esac
+    shift
+  done
   b=$(need_backlog) || exit 1
   rows=$(backlog_todo_rows "${b}")
+  held=$(backlog_count "${b}" "~")
+  if [ "${json}" = 1 ]; then
+    jq -n --argjson todo "$(todo_rows_json "${rows}")" --argjson in_progress "${held}" \
+      '{todo: $todo, in_progress: $in_progress}'
+    return 0
+  fi
   if [ -z "${rows}" ]; then
     say "nothing to do - no todo items."
   else
@@ -1359,7 +1496,6 @@ cmd_todo() {
     printf '\n'
     dim "  'hzl next' shows the first of these with its notes and workspace"
   fi
-  held=$(backlog_count "${b}" "~")
   if [ "${held}" -gt 0 ]; then
     dim "  ${held} more in progress, held by a run - 'hzl next' says which"
   fi
@@ -1371,32 +1507,23 @@ cmd_todo() {
 #
 # Read across the live ledger, not out of the backlog: after a sweep the blocked
 # tasks are in the blocked file, and this command exists for exactly them.
-cmd_take() {
-  local b id=${1:-}
+# `hzl task take <id>` is how a blocked task is handed to a person: the prompt
+# to paste into an interactive session, and - with --steps - the form that
+# starts its instructions first. It was `hzl take`, a verb of its own beside
+# `hzl task`, and the two printed the same task twice in two layouts; it is a
+# view of the task now, next to the others.
+task_take() { # id [--steps]
+  local b id="" want_steps=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --steps) want_steps=1 ;;
+      -*) die "task take: unknown option $1" ;;
+      *) [ -z "${id}" ] || die "task take: one id at a time"; id=$1 ;;
+    esac
+    shift
+  done
+  [ -n "${id}" ] || die "task take: which task? 'hzl task list' shows what is blocked"
   b=$(need_backlog) || exit 1
-  if [ -z "${id}" ]; then
-    local n
-    n=$(ledger_count "${b}" "!")
-    if [ "${n}" -eq 0 ]; then
-      say "nothing is blocked."
-      return 0
-    fi
-    printf '\n'
-    say "blocked, waiting for you:"
-    printf '\n'
-    # The workspace, when a task names one. Only then: with one checkout
-    # configured every line would carry the same word, and the column would be
-    # noise in the one place a person is trying to read a list quickly.
-    ledger_scan_live "${b}" |
-      awk -F'\t' '$3 == "!" {
-        printf "  P%-3s %-8s %s%s\n", $2, $4, ($6 == "" ? "" : "[" $6 "] "), $5
-      }'
-    printf '\n'
-    dim "  'hzl take <id>' prints a prompt for an interactive session"
-    printf '\n'
-    return 0
-  fi
-
   local f text marker lineno steps
   # The file the line is in, so that the notes under it are read from the same
   # place the text was - and so the prompt names the file a person can open.
@@ -1405,7 +1532,11 @@ cmd_take() {
   [ -n "${text}" ] || { err "no such id: ${id}"; exit 3; }
   marker=$(backlog_marker_of_id "${f}" "${id}")
   lineno=$(backlog_line_of_id "${f}" "${id}")
-
+  if [ "${want_steps}" = 1 ]; then
+    [ "${marker}" = "!" ] ||
+      die "${id} is not blocked - steps are for the tasks that are waiting on you"
+    take_start_steps "${b}" "${id}" || exit 1
+  fi
   # Which checkout the task is about, and the `cd` that gets there. This is the
   # first thing a person needs and the easiest to get wrong: a task pasted into
   # a session opened in the wrong tree is worked on the wrong tree, and the
@@ -1414,7 +1545,6 @@ cmd_take() {
   tws=$(task_workspace_name "$(ledger_scan_live "${b}" 2>/dev/null |
     awk -F'\t' -v want="${id}" '$4 == want {print $6; exit}')")
   twd=$(workdir_path_in "${tws}" "$(cur_workdirs)") || twd=""
-
   printf '\n--- paste this into an interactive session ---\n\n'
   if [ -n "${twd}" ]; then
     printf 'Work in %s (workspace %s):\n\n    cd %s\n\n' "${twd}" "${tws}" "${twd}"
@@ -1437,14 +1567,78 @@ cmd_take() {
       printf '\nThis was blocked by an unattended run, which means it needed a\n'
       printf 'judgement call, a privilege, or an irreversible action it would not take\n'
       printf 'on its own. It left no instructions. Start them with\n\n'
-      printf '    hzl steps %s\n\n' "${id}"
+      printf '    hzl task take %s --steps\n\n' "${id}"
       printf 'which writes a form to fill in at %s\n' "${steps}"
       printf 'Then work out what the task needs, do it with me, and put what you did\n'
       printf 'in that form, so that the next person - or the next block - starts from it.\n'
     fi
   fi
-  printf '\nWhen it is finished, close it out with:  hzl done %s "<what changed>"\n' "${id}"
+  printf '\nWhen it is finished, close it out with:  hzl task done %s "<what changed>"\n' "${id}"
   printf '\n--- end ---\n\n'
+}
+
+# `hzl task list`: everything blocked, one line each, and under each whether it
+# has steps yet. The workspace is shown only when a task names one: with a
+# single checkout configured every line would carry the same word, and the
+# column would be noise in the one place a person is trying to read a list
+# quickly. (Blocked only, on purpose: the queue is `hzl todo`, the closed are
+# `hzl task history`, and this is the third set - the one waiting on a person.)
+task_list() { # backlog
+  local b=$1 n lineno prio marker id text ws comment roles sf
+  n=$(ledger_count "${b}" "!")
+  if [ "${n}" -eq 0 ]; then
+    say "nothing is blocked."
+    return 0
+  fi
+  printf '\n'
+  say "blocked, waiting for you:"
+  printf '\n'
+  while IFS='	' read -r lineno prio marker id text ws comment roles; do
+    [ -n "${lineno}" ] || continue
+    printf '  P%-3s %-8s %s%s\n' "${prio}" "${id}" "${ws:+[${ws}] }" "${text}"
+    sf=$(ledger_steps_file "${b}" "${id}" 2>/dev/null) || sf=""
+    if [ -n "${sf}" ] && [ -r "${sf}" ]; then
+      dim "           steps: ${sf}"
+    else
+      dim "           no steps yet - 'hzl task take ${id} --steps' starts a form"
+    fi
+  done <<EOF
+$(ledger_scan_live "${b}" | awk -F'\t' '$3 == "!"')
+EOF
+  printf '\n'
+  dim "  'hzl task take <id>' prints a prompt for an interactive session"
+  printf '\n'
+}
+
+# Write the form a person fills in for a blocked task that has no instructions
+# yet. This was the whole of `hzl steps <id>`; `hzl task take <id>` goes on to
+# print the prompt, which now carries the form it just wrote.
+take_start_steps() { # backlog id
+  require_not_root
+  local b=$1 id=$2 reason steps
+  steps=$(ledger_steps_file "${b}" "${id}") || die "could not name a steps file for ${id}"
+  if [ -r "${steps}" ]; then
+    say "${id} already has steps:"
+    printf '  %s\n' "${steps}"
+    return 0
+  fi
+  # A file that is there and cannot be read - wrong mode after a hand edit,
+  # written under another account - is still somebody's, and is not written
+  # over.
+  if [ -e "${steps}" ]; then
+    err "${id} has a steps file that cannot be read: ${steps}"
+    err "  fix its permissions rather than writing over it"
+    return 1
+  fi
+  reason=$(ledger_blocked_rows "${b}" | awk -F'\t' -v i="${id}" '$2 == i {print $3; exit}')
+  mkdir -p "$(dirname "${steps}")" || die "could not create $(dirname "${steps}")"
+  # shellcheck disable=SC2059
+  printf "${STEPS_TEMPLATE}" "${id}" "${reason}" "${id}" "${id}" >"${steps}" ||
+    die "could not write ${steps}"
+  good "${id}: a form to fill in is waiting at"
+  printf '  %s\n' "${steps}"
+  dim "  replace each <angle bracket> with what a person who was not here should do"
+  return 0
 }
 
 # Closing a task by hand is two mutations, the marker and the note, and they go
@@ -1463,7 +1657,7 @@ done_with_note() { # backlog id note
 #
 # Which is why a sweep that failed is reported rather than swallowed. Status 5
 # is the half-done state — the marker moved, the task did not — and it is not a
-# rollback, for the same reason `hzl done`'s status 4 is not: the marker is the
+# rollback, for the same reason `hzl task done`'s status 4 is not: the marker is the
 # true half of the record, and putting it back to hide the half that failed
 # would discard both. The caller says which half stands (§8.1).
 set_state_and_sweep() { # backlog id marker meta
@@ -1475,7 +1669,7 @@ set_state_and_sweep() { # backlog id marker meta
 cmd_done() {
   require_not_root
   local b id=${1:-} note=${2:-}
-  [ -n "${id}" ] || die "usage: hzl done <id> [note]"
+  [ -n "${id}" ] || die "usage: hzl task done <id> [note]"
   b=$(need_backlog) || exit 1
   with_backlog_lock done_with_note "${b}" "${id}" "${note}"
   case $? in
@@ -1484,7 +1678,7 @@ cmd_done() {
     4) good "${id} done."
        err "but the note was not written to $(ledger_file_of_id "${b}" "${id}")"
        dim "  the task is closed; the reason it closed is not recorded"
-       dim "  add it by hand, or re-run: hzl done ${id} \"${note}\""
+       dim "  add it by hand, or re-run: hzl task done ${id} \"${note}\""
        exit 4 ;;
     *) die "could not update ${b}" ;;
   esac
@@ -1494,7 +1688,7 @@ cmd_done() {
 cmd_block() {
   require_not_root
   local b id=${1:-} reason=${2:-}
-  [ -n "${id}" ] || die "usage: hzl block <id> <reason>"
+  [ -n "${id}" ] || die "usage: hzl task block <id> <reason>"
   [ -n "${reason}" ] || die "a reason is required - it is what tells you what to do later"
   b=$(need_backlog) || exit 1
   with_backlog_lock set_state_and_sweep "${b}" "${id}" "!" "blocked:$(iso_at) reason:${reason}"
@@ -1510,13 +1704,13 @@ cmd_block() {
   esac
   good "${id} blocked: ${reason}"
   dim "  it is in $(ledger_blocked_file "${b}") now, with the rest of what needs you"
-  dim "  'hzl steps ${id}' starts the instructions, for when one line is not enough"
+  dim "  'hzl task take ${id} --steps' starts the instructions, for when one line is not enough"
 }
 
 cmd_unblock() {
   require_not_root
   local b id=${1:-} steps
-  [ -n "${id}" ] || die "usage: hzl unblock <id>"
+  [ -n "${id}" ] || die "usage: hzl task unblock <id>"
   b=$(need_backlog) || exit 1
   steps=$(ledger_steps_file "${b}" "${id}")
   with_backlog_lock set_state_and_sweep "${b}" "${id}" " " ""
@@ -1535,71 +1729,6 @@ cmd_unblock() {
   # this one; nothing reads it while the task is not `[!]`.
   [ -n "${steps}" ] && [ -r "${steps}" ] &&
     dim "  what it asked of you is still in ${steps}"
-  return 0
-}
-
-# The instructions a blocked task asks for, for the tasks that have none: a
-# block written by `hzl block`, or by a run from before the steps file existed,
-# carries one line of reason and nothing more. One line can say what to decide.
-# It cannot say which page to open, what to type, or how to tell it worked.
-#
-# With no id this says which blocked tasks are still missing theirs. With an id
-# it creates the file from the skeleton and prints the path. It never writes
-# over a file that is there: once it exists, it belongs to whoever wrote it.
-cmd_steps() {
-  require_not_root
-  local b id=${1:-} rows row n reason steps
-  b=$(need_backlog) || exit 1
-  rows=$(ledger_blocked_rows "${b}")
-
-  if [ -z "${id}" ]; then
-    n=$(printf '%s' "${rows}" | grep -c .)
-    if [ "${n}" -eq 0 ]; then
-      say "nothing is blocked, so nothing is waiting for steps."
-      return 0
-    fi
-    printf '\n'
-    say "what each blocked task asks of you:"
-    printf '\n'
-    printf '%s\n' "${rows}" |
-      awk -F'\t' '{ if ($5 != "") s = $5; else s = "no steps yet - '\''hzl steps " $2 "'\'' starts one"
-                    printf "  %-8s %s\n           %s\n", $2, $4, s }'
-    printf '\n'
-    return 0
-  fi
-
-  row=$(printf '%s\n' "${rows}" | awk -F'\t' -v i="${id}" '$2 == i' | head -1)
-  if [ -z "${row}" ]; then
-    ledger_file_of_id "${b}" "${id}" >/dev/null 2>&1 ||
-      { err "no such id: ${id}"; exit 3; }
-    die "${id} is not blocked - steps are for the tasks that are waiting on you"
-  fi
-
-  steps=$(printf '%s' "${row}" | cut -f5)
-  if [ -n "${steps}" ]; then
-    say "${id} already has steps:"
-    printf '  %s\n' "${steps}"
-    return 0
-  fi
-
-  reason=$(printf '%s' "${row}" | cut -f3)
-  steps=$(ledger_steps_file "${b}" "${id}") || die "could not name a steps file for ${id}"
-  # The row above says "no steps" when the file is not *readable*; a file that
-  # is there and cannot be read - wrong mode after a hand edit, written under
-  # another account - is still somebody's, and is not written over.
-  if [ -e "${steps}" ]; then
-    err "${id} has a steps file that cannot be read: ${steps}"
-    err "  fix its permissions rather than writing over it"
-    exit 1
-  fi
-  mkdir -p "$(dirname "${steps}")" || die "could not create $(dirname "${steps}")"
-  # shellcheck disable=SC2059
-  printf "${STEPS_TEMPLATE}" "${id}" "${reason}" "${id}" "${id}" >"${steps}" ||
-    die "could not write ${steps}"
-  good "${id}: a form to fill in is waiting at"
-  printf '  %s\n' "${steps}"
-  dim "  replace each <angle bracket> with what a person who was not here should do"
-  dim "  'hzl take ${id}' pastes the task and the steps into an interactive session"
   return 0
 }
 
@@ -1701,8 +1830,8 @@ cmd_report() {
     printf '%s\n' "${blocked}" |
       awk -F'\t' '{printf "  %-8s %-11s %s\n           %s\n", $2, $1, $4, $3
                    if ($5 != "") printf "           steps: %s\n", $5
-                   else printf "           steps: none written - '\''hzl steps %s'\'' starts one\n", $2}'
-    dim "  'hzl take <id>' prints the task and its steps for an interactive session"
+                   else printf "           steps: none written - '\''hzl task take %s --steps'\'' starts one\n", $2}'
+    dim "  'hzl task take <id>' prints the task and its steps for an interactive session"
   fi
 
   printf '\n'
@@ -1731,38 +1860,20 @@ cmd_runnow() {
 }
 
 cmd_logs() {
-  local follow=0 n=1 id=""
+  local follow=0 n=1
   while [ $# -gt 0 ]; do
     case $1 in
       -f) follow=1 ;;
       -n) n=${2:-1}; shift ;;
       -*) die "logs: unknown option $1" ;;
-      # A task id, not an option: "which runs worked on this, and what do their
-      # logs say" is the question a blocked task raises, and answering it by
-      # hand means reading the ledger for a run id and then globbing for a file.
-      *[a-zA-Z]-[0-9]*) [ -z "${id}" ] || die "logs: one id at a time"; id=$1 ;;
-      *) die "logs: unknown argument $1" ;;
+      # Not a task id. This command is organised by run; the question "which
+      # runs worked on this task, and what do their logs say" is organised by
+      # task and is answered there, by `hzl task <id> --logs`. Reading an id
+      # here by its shape used to be how the two got confused.
+      *) die "logs: unknown argument $1 - the logs of every run that worked on one task are 'hzl task $1 --logs'" ;;
     esac
     shift
   done
-
-  if [ -n "${id}" ]; then
-    local rows day exec_dir run_id logf found=0
-    rows=$(task_run_rows "${id}")
-    [ -n "${rows}" ] || die "no run has worked on ${id} - 'hzl task ${id}' says where it stands"
-    while IFS='	' read -r run_id day exec_dir _; do
-      [ -n "${run_id}" ] || continue
-      logf="${LOG_DIR}/${day}/run-${exec_dir##*/exec-}.log"
-      [ -r "${logf}" ] || continue
-      found=1
-      printf '\n=== %s (run %s)\n' "${logf}" "${run_id}"
-      cat "${logf}"
-    done <<EOF
-${rows}
-EOF
-    [ "${found}" = 1 ] || die "the runs that worked on ${id} have no logs left"
-    return 0
-  fi
   # Plain glob, sorted by mtime. Piping through xargs would let it split the
   # list and destroy the ordering.
   local latest
@@ -1783,6 +1894,28 @@ EOF
   fi
 }
 
+# The whole log of every run that worked on one task, in order. This was
+# `hzl logs <id>`; it is `hzl task <id> --logs` because the question is about
+# the task, and because `hzl logs` deciding by the shape of its argument
+# whether it had been given an option or an id was the kind of overloading
+# that reads fine until the day it does not.
+task_print_logs() { # id rows
+  local id=$1 rows=$2 run_id day exec_dir logf found=0
+  [ -n "${rows}" ] || die "no run has worked on ${id} - 'hzl task ${id}' says where it stands"
+  while IFS='	' read -r run_id day exec_dir _; do
+    [ -n "${run_id}" ] || continue
+    logf="${LOG_DIR}/${day}/run-${exec_dir##*/exec-}.log"
+    [ -r "${logf}" ] || continue
+    found=1
+    printf '\n=== %s (run %s)\n' "${logf}" "${run_id}"
+    cat "${logf}"
+  done <<EOF
+${rows}
+EOF
+  [ "${found}" = 1 ] || die "the runs that worked on ${id} have no logs left"
+  return 0
+}
+
 # --- doctor ----------------------------------------------------------------
 
 DOC_PROBLEMS=0
@@ -1792,7 +1925,7 @@ doc_bad()  { printf '  %s %s\n' "$(bad XX)" "$*"; DOC_PROBLEMS=$((DOC_PROBLEMS +
 
 cmd_doctor() {
   printf '\n1. prerequisites\n'
-  local c role enabled engine seen_engines=""
+  local c jqv role enabled engine seen_engines=""
   # Reported, not required: `hzl web` is a window a person opens, and every
   # unattended path in this program runs without it. A machine that never
   # serves the dashboard is not misconfigured for lacking python3.
@@ -1801,7 +1934,60 @@ cmd_doctor() {
   else
     doc_warn "python3 not found - 'hzl web' will not start (xcode-select --install). Nothing else needs it"
   fi
-  for c in jq caffeinate pmset launchctl lockf; do
+  # jq gets its own check rather than a place in the loop below, because it is
+  # the only one of these that macOS does not ship: the others arrive with the
+  # OS and their behaviour is pinned to it, while jq comes from Homebrew or by
+  # hand and can differ between two otherwise identical machines. See
+  # HEINZEL_JQ_MIN in lib/common.sh for what the floor means.
+  if have jq; then
+    jqv=$(jq_version)
+    jq_version_at_least "${jqv}" "${HEINZEL_JQ_MIN}"
+    case $? in
+      0) doc_ok "jq ${jqv}" ;;
+      1) doc_bad "jq ${jqv} is older than ${HEINZEL_JQ_MIN}, which is the oldest this build is written against (brew upgrade jq)" ;;
+      # Unreadable is reported and not counted against the machine: a version
+      # string this build cannot parse is a gap here, not a fault there, and a
+      # working install must not be condemned by it.
+      *) doc_warn "jq present, version unreadable ($(jq --version 2>&1 | head -1)) - wanted ${HEINZEL_JQ_MIN} or newer" ;;
+    esac
+  else
+    doc_bad "jq is missing"
+  fi
+  # bin/hzl-exec is not optional and not a fallback: without it every engine
+  # launch and every usage probe refuses. It is checked here, rather than only
+  # at the moment of use, so that a half-installed machine can be found while
+  # somebody is still looking at it.
+  local xv gv
+  if hzl_exec_present; then
+    xv=$(hzl_exec_version)
+    if [ -z "${xv}" ]; then
+      doc_bad "bin/hzl-exec does not answer 'version' - rebuild it with 'hzl build'"
+    elif [ "${xv}" = "${HEINZEL_VERSION}" ]; then
+      doc_ok "hzl-exec ${xv}"
+    else
+      doc_bad "bin/hzl-exec was built from ${xv}, this checkout is ${HEINZEL_VERSION} - run 'hzl build'"
+    fi
+  else
+    doc_bad "bin/hzl-exec is not built - run 'hzl build'"
+  fi
+
+  # Go builds that binary and is not needed to run it, so a machine with no Go
+  # and a current binary is complete. Saying so is the whole difference between
+  # a prerequisite and a build dependency, and reporting it as a fault would
+  # send an operator to install 600MB they do not need.
+  if have go; then
+    gv=$(go_version)
+    go_version_at_least "${gv}" "${HEINZEL_GO_MIN}"
+    case $? in
+      0) doc_ok "go ${gv} (only 'hzl build' uses it)" ;;
+      1) doc_warn "go ${gv} is older than ${HEINZEL_GO_MIN} - 'hzl build' will refuse it (brew upgrade go)" ;;
+      *) doc_warn "go present, version unreadable ($(go version 2>&1 | head -1)) - wanted ${HEINZEL_GO_MIN} or newer" ;;
+    esac
+  else
+    doc_warn "go not found - 'hzl build' cannot rebuild bin/hzl-exec (brew install go). Nothing else needs it"
+  fi
+
+  for c in caffeinate pmset launchctl lockf; do
     if have "${c}"; then doc_ok "${c}"; else doc_bad "${c} is missing"; fi
   done
   for role in planner executor reviewer; do
@@ -1823,11 +2009,12 @@ cmd_doctor() {
       printf '       searched: %s\n' "${PATH}"
     fi
   done
-  # Absence is expected on stock macOS and is not a problem: we ship our own.
+  # Absence is expected on stock macOS and is not a problem: the wall clock is
+  # bin/hzl-exec's, checked above.
   if have timeout || have gtimeout; then
-    doc_ok "coreutils timeout present (unused - hzl carries its own watchdog)"
+    doc_ok "coreutils timeout present (unused - hzl-exec carries its own wall clock)"
   else
-    doc_ok "no coreutils timeout, as expected - using the bundled watchdog"
+    doc_ok "no coreutils timeout, as expected - hzl-exec carries its own"
   fi
 
   printf '\n2. configuration\n'
@@ -2250,8 +2437,47 @@ EOF
   fi
 }
 
+# --- build -----------------------------------------------------------------
+#
+# The only thing that writes bin/hzl-exec, and deliberately a thing a person
+# runs. Nothing rebuilds it on the way past: an unattended run at 03:00 is the
+# last place to start discovering a compiler, and a run that quietly rebuilt
+# its own process control would be changing the thing it was about to trust.
+cmd_build() {
+  [ $# -eq 0 ] || die "build: unknown option $1"
+  have go ||
+    die "build: go is not installed. brew install go (Heinzel needs ${HEINZEL_GO_MIN} or newer)"
+
+  local gv
+  gv=$(go_version)
+  go_version_at_least "${gv}" "${HEINZEL_GO_MIN}"
+  case $? in
+    0) ;;
+    1) die "build: go ${gv} is older than ${HEINZEL_GO_MIN}. brew upgrade go" ;;
+    # Unreadable is not refused. A version string this build cannot parse is a
+    # gap here, not a fault in the toolchain, and the compiler is about to give
+    # its own opinion anyway.
+    *) warn "could not read the Go version ($(go version 2>&1 | head -1)); building anyway" ;;
+  esac
+
+  # The version is compiled in so that `hzl doctor` can tell a current binary
+  # from one left behind by an older checkout — the one failure the split
+  # between shell and binary introduced.
+  ( cd "${HEINZEL_ROOT}/go" &&
+    go build -o "${HZL_EXEC}" \
+      -ldflags "-X main.heinzelVersion=${HEINZEL_VERSION}" . ) ||
+    die "build: go build failed"
+
+  say "built ${HZL_EXEC} ($(hzl_exec_version))"
+}
+
 cmd_install() {
   require_not_root
+  # The schedule starts unattended runs. One that finds no bin/hzl-exec would
+  # refuse every engine launch and write a log nobody is awake to read, so the
+  # refusal happens here instead, while there is a person to read it.
+  hzl_exec_current ||
+    die "install: bin/hzl-exec is missing or was built from a different version - run 'hzl build' first"
   local quiet=0
   [ "${1:-}" = --quiet ] && quiet=1
   mkdir -p "${PLIST_DIR}" "${LOG_DIR}" || die "could not create ${PLIST_DIR}"
@@ -2326,7 +2552,7 @@ cmd_uninstall() {
 # are the runner's to allocate and never hand-written, and that still holds:
 # `backlog_assign_ids` is the runner's own allocator, called under the same
 # lock. What it buys is that the person who just added a task is told what it
-# is called, which is what they need to say `hzl take` or `hzl block` about it.
+# is called, which is what they need to say `hzl task take` or `hzl task block` about it.
 _add_locked() { # backlog priority text
   backlog_insert_at_priority "$1" "$2" "$3" || return 1
   backlog_assign_ids "$1" >/dev/null || return 1
@@ -2524,17 +2750,21 @@ dashboard_log_json() { # lines
     | map(capture("^(?<at>[^ ]+) +(?<class>[A-Za-z]+) +(?<message>.*)$"))'
 }
 
-cmd_dashboard() {
+# The dashboard as one JSON document: what `hzl web --json` prints and what
+# the served page fetches from /api/dashboard. It was `hzl dashboard`, a
+# command of its own, and the help text had to explain that it was the same
+# thing as `hzl web`; now it is `hzl web` with one flag.
+dashboard_json() { # [--days N]
   local days=3 b
   while [ $# -gt 0 ]; do
     case $1 in
       --json) ;;
       --days) days=${2:-}; shift ;;
-      *) die "dashboard: unknown option $1" ;;
+      *) die "web: unknown option $1" ;;
     esac
     shift
   done
-  case ${days} in ""|*[!0-9]*) die "dashboard: --days must be a positive integer" ;; esac
+  case ${days} in ""|*[!0-9]*) die "web: --days must be a positive integer" ;; esac
 
   b=$(cur_backlog)
   [ -n "${b}" ] || die "no backlog configured (DEFAULT_BACKLOG in etc/heinzel.conf)"
@@ -2634,33 +2864,37 @@ EOF
 # dependency on a machine that already has one, and `hzl doctor` reports it as
 # needed for `hzl web` and nothing else.
 cmd_web() {
-  require_not_root
-  local port=${HEINZEL_WEB_PORT} days=3 open=1
+  local port=${HEINZEL_WEB_PORT} days=3 open=1 json=0
   while [ $# -gt 0 ]; do
     case $1 in
       --port) port=${2:-}; shift ;;
       --days) days=${2:-}; shift ;;
       --no-open) open=0 ;;
+      --json) json=1 ;;
       *) die "web: unknown option $1" ;;
     esac
     shift
   done
+  case ${days} in ""|*[!0-9]*) die "web: --days must be a positive integer" ;; esac
+  # The document without the server: the same JSON the page is served, on
+  # stdout, for a script or a `| jq`. Nothing below this line is needed for it.
+  if [ "${json}" = 1 ]; then
+    dashboard_json --days "${days}"
+    return
+  fi
+  require_not_root
   case ${port} in ""|*[!0-9]*) die "web: --port must be a port number" ;; esac
   [ "${port}" -ge 1024 ] && [ "${port}" -le 65535 ] ||
     die "web: --port must be in 1024..65535 (a privileged port would need root, and this refuses to run as root)"
-  case ${days} in ""|*[!0-9]*) die "web: --days must be a positive integer" ;; esac
-
   have python3 || die "web: python3 not found. macOS ships one with the Command Line Tools: xcode-select --install"
   local ui="${HEINZEL_ROOT}/lib/web"
   [ -r "${ui}/server.py" ] || die "web: missing ${ui}/server.py"
-
   # The backlog has to exist before the page offers a form that writes to it,
   # or the first thing a person does is met with an error about a missing file.
   local b
   b=$(cur_backlog)
   [ -n "${b}" ] || die "no backlog configured (DEFAULT_BACKLOG in etc/heinzel.conf)"
   backlog_ensure "${b}" || die "could not create ${b}"
-
   local url="http://127.0.0.1:${port}/"
   printf '\n'
   good "serving the dashboard"
@@ -2669,13 +2903,11 @@ cmd_web() {
   field "writes" "the backlog, through 'hzl add', from the form on the page"
   field "stop it with" "ctrl-c"
   printf '\n'
-
   # Opened after the server is up rather than before, so the first request is
   # not the one that races the bind.
   if [ "${open}" = 1 ] && have open; then
     ( sleep 1; open "${url}" >/dev/null 2>&1 ) &
   fi
-
   # `exec`, so ctrl-c reaches python rather than this shell, and so there is
   # one process to stop rather than two.
   HZL_BIN="${HEINZEL_ROOT}/bin/hzl" \
@@ -2704,7 +2936,14 @@ cmd_web() {
 # schedule that has been edited but not installed is exactly the failure this
 # command exists to catch.
 cmd_schedule() {
-  [ $# -eq 0 ] || die "schedule: unknown option $1"
+  local json=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --json) json=1 ;;
+      *) die "schedule: unknown option $1" ;;
+    esac
+    shift
+  done
 
   hzl_eval_mode
   local live=0
@@ -2722,6 +2961,71 @@ cmd_schedule() {
   # went stale.
   throttle=$(generate_plist |
     awk '/<key>ThrottleInterval<\/key>/ { getline; gsub(/[^0-9]/, ""); print; exit }')
+
+  # Whether the installed plist is this configuration's.
+  local plist_state
+  if [ ! -f "${pl}" ]; then
+    plist_state=missing
+  elif generate_plist | diff -q - "${pl}" >/dev/null 2>&1; then
+    plist_state=matches
+  else
+    plist_state=differs
+  fi
+
+  # The four slots after the next one. Kept as epochs for --json and rendered
+  # for the text, so the two cannot disagree about what "then" means.
+  local more="" then_epochs="" e i=0
+  if [ -n "${next}" ]; then
+    e=${next}
+    while [ "${i}" -lt 4 ]; do
+      e=$(next_slot_epoch "${e}") || break
+      then_epochs="${then_epochs}${then_epochs:+ }${e}"
+      more="${more}${more:+, }$(short_at "${e}")"
+      i=$((i + 1))
+    done
+  fi
+
+  # The gates, asked in the runner's order, so that this is a reading of the
+  # same facts and not a second opinion about them. Each branch answers twice:
+  # the sentence a person reads, and the yes/no plus reason a script reads.
+  local verdict to will why
+  to=$(state_get .run_timeout_sec "${DEFAULT_RUN_TIMEOUT}")
+  if [ "${loaded}" != 1 ]; then
+    will=false; why="the launch agent is not loaded; run 'hzl install'"
+    verdict="$(bad no) - ${why}"
+  elif [ "${live}" != 1 ]; then
+    will=false; why="${HZ_REASON}; use 'hzl work' or 'hzl mobile'"
+    verdict="$(bad no) - ${why}"
+  elif [ -n "${next}" ] && [ "${expires}" -gt 0 ] && [ "${next}" -ge "${expires}" ]; then
+    will=false; why="the session expires $(short_at "${expires}"), before that slot"
+    verdict="$(bad no) - ${why}"
+  elif [ -n "${next}" ] && [ "${expires}" -gt 0 ] && [ $((expires - next)) -lt "${to}" ]; then
+    # Gate 5, not a rounding of it: the runner refuses to start a run it cannot
+    # finish, so a slot inside the session is still a slot that does nothing
+    # when less than one wall clock remains. This is the case a schedule read
+    # by eye gets wrong every time.
+    will=false; why="only $((expires - next))s of session left at that slot, and a run is given ${to}s"
+    verdict="$(bad no) - ${why}"
+  elif [ "$(state_get .tasks_done_total 0)" -ge "$(state_get .max_tasks_total 0)" ]; then
+    will=false; why="the session budget is spent ($(budget_line))"
+    verdict="$(bad no) - ${why}"
+  elif ! on_ac_power && ! session_allows_battery; then
+    will=false; why="not while on battery ($(battery_pct)) - scheduled runs skip; 'hzl run-now' does not"
+    verdict="$(bad "not while on battery") ($(battery_pct)) - scheduled runs skip; 'hzl run-now' does not"
+  elif ! on_ac_power; then
+    will=true; why="mobile mode permits battery use ($(battery_pct)), unless the backlog is empty or the machine is asleep"
+    verdict="$(good yes) - ${why}"
+  else
+    # Everything knowable now is open. What is left is knowable only then: an
+    # empty backlog, a sleeping machine, a run still holding the lease.
+    will=true; why="unless the backlog is empty or the machine is asleep"
+    verdict="$(good yes), ${why}"
+  fi
+
+  if [ "${json}" = 1 ]; then
+    schedule_json
+    return 0
+  fi
 
   printf '\nwhen\n'
   field "hours" "$(hours_display) (on the hour)"
@@ -2741,13 +3045,11 @@ cmd_schedule() {
     field "loaded" "$(bad no) - nothing will fire until 'hzl install'"
   fi
   field "plist" "${pl}"
-  if [ ! -f "${pl}" ]; then
-    field "matches this config" "$(bad "no plist installed") - run 'hzl install'"
-  elif generate_plist | diff -q - "${pl}" >/dev/null 2>&1; then
-    field "matches this config" "$(good yes)"
-  else
-    field "matches this config" "$(bad no) - the installed schedule is not this one; run 'hzl install'"
-  fi
+  case ${plist_state} in
+    missing) field "matches this config" "$(bad "no plist installed") - run 'hzl install'" ;;
+    matches) field "matches this config" "$(good yes)" ;;
+    differs) field "matches this config" "$(bad no) - the installed schedule is not this one; run 'hzl install'" ;;
+  esac
   field "runner" "${RUNNER}"
 
   printf '\nnext runs\n'
@@ -2755,43 +3057,9 @@ cmd_schedule() {
     field "next run" "$(short_at "${next}") ($(rel_dur $((next - now))))"
     # The four after it on one line: the left column is a label, and four
     # identical labels would say the same thing four times.
-    local more="" e=${next} i=0
-    while [ "${i}" -lt 4 ]; do
-      e=$(next_slot_epoch "${e}") || break
-      more="${more}${more:+, }$(short_at "${e}")"
-      i=$((i + 1))
-    done
     [ -n "${more}" ] && field "then" "${more}"
   else
     field "next run" "$(bad "no scheduled hour") - check HEINZEL_HOURS"
-  fi
-
-  # The gates, asked in the runner's order, so that this is a reading of the
-  # same facts and not a second opinion about them.
-  local verdict to
-  to=$(state_get .run_timeout_sec "${DEFAULT_RUN_TIMEOUT}")
-  if [ "${loaded}" != 1 ]; then
-    verdict="$(bad no) - the launch agent is not loaded; run 'hzl install'"
-  elif [ "${live}" != 1 ]; then
-    verdict="$(bad no) - ${HZ_REASON}; use 'hzl work' or 'hzl mobile'"
-  elif [ -n "${next}" ] && [ "${expires}" -gt 0 ] && [ "${next}" -ge "${expires}" ]; then
-    verdict="$(bad no) - the session expires $(short_at "${expires}"), before that slot"
-  elif [ -n "${next}" ] && [ "${expires}" -gt 0 ] && [ $((expires - next)) -lt "${to}" ]; then
-    # Gate 5, not a rounding of it: the runner refuses to start a run it cannot
-    # finish, so a slot inside the session is still a slot that does nothing
-    # when less than one wall clock remains. This is the case a schedule read
-    # by eye gets wrong every time.
-    verdict="$(bad no) - only $((expires - next))s of session left at that slot, and a run is given ${to}s"
-  elif [ "$(state_get .tasks_done_total 0)" -ge "$(state_get .max_tasks_total 0)" ]; then
-    verdict="$(bad no) - the session budget is spent ($(budget_line))"
-  elif ! on_ac_power && ! session_allows_battery; then
-    verdict="$(bad "not while on battery") ($(battery_pct)) - scheduled runs skip; 'hzl run-now' does not"
-  elif ! on_ac_power; then
-    verdict="$(good yes) - mobile mode permits battery use ($(battery_pct)), unless the backlog is empty or the machine is asleep"
-  else
-    # Everything knowable now is open. What is left is knowable only then: an
-    # empty backlog, a sleeping machine, a run still holding the lease.
-    verdict="$(good yes), unless the backlog is empty or the machine is asleep"
   fi
   field "will it run" "${verdict}"
 
@@ -2837,6 +3105,79 @@ cmd_schedule() {
   return 0
 }
 
+# One role's line of the engines block, as JSON. Reads the caller's variables
+# the way the text block does, so the two say the same thing about the same
+# configuration.
+schedule_role_json() { # role enabled engine [extra-key extra-value]
+  local role=$1 enabled=$2 engine=$3
+  jq -n -c --arg role "${role}" --argjson enabled "$([ "${enabled}" = 1 ] && echo true || echo false)" \
+    --arg engine "${engine}" \
+    --arg model "$(engine_role_model "${engine}" "${role}")" \
+    --arg effort "$(engine_role_effort "${engine}" "${role}")" \
+    '{enabled: $enabled, engine: $engine, model: $model, effort: $effort}'
+}
+
+# `hzl schedule --json`. Everything the text form prints, from the same
+# variables, which is why it is a function reading cmd_schedule's locals rather
+# than a second computation: a schedule that said one thing to a person and
+# another to a script would be worse than no --json at all.
+schedule_json() {
+  local sess wds
+  if [ "${live}" = 1 ]; then
+    wds=$(printf '%s\n' "$(cur_workdirs)" | jq -R -s -c 'split("\n") | map(select(length > 0))')
+    sess=$(jq -n -c \
+      --argjson expires_at "${expires}" \
+      --argjson tasks_done "$(state_get .tasks_done_total 0)" \
+      --argjson tasks_total "$(state_get .max_tasks_total 0)" \
+      --argjson tasks_per_run "$(state_get .max_tasks_per_run 0)" \
+      --argjson timeout_sec "$(state_get .run_timeout_sec 0)" \
+      --argjson workdirs "${wds}" --arg backlog "$(state_get .backlog "")" \
+      '{expires_at: $expires_at, expires_at_iso: ($expires_at | todate),
+        tasks_done: $tasks_done, tasks_total: $tasks_total,
+        tasks_per_run: $tasks_per_run, timeout_sec: $timeout_sec,
+        workdirs: $workdirs, backlog: $backlog}')
+  else
+    wds=$(printf '%s\n' "$(workdirs_list)" | jq -R -s -c 'split("\n") | map(select(length > 0))')
+    sess=$(jq -n -c \
+      --arg duration "${DEFAULT_DURATION}" \
+      --argjson tasks_total "${DEFAULT_MAX_TASKS_TOTAL}" \
+      --argjson tasks_per_run "${DEFAULT_MAX_TASKS}" \
+      --argjson timeout_sec "${DEFAULT_RUN_TIMEOUT}" \
+      --argjson workdirs "${wds}" --arg backlog "${DEFAULT_BACKLOG:-}" \
+      '{duration: $duration, tasks_total: $tasks_total,
+        tasks_per_run: $tasks_per_run, timeout_sec: $timeout_sec,
+        workdirs: $workdirs, backlog: (if $backlog == "" then null else $backlog end)}')
+  fi
+  jq -n \
+    --arg hours "$(hours_normalised)" --arg hours_display "$(hours_display)" \
+    --argjson min_gap_sec "${HEINZEL_MIN_RUN_GAP_SEC}" \
+    --argjson throttle_sec "${throttle:-null}" \
+    --arg label "${HEINZEL_LABEL}" \
+    --argjson loaded "$([ "${loaded}" = 1 ] && echo true || echo false)" \
+    --arg plist "${pl}" --arg plist_state "${plist_state}" --arg runner "${RUNNER}" \
+    --argjson next_run "${next:-null}" \
+    --argjson after "$(printf '%s\n' ${then_epochs} | jq -R -s -c 'split("\n") | map(select(length > 0) | tonumber)')" \
+    --argjson will_run "${will}" --arg reason "${why}" \
+    --argjson live "$([ "${live}" = 1 ] && echo true || echo false)" \
+    --argjson session "${sess}" \
+    --argjson planner "$(schedule_role_json planner "${HEINZEL_PLANNER}" "${HEINZEL_PLANNER_ENGINE}")" \
+    --argjson executor "$(schedule_role_json executor "${HEINZEL_EXECUTOR}" "${HEINZEL_EXECUTOR_ENGINE}")" \
+    --argjson reviewer "$(schedule_role_json reviewer "${HEINZEL_REVIEWER}" "${HEINZEL_REVIEWER_ENGINE}")" \
+    --arg on_revise "${HEINZEL_REVIEW_ON_REVISE}" \
+    '{schedule: {hours: $hours, display: $hours_display, min_gap_sec: $min_gap_sec,
+                 throttle_sec: $throttle_sec, run_at_load: false},
+      agent: {label: $label, loaded: $loaded, plist: $plist, plist_state: $plist_state,
+              runner: $runner},
+      next_run: $next_run,
+      next_run_iso: (if $next_run == null then null else ($next_run | todate) end),
+      then: $after,
+      will_run: $will_run, reason: $reason,
+      live: $live,
+      session: $session,
+      engines: {planner: $planner, executor: $executor,
+                reviewer: ($reviewer + {on_revise: $on_revise})}}'
+}
+
 # What is left of each account the configured roles draw on. The limits belong
 # to the account, not to a model, so they are grouped by engine; a model with a
 # limit of its own shows up as a line of its own, named the way the CLI names
@@ -2849,48 +3190,89 @@ budget_role_lines() { # -> "role engine" for each role that is switched on
 }
 
 cmd_budget() {
-  [ $# -eq 0 ] || die "budget: unknown option $1"
+  local json=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --json) json=1 ;;
+      *) die "budget: unknown option $1" ;;
+    esac
+    shift
+  done
 
-  local role engine engines users rc=0 label used at left line err
-  printf '\nroles\n'
-  while read -r role engine; do
-    field "${role}" "${engine} ($(engine_role_model "${engine}" "${role}"))"
-  done <<EOF
+  local role engine engines users rc=0 label used at left line err rows status reason
+  local roles_json engines_json='[]' entry limits
+  roles_json=$(budget_role_lines | while read -r role engine; do
+    jq -n -c --arg role "${role}" --arg engine "${engine}" \
+      --arg model "$(engine_role_model "${engine}" "${role}")" \
+      '{role: $role, engine: $engine, model: $model}'
+  done | jq -s -c '.')
+
+  if [ "${json}" = 0 ]; then
+    printf '\nroles\n'
+    while read -r role engine; do
+      field "${role}" "${engine} ($(engine_role_model "${engine}" "${role}"))"
+    done <<EOF
 $(budget_role_lines)
 EOF
+  fi
   engines=$(budget_role_lines | awk '!seen[$2]++ { print $2 }')
 
   err=$(mktemp "${TMPDIR:-/tmp}/hzl-budget.XXXXXX") || die "budget: no temporary file"
   for engine in ${engines}; do
     users=$(budget_role_lines | awk -v e="${engine}" '$2 == e { print $1 }' | paste -sd, - | sed 's/,/, /g')
-    printf '\n%s - used by %s\n' "${engine}" "${users}"
+    rows="" reason=""
     if ! have "${engine}"; then
-      field "limits" "$(bad "not checked") - ${engine} is not on PATH"
-      rc=1
+      status=missing; reason="${engine} is not on PATH"; rc=1
+    else
+      rows=$(engine_usage "${engine}" 2>"${err}")
+      case $? in
+        0) status=ok ;;
+        2) status=none ;;
+        *) status=unreadable; reason=$(oneline "$(head -n1 "${err}")"); rc=1 ;;
+      esac
+    fi
+    if [ "${json}" = 1 ]; then
+      limits=$(printf '%s\n' "${rows}" | jq -R -s -c '
+        split("\n") | map(select(length > 0)) | map(split("\t"))
+        | map({label: .[0],
+               used_percent: (.[1] | tonumber? // .[1]),
+               left_percent: (100 - (.[1] | tonumber? // 0)),
+               resets: (if (.[2] // "") == "" then null else .[2] end)})')
+      entry=$(jq -n -c --arg engine "${engine}" --arg status "${status}" \
+        --arg reason "${reason}" \
+        --argjson used_by "$(printf '%s' "${users}" | jq -R -c 'split(", ") | map(select(length > 0))')" \
+        --argjson limits "${limits}" \
+        '{engine: $engine, used_by: $used_by, status: $status,
+          reason: (if $reason == "" then null else $reason end), limits: $limits}')
+      engines_json=$(printf '%s' "${engines_json}" | jq -c --argjson e "${entry}" '. + [$e]')
       continue
     fi
-    local rows
-    rows=$(engine_usage "${engine}" 2>"${err}")
-    case $? in
-      0) ;;
-      2) field "limits" "$(dim "${engine} has no usage command to ask")"; continue ;;
-      *)
-        field "limits" "$(bad "could not be read") - $(oneline "$(head -n1 "${err}")")"
-        rc=1
-        continue
-        ;;
-    esac
-    while IFS='	' read -r label used at; do
-      left=$((100 - used))
-      line="${left}% left"
-      [ "${left}" -lt 20 ] && line=$(bad "${line}")
-      field "${label}" "${line}${at:+ - resets ${at}}"
-    done <<EOF
+    printf '\n%s - used by %s\n' "${engine}" "${users}"
+    case ${status} in
+      missing) field "limits" "$(bad "not checked") - ${reason}" ;;
+      none) field "limits" "$(dim "${engine} has no usage command to ask")" ;;
+      unreadable) field "limits" "$(bad "could not be read") - ${reason}" ;;
+      ok)
+        while IFS='	' read -r label used at; do
+          left=$((100 - used))
+          line="${left}% left"
+          [ "${left}" -lt 20 ] && line=$(bad "${line}")
+          field "${label}" "${line}${at:+ - resets ${at}}"
+        done <<EOF
 ${rows}
 EOF
+        ;;
+    esac
   done
   rm -f "${err}"
-  printf '\n'
+  if [ "${json}" = 1 ]; then
+    # The exit status is still the answer to "could every engine be read", so
+    # a cron that checks it keeps working; the document says per engine why.
+    jq -n --argjson roles "${roles_json}" --argjson engines "${engines_json}" \
+      '{roles: $roles, engines: $engines}'
+  else
+    printf '\n'
+  fi
   return ${rc}
 }
 
@@ -2898,32 +3280,76 @@ EOF
 
 usage() {
   cat <<USAGE
-hzl ${HEINZEL_VERSION} - unattended backlog work in one of three modes.
+hzl ${HEINZEL_VERSION} - unattended backlog work on one Mac.
 
-modes
-  hzl work [options]         start unattended work, and open the machine for
-                             remote access (see "machine settings" below).
-                             Options:
-                               --duration 10h     TTL, max 24h
-                               --max-total N      tasks for the whole session
-                               --max-tasks N      tasks per run
-                               --timeout N        wall clock per run, seconds
-                               --workdir NAME     one of the configured
-                                                  workspaces; repeatable.
-                                                  Default: all of them
-                               --backlog PATH
-                               --force            allow starting on battery
-                               --no-sudo          do not suppress sleep
-                               --no-kick          do not run one immediately
-                               --dry-run          say what would happen
-  hzl mobile [options]       start unattended work, and close the machine up
-                             for travel (see below). Accepts the work options
-                             above, plus:
-                               --yes              confirm battery use without
-                                                  an interactive prompt
-  hzl off [--unload]         stop work, restore sleep, and close the machine
-                             up for travel (see below). Exits non-zero if a
-                             run could not be confirmed stopped
+every day
+  hzl work [options]           start unattended work, and open the machine for
+                               remote access (machine settings, below)
+  hzl mobile [options]         the same, but close the machine up for travel
+                               and allow battery use. Adds --yes
+  hzl off [--unload]           stop work, restore sleep, and close the machine
+                               up. Exits non-zero if a run could not be
+                               confirmed stopped
+  hzl status [--json|--quiet]  what is actually true right now
+  hzl task list                everything blocked and waiting for you
+  hzl task take <id> [--steps] one of them, as a prompt to paste into an
+                               interactive session. --steps starts its
+                               instructions from a form first
+  hzl task done <id> [note]    close a task out by hand
+
+  options for work and mobile
+    --duration 10h     TTL, max 24h            --backlog PATH
+    --max-total N      tasks per session       --force     start on battery
+    --max-tasks N      tasks per run           --no-sudo   do not suppress sleep
+    --timeout N        wall clock per run, s   --no-kick   no run right away
+    --workdir NAME     one configured workspace; repeatable. Default: all
+    --dry-run          say what would happen
+
+backlog
+  hzl add [options] <text>     queue a task. --priority N (1..99, default 99),
+                               --dir NAME (a configured checkout),
+                               --roles LIST (a subset of planner,executor,reviewer)
+  hzl next [--json]            what a run would pick up next, with its notes
+  hzl todo [--json]            every todo task, in the order runs take them
+  hzl task <id> [--full|--logs|--json]
+                               where one task stands and what each run did
+                               with it. --full adds what they wrote; --logs is
+                               the whole log of every run that worked on it
+  hzl task block <id> <reason> park a task; a reason is required
+  hzl task unblock <id>        put it back in the queue
+  hzl task history [-n N] [--oneline] [--no-pager] [--json]
+                               every closed task, newest first - git log -p
+                               for the ledger. Paged on a terminal
+  hzl archive                  sweep closed and blocked tasks out of the
+                               backlog, and unblocked ones back in
+  hzl report [--days N] [--json|--quiet]
+                               the morning read: what is blocked, and what got
+                               done since N days ago (default 1)
+
+session
+  hzl resume                   clear a halt
+  hzl set [key N]              show or change max-total, max-tasks or timeout
+                               mid-session
+  hzl run-now [--dry-run]      run once now, ignoring the schedule window
+  hzl schedule [--json]        when the next run is, and every setting that
+                               decides whether it does anything
+  hzl budget [--json]          what is left of each engine account's limit
+
+setup
+  hzl install                  write the schedule and the agent's permission
+                               file, and load the schedule into launchd.
+                               'hzl work' and 'hzl mobile' do this for you;
+                               'hzl help install' says what it reads and writes
+  hzl uninstall                unload that job and delete its plist
+  hzl build                    compile bin/hzl-exec, which starts engines and
+                               reads what they wrote. Needs Go; running does not
+  hzl doctor                   check the whole setup
+  hzl logs [-f] [-n N]         the most recent run logs
+  hzl web [--port N] [--days N] [--no-open]
+                               serve the dashboard on 127.0.0.1 while you
+                               watch it; ctrl-c stops it. --json prints the
+                               same document instead of serving it
+  hzl version
 
 machine settings (what docs/ calls remote and travel posture)
   Only changed when HEINZEL_POSTURE=1. It is 0 unless you set it, and then
@@ -2936,69 +3362,32 @@ machine settings (what docs/ calls remote and travel posture)
   Both also adjust idle sleep, the screen lock delay and sudo rules; hzl status
   shows which one the machine is in.
 
-session controls
-  hzl resume                 clear a halt
-  hzl set [key N]            show or change limits mid-session
-  hzl run-now [--dry-run]    run once now, ignoring the schedule window
+exit codes
+  0 as usual and 1 on error. Two commands answer a yes/no question with 10,
+  and they are different questions: 'hzl status' exits 10 while a session is
+  running, 'hzl report' exits 10 while anything is blocked. 'hzl task <id>'
+  and its verbs exit 3 for an id nobody has.
+USAGE
+}
 
-backlog
-  hzl add [options] <text>   put a task in the queue. Options:
-                               --priority N       1..99, default 99
-                               --dir NAME         which checkout it is about
-                               --roles LIST       planner,executor,reviewer subset
-  hzl next                   what would be picked up next
-  hzl todo                   every todo task, in the order runs take them
-  hzl take [id]              list blocked tasks, or print one with its steps
-  hzl task <id> [--full]     where one task stands, and what each run that
-                             worked on it did and said. --full adds what they
-                             wrote; --json is what 'hzl web' reads
-  hzl history [options]      every closed task, newest first, with what each run
-                             did and wrote - git log -p for the ledger. Paged on
-                             a terminal. Options: -n N, --oneline, --no-pager
-  hzl done <id> [note]       close a task out by hand
-  hzl block <id> <reason>    park a task; a reason is required
-  hzl unblock <id>           put it back in the queue
-  hzl steps [id]             which blocked tasks have instructions for you, or
-                             start the instructions for one
-  hzl archive                sweep what is closed and what is blocked out of
-                             the backlog, and what is unblocked back into it
-  hzl report [options]       the morning read: what is blocked, what got done.
-                             Exits 10 if anything is blocked. Options:
-                               --days N     how far back to look, default 1
-                               --json       the same thing, machine-readable
-                               --quiet      say nothing; the exit code is the
-                                            whole answer
+# What `hzl install` reads and writes, at the length it needs, out of the
+# main help where it was the one entry three times longer than any other.
+usage_install() {
+  cat <<USAGE
+hzl install [--quiet]
 
-everything else
-  hzl status [--json|--quiet]  what is actually true right now
-  hzl schedule                 when the next run is, and every setting that
-                               decides whether it does anything
-  hzl budget                   how much of each account's usage limit is left,
-                               for the engines the configured roles use
-  hzl web [--port N]           serve the dashboard on 127.0.0.1 while you
-                               watch it. ctrl-c stops it
-  hzl dashboard [--days N]     the same thing as one JSON document
-  hzl doctor                   check the whole setup
-  hzl logs [-f] [-n N]         recent run logs
-  hzl logs <id>                the logs of every run that worked on one task
-  hzl install                  write the schedule and the agent's permission
-                               file from etc/heinzel.conf, and load the
-                               schedule into launchd ('hzl work' and 'hzl
-                               mobile' do this for you). Reads DEFAULT_WORKDIR,
-                               DEFAULT_BACKLOG, HEINZEL_HOURS and
-                               HEINZEL_SAFE_MODE; while a session is live, its
-                               own workdirs and backlog are used instead.
-                               Writes:
-                                 ~/Library/LaunchAgents/${HEINZEL_LABEL}.plist
-                                 etc/heinzel-settings.json
-                               Re-run it after changing any of those settings
-  hzl uninstall                unload that launchd job and delete its plist;
-                               no scheduled run starts until the next install.
-                               etc/heinzel-settings.json, the backlog and
-                               ~/.heinzel are left as they are
-  hzl version
+  Writes the schedule and the agent's permission file from etc/heinzel.conf,
+  and loads the schedule into launchd. 'hzl work' and 'hzl mobile' run this
+  for you; run it by hand after changing any of the settings it reads.
 
-exit codes: status is 0 when no session is running, 10 when one is, 1 on error.
+  reads    DEFAULT_WORKDIR, DEFAULT_BACKLOG, HEINZEL_HOURS, HEINZEL_SAFE_MODE
+           While a session is live, its own workdirs and backlog are used
+           instead of the defaults.
+  writes   ~/Library/LaunchAgents/${HEINZEL_LABEL}.plist
+           etc/heinzel-settings.json
+  refuses  when bin/hzl-exec is missing or was built from another version:
+           the schedule starts unattended runs, and one that cannot start an
+           engine would write a log nobody is awake to read. 'hzl build' first.
 USAGE
 }
 
@@ -3014,8 +3403,12 @@ case ${cmd} in
   status) cmd_status "$@" ;;
   schedule) cmd_schedule "$@" ;;
   budget) cmd_budget "$@" ;;
+  build) cmd_build "$@" ;;
   add) cmd_add "$@" ;;
-  dashboard) cmd_dashboard "$@" ;;
+  dashboard)
+    err "'hzl dashboard' was replaced by 'hzl web --json'."
+    exit 1
+    ;;
   web) cmd_web "$@" ;;
   work) cmd_work "$@" ;;
   mobile) cmd_mobile "$@" ;;
@@ -3037,12 +3430,34 @@ case ${cmd} in
   next) cmd_next "$@" ;;
   todo) cmd_todo "$@" ;;
   task) cmd_task "$@" ;;
-  history) cmd_history "$@" ;;
-  take) cmd_take "$@" ;;
-  done) cmd_done "$@" ;;
-  block) cmd_block "$@" ;;
-  unblock) cmd_unblock "$@" ;;
-  steps) cmd_steps "$@" ;;
+  history)
+    err "'hzl history' is now 'hzl task history'. / 'hzl history' は 'hzl task history' になりました。"
+    exit 1
+    ;;
+  # The verbs that moved under `hzl task`. Each refusal says where in both
+  # languages, because the old spelling is written into steps files the agent
+  # left for people who are not necessarily engineers, and those files are
+  # still on disk.
+  take)
+    err "'hzl take' is now 'hzl task take <id>'; the list is 'hzl task list'. / 'hzl take' は 'hzl task take <id>' になりました。一覧は 'hzl task list' です。"
+    exit 1
+    ;;
+  done)
+    err "'hzl done' is now 'hzl task done <id> [note]'. / 'hzl done' は 'hzl task done <id>' になりました。"
+    exit 1
+    ;;
+  block)
+    err "'hzl block' is now 'hzl task block <id> <reason>'. / 'hzl block' は 'hzl task block <id> <理由>' になりました。"
+    exit 1
+    ;;
+  unblock)
+    err "'hzl unblock' is now 'hzl task unblock <id>'. / 'hzl unblock' は 'hzl task unblock <id>' になりました。"
+    exit 1
+    ;;
+  steps)
+    err "'hzl steps' is now 'hzl task take <id> --steps'; the list is 'hzl task list'. / 'hzl steps' は 'hzl task take <id> --steps' になりました。一覧は 'hzl task list' です。"
+    exit 1
+    ;;
   archive) cmd_archive "$@" ;;
   report) cmd_report "$@" ;;
   run-now) cmd_runnow "$@" ;;
@@ -3051,7 +3466,12 @@ case ${cmd} in
   install) cmd_install "$@" ;;
   uninstall) cmd_uninstall "$@" ;;
   version|--version|-v) say "hzl ${HEINZEL_VERSION}" ;;
-  help|--help|-h) usage ;;
+  help|--help|-h)
+    case ${1:-} in
+      install) usage_install ;;
+      *) usage ;;
+    esac
+    ;;
   "") usage; exit 1 ;;
   *) err "unknown command: ${cmd}"; usage; exit 1 ;;
 esac

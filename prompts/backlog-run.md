@@ -83,7 +83,7 @@ One line is rarely the whole ask. Everything else goes in a file of its own:
 
 Write that file **before** you change the marker. The runner carries it out of
 here to `blocked/<id>.md` beside the backlog, where `hzl report` points at it
-and `hzl take <id>` reads it back. Do not put the steps on the task line, and do
+and `hzl task take <id>` reads it back. Do not put the steps on the task line, and do
 not go looking for the backlog to write them there.
 
 Write it for somebody who is not you:
@@ -110,8 +110,8 @@ Write it for somebody who is not you:
 
 ## When you are done
 
-Run `hzl unblock h-0007` to put the task back in the queue, or
-`hzl done h-0007 "<what changed>"` if you finished it yourself.
+Run `hzl task unblock h-0007` to put the task back in the queue, or
+`hzl task done h-0007 "<what changed>"` if you finished it yourself.
 ```
 
 Rules for the steps, and they are the point of the file:

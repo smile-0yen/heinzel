@@ -9,7 +9,7 @@ for what is normatively guaranteed see [SPEC.md](SPEC.md).
 hzl work --duration 10h     # remote posture + work; expires by itself
                             # ... go to bed ...
 hzl status                  # in the morning: what happened
-hzl take                    # what it could not finish, and why
+hzl task list                    # what it could not finish, and why
 hzl off                     # stop, restore sleep, and close remote access
 ```
 
@@ -186,9 +186,9 @@ Three things this is not:
 ```sh
 hzl task h-0049           # where it stands, and what each run did with it
 hzl task h-0049 --full    # plus the findings, and what each run wrote
-hzl logs h-0049           # the whole log of every run that worked on it
-hzl history               # every closed task, newest first - git log -p for the ledger
-hzl history --oneline     # the same, one line per task
+hzl task h-0049 --logs    # the whole log of every run that worked on it
+hzl task history          # every closed task, newest first - git log -p for the ledger
+hzl task history --oneline  # the same, one line per task
 ```
 
 The other reads are organised by run: `hzl report` is a morning, `hzl logs` is
@@ -252,14 +252,13 @@ managed for you:
 |---|---|
 | `hzl next` | What would be picked up next, and why. When nothing is free it lists what is in progress and which run holds it, rather than reading as an empty backlog |
 | `hzl todo` | Every task waiting to be picked up, in the order runs take them |
-| `hzl history` | Every closed task, newest first, with what each run did and wrote |
-| `hzl take` | Everything blocked, with priorities |
-| `hzl take <id>` | The task and its steps, as a prompt to paste into an interactive session |
-| `hzl done <id> "note"` | Close it out by hand |
-| `hzl block <id> "reason"` | Park it. The reason is required |
-| `hzl unblock <id>` | Put it back in the queue |
-| `hzl steps` | Which blocked tasks have instructions for you, and which do not |
-| `hzl steps <id>` | Start the instructions for one, from a form |
+| `hzl task history` | Every closed task, newest first, with what each run did and wrote |
+| `hzl task list` | Everything blocked, with priorities, and whether each has steps yet |
+| `hzl task take <id>` | The task and its steps, as a prompt to paste into an interactive session |
+| `hzl task done <id> "note"` | Close it out by hand |
+| `hzl task block <id> "reason"` | Park it. The reason is required |
+| `hzl task unblock <id>` | Put it back in the queue |
+| `hzl task take <id> --steps` | Start the instructions for one, from a form, then print the prompt |
 | `hzl archive` | Run the sweep by hand: closed and blocked out, unblocked back in |
 | `hzl report` | The morning read: what is blocked, what got done |
 
@@ -290,16 +289,16 @@ why it stopped, the steps in order with the commands written out in full, what
 you should see when each one works, and how to hand the task back.
 
 ```
-hzl report        every blocked task, its one-line ask, and where its steps are
-hzl take <id>     the task and the whole steps file, ready to paste into a session
-hzl steps         which of them have steps and which do not
-hzl steps <id>    start the steps for one, from a form, and fill it in yourself
+hzl report              every blocked task, its one-line ask, and where its steps are
+hzl task list                which of them have steps yet, and which do not
+hzl task take <id>           the task and the whole steps file, ready to paste into a session
+hzl task take <id> --steps   start the steps for one, from a form, and fill it in yourself
 ```
 
 Nothing points at the file from inside the ledger: the name follows from the
 id, so a task line and its instructions cannot drift apart. A task blocked
-before any of this — or parked by hand with `hzl block` — has a reason and no
-steps, and `hzl steps <id>` is how it gets some. Unblocking leaves the file
+before any of this — or parked by hand with `hzl task block` — has a reason and no
+steps, and `hzl task take <id> --steps` is how it gets some. Unblocking leaves the file
 where it is; it is what was asked of you, not a mistake.
 
 ### What the machine cannot pick up leaves the file
@@ -318,12 +317,12 @@ backlog.completed.md   the record:           [x]
 
 Same format, same ids, same priorities; the two derived names are fixed, not
 configured. The runner sweeps at the top of each run; `hzl archive` does it on
-demand, and `hzl block` / `hzl unblock` do it as part of the command so a task
+demand, and `hzl task block` / `hzl task unblock` do it as part of the command so a task
 never sits in the wrong file while you are looking at it.
 
 `backlog.md` is now exactly what happens next, and `backlog.blocked.md` is a
 file whose entire contents are addressed to you — which is a thing you can read
-on its own with `hzl report` or `hzl take`.
+on its own with `hzl report` or `hzl task list`.
 
 You do not have to think about this, with three exceptions:
 
@@ -331,7 +330,7 @@ You do not have to think about this, with three exceptions:
   archived `h-0007` is never handed out again. Do not renumber or delete ids in
   the other two files.
 - **The blocked file is live, and the way back is a marker.** Change a `[!]`
-  there to `[ ]` (or run `hzl unblock <id>`) and the task returns to the backlog
+  there to `[ ]` (or run `hzl task unblock <id>`) and the task returns to the backlog
   at its old priority on the next sweep. Moving the line by hand also works —
   the marker is what decides, not which file it is sitting in.
 - **Back them up together.** The archive is where the record of what was done
@@ -342,7 +341,7 @@ You do not have to think about this, with three exceptions:
 ```
 hzl report            what is blocked and what got done since yesterday
 hzl report --days 7   the week
-hzl take <id>         a prompt for the one you want to unblock
+hzl task take <id>         a prompt for the one you want to unblock
 ```
 
 `hzl report` exits **10** when something is blocked and **0** when nothing is,
@@ -410,7 +409,7 @@ python3 が無くても何も変わらない。
 
 ```sh
 hzl add --priority 1 --dir heinzel "hzl schedule の出力に色を付ける"
-hzl dashboard --days 7 | jq .        # 画面と同じものを JSON で
+hzl web --json --days 7 | jq .       # 画面と同じものを JSON で
 ```
 
 ## Several checkouts
@@ -433,7 +432,7 @@ component of the path — at the front of the line:
 
 The first line of `DEFAULT_WORKDIR` is the default: a task with no `(dir:)` is
 worked there. `hzl next` prints the workspace of the task it would pick, and
-`hzl take <id>` prints the `cd` for the checkout the task is about.
+`hzl task take <id>` prints the `cd` for the checkout the task is about.
 
 A run works in **one** checkout — whichever the highest-priority task names —
 and takes only that checkout's tasks. So a night moves through one tree at a
@@ -577,8 +576,8 @@ believed to be on and is not.
 
 It is all of them or none of them. If you want a run that may reach exactly one
 cluster and nothing else, safe mode is the wrong tool: leave it on, do that
-task with `hzl take <id>` in an interactive session, and close it with
-`hzl done`.
+task with `hzl task take <id>` in an interactive session, and close it with
+`hzl task done`.
 
 ## Common situations
 

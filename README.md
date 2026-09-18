@@ -19,7 +19,7 @@ hzl budget                # how much of each engine's usage limit is left
 hzl next                  # what it would pick up next, and in which checkout
 hzl todo                  # every task waiting to be picked up, in that order
 hzl task <id>             # where one task stands, and what each run did with it
-hzl history               # every closed task, newest first - git log -p for the ledger
+hzl task history          # every closed task, newest first - git log -p for the ledger
 hzl add "..."             # put a task in the queue
 hzl web                   # the same, in a browser, on 127.0.0.1 only
 hzl report                # the morning read: what is blocked, what got done
@@ -83,23 +83,28 @@ design is about bounding it.
 Eight steps, about five minutes, and **nothing runs unattended until step 8**. Every step says
 what you should see, so if you get something else you can stop there rather than carry on.
 
-### 1. Check the four things it needs
+### 1. Check the five things it needs
 
 - macOS (developed against 26.6 on Apple silicon)
 - `/bin/bash` 3.2 — the stock one; no newer bash required
 - one supported agent CLI, installed and signed in: [Claude Code](https://claude.com/claude-code)
   (the default), [Codex](https://developers.openai.com/codex/cli/) or
   [OpenCode](https://opencode.ai/docs/cli/)
-- `jq`
+- `jq` 1.6 or newer
+- Go 1.22 or newer, **to install only**. `install.sh` compiles `bin/hzl-exec`, which is what
+  starts an engine, holds it to its wall clock and reads back what it wrote. Nothing after
+  the build asks for a compiler again, and `hzl doctor` reports Go as a build dependency
+  rather than as a prerequisite
 
 ```sh
-sw_vers -productVersion && jq --version
+sw_vers -productVersion && jq --version && go version
 claude --version       # or: codex --version / opencode --version
 ```
 
-Three version numbers means you have them. `caffeinate`, `pmset`, `launchctl` and `lockf` are
+Four version numbers means you have them. `caffeinate`, `pmset`, `launchctl` and `lockf` are
 already on any Mac. There is no Homebrew dependency: notably, Heinzel does **not** require
-coreutils' `timeout`, which stock macOS does not ship — it carries its own watchdog. A second
+coreutils' `timeout`, which stock macOS does not ship — `bin/hzl-exec` carries that wall clock
+itself. A second
 agent CLI, as the reviewer, is optional and off by default.
 
 To use OpenCode, set these in `etc/heinzel.conf` and run `hzl doctor`:
@@ -220,7 +225,7 @@ hzl report
 
 What is blocked, with the one-line request each blocked task carries, and what got done. It
 exits `10` when something needs a decision, so it can drive a notification without being
-parsed. `hzl take <id>` prints a blocked task together with its instructions.
+parsed. `hzl task take <id>` prints a blocked task together with its instructions.
 
 Expect blocked tasks. A run that cannot verify its work, or that needs a judgement call, a
 credential, or anything irreversible, is *supposed* to stop and say why — that is the design
@@ -395,7 +400,7 @@ Four things, in four places:
   `push pending` rather than treated as failure.
 - **A request, if it stopped.** The agent writes `~/projects/alpha/.heinzel/blocked/<id>.md`, and
   the runner carries it to `blocked/<id>.md` beside your backlog, where `hzl report` points at it
-  and `hzl take` reads it back.
+  and `hzl task take <id>` reads it back.
 
 ### 5. The morning
 
@@ -414,19 +419,19 @@ hzl report --quiet || osascript -e 'display notification "heinzel needs you"'
 For one of them:
 
 ```sh
-hzl take h-0007
+hzl task take h-0007
 ```
 
 which prints the `cd` to the right checkout, the task, its notes and the whole of the steps file —
-written to be pasted into an interactive session. If the run left no instructions, `hzl steps
-h-0007` starts a form to fill in as you work, so the next person begins where you finished.
+written to be pasted into an interactive session. If the run left no instructions, `hzl task take
+h-0007 --steps` starts a form to fill in as you work, so the next person begins where you finished.
 
 Closing the loop, once you have done it or decided it:
 
 ```sh
-hzl done h-0007 "parsed --json in cmd_report; added a test"   # you finished it
-hzl unblock h-0007                                            # it can go back in the queue
-hzl block h-0009 "needs the staging credential"               # park one yourself
+hzl task done h-0007 "parsed --json in cmd_report; added a test"   # you finished it
+hzl task unblock h-0007                                            # it can go back in the queue
+hzl task block h-0009 "needs the staging credential"               # park one yourself
 hzl archive                                                   # sweep closed and blocked out of the backlog
 ```
 
